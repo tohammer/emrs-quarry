@@ -24,4 +24,4 @@ done
 exec "${EMACS:-emacs}" --batch --module-assertions \
     -L "$root/lisp" -L "$emrs_el" -L "$out" \
     -l "$root/tests/projdex-tests.el" \
-    -f ert-run-tests-batch-and-exit
+    --eval "(ert-run-tests-batch-and-exit (or (getenv \"ERT_SELECTOR\") t))"
