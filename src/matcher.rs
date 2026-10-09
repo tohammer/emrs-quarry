@@ -9,8 +9,6 @@
 //! works on graphemes (it keeps the first code point of each); for paths with multi-codepoint graphemes the
 //! grapheme indices are converted to the character index of the grapheme's first code point.
 
-#![allow(dead_code)]
-
 use crate::index::Index;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Utf32String};
@@ -103,6 +101,7 @@ impl Matcher {
     }
 
     /// A matcher that scores in parallel above `threshold` candidates (instead of [`PARALLEL_THRESHOLD`]).
+    #[cfg(test)]
     pub(crate) fn with_parallel_threshold(threshold: usize) -> Self {
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
         Self::with_parallelism(threshold, threads)

@@ -12,8 +12,6 @@
 //! updated. Slot numbers are therefore stable only while the set does not change, which [`Index::version`]
 //! tells.
 
-#![allow(dead_code)]
-
 use nucleo_matcher::{Utf32Str, Utf32String};
 use std::collections::HashMap;
 use std::collections::hash_map::{Entry as MapEntry, RandomState};
@@ -117,6 +115,7 @@ impl Index {
     }
 
     /// Removes `path`; returns false if it was absent.
+    #[allow(dead_code)] // used by the watcher (task 4)
     pub fn remove(&mut self, path: &str) -> bool {
         let hash = self.hash(path);
         let Some(slot) = self.find(hash, path) else {
@@ -130,6 +129,7 @@ impl Index {
 
     /// Removes every path below the directory `dir` (paths starting with `dir/`; `dirx/...` is not below `dir`).
     /// A trailing `/` on `dir` is ignored. Returns the number of paths removed. This scans the whole index.
+    #[allow(dead_code)] // used by the watcher (task 4)
     pub fn remove_dir(&mut self, dir: &str) -> usize {
         let dir = dir.trim_end_matches('/');
         let below = |path: &str| {
@@ -192,6 +192,7 @@ impl Index {
         }
     }
 
+    #[allow(dead_code)] // used by the watcher (task 4)
     pub fn contains(&self, path: &str) -> bool {
         self.find(self.hash(path), path).is_some()
     }
@@ -200,6 +201,7 @@ impl Index {
         self.entries.len()
     }
 
+    #[allow(dead_code)] // the companion of `len` (clippy::len_without_is_empty)
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

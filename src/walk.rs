@@ -19,13 +19,11 @@
 //! - File names that are not valid UTF-8 and walk errors (e.g. unreadable directories) are skipped and counted
 //!   in [`WalkStats::skipped`].
 
-#![allow(dead_code)]
-
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{WalkBuilder, WalkState};
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 /// Version control directories that are never walked.
@@ -60,6 +58,11 @@ fn build_extra(config: &WalkConfig) -> Result<Gitignore, String> {
         b.add_line(None, line).map_err(|e| format!("invalid ignore pattern {line:?}: {e}"))?;
     }
     b.build().map_err(|e| e.to_string())
+}
+
+/// Checks that the extra `ignores` of `config` are valid gitignore lines (the error [`walk`] would report).
+pub fn check_ignores(config: &WalkConfig) -> Result<(), String> {
+    build_extra(config).map(|_| ())
 }
 
 /// Root-relative, `/`-separated form of `path`; `None` if it is not below `root` or not valid UTF-8.
