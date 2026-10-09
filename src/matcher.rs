@@ -246,6 +246,12 @@ impl Matcher {
 /// `ⱥ`); `ƅ`/`Ƅ` behave the same. So a last atom with a non-ASCII character does not narrow when the appended
 /// text has one. (For ASCII needle characters normalization does not matter: checked by extending one-character
 /// atoms, over all Unicode scalar values and their folded and normalized forms, against the pinned nucleo.)
+///
+/// And one more: nucleo unescapes ASCII and non-ASCII needles differently (`\ ` becomes a space only in an ASCII
+/// needle, and a `\` before another character is doubled in a non-ASCII one). A last atom with a backslash that
+/// turns non-ASCII therefore changes its needle in the middle, and a substring, prefix or postfix atom can match
+/// more: `a\ b` does not match the path `a\ bé`, `a\ bé` does (substring style, or `'a\ b` in the fuzzy style).
+/// So a last atom with a backslash does not narrow when the appended text is non-ASCII.
 pub(crate) fn narrows(old: &str, new: &str) -> bool {
     let Some(appended) = new.strip_prefix(old) else {
         return false;
@@ -256,6 +262,9 @@ pub(crate) fn narrows(old: &str, new: &str) -> bool {
     let last = last_atom(old);
     let special = |s: &str| s.contains(['!', '$']);
     if special(last) || special(appended) {
+        return false;
+    }
+    if last.contains('\\') && !appended.is_ascii() {
         return false;
     }
     last.is_ascii() || appended.is_ascii()
@@ -291,27 +300,18 @@ pub(crate) fn parse(text: &str, style: Style) -> Pattern {
     }
 }
 
-/// One atom in [`Style::Substring`]: `'term` is parsed as a plain nucleo atom (fuzzy, or prefix etc. if marked),
-/// an atom nucleo parses as non-negated fuzzy becomes a substring atom with the same needle, any other is kept.
+/// One atom in [`Style::Substring`]: `'term` is `term` parsed as in the fuzzy style (so `'foo$` is a fuzzy
+/// suffix, `'!foo` a negated substring); an atom nucleo parses as non-negated fuzzy becomes a substring atom with
+/// the same needle; any other is kept.
 fn substring_atom(raw: &str) -> Atom {
     if let Some(rest) = raw.strip_prefix('\'') {
         return Atom::parse(rest, CaseMatching::Smart, Normalization::Smart);
     }
-    let atom = Atom::parse(raw, CaseMatching::Smart, Normalization::Smart);
-    if atom.kind != AtomKind::Fuzzy || atom.negative {
-        return atom;
+    let mut atom = Atom::parse(raw, CaseMatching::Smart, Normalization::Smart);
+    if atom.kind == AtomKind::Fuzzy && !atom.negative {
+        atom.kind = AtomKind::Substring;
     }
-    // The needle as `Atom::parse` derives it for a fuzzy atom: an escaped leading `!`, `^` or `'` loses its
-    // backslash, and an escaped trailing `$` stays as `$`. `\ ` is handled by `Atom::new`.
-    let needle = match raw.as_bytes() {
-        [b'\\', b'!' | b'^' | b'\'', ..] => &raw[1..],
-        _ => raw,
-    };
-    let needle = match needle.strip_suffix("\\$") {
-        Some(stem) => format!("{stem}$"),
-        None => needle.to_owned(),
-    };
-    Atom::new(&needle, CaseMatching::Smart, Normalization::Smart, AtomKind::Substring, true)
+    atom
 }
 
 /// Scores candidates `range` with one nucleo matcher and keeps the best `limit`.
@@ -654,6 +654,9 @@ mod tests {
         assert_eq!(sub("\\'q"), ["'q"]);
         assert_eq!(sub("d\\$"), ["end$"]);
         assert_eq!(sub("my\\ f"), ["dir/my file"]);
+        // Non-ASCII needles keep nucleo's own unescaping: `é\\$` is the needle `é\$`.
+        let index = index_of(&["é\\$", "é\\\\$x"]);
+        assert_eq!(styled(&index, "é\\\\$", Style::Substring), ["é\\$"]);
         assert_eq!(sub("myf"), Vec::<String>::new());
         // Empty terms are dropped: everything matches.
         assert_eq!(sub("' "), fuzzy(""));
@@ -719,6 +722,10 @@ mod tests {
             ("^aB", "^aBc", true),
             ("A", "AB", true),
             ("'A", "'AB", true),
+            ("a\\ b", "a\\ bé", false), // backslash in an atom that turns non-ASCII
+            ("a\\b", "a\\bé", false),
+            ("a\\b", "a\\bc", true),
+            ("a\\b x", "a\\b xé", true), // the backslash is in an earlier atom
         ] {
             assert_eq!(narrows(old, new), expected, "{old:?} -> {new:?}");
         }
@@ -912,7 +919,7 @@ mod tests {
     #[test]
     fn parallel_and_narrowing_equal_full_scoring() {
         let mut index = generated_index(4000);
-        for p in ["tab\there/x.rs", "ほげ ふが/x.rs", "cr\r\nlf/x.rs", "Foo"] {
+        for p in ["tab\there/x.rs", "ほげ ふが/x.rs", "cr\r\nlf/x.rs", "Foo", "a\\ bé", "a\\\\bé", "x\\ yé/z"] {
             index.add(p);
         }
         let mut sequences: Vec<Vec<Step>> = [
@@ -954,6 +961,10 @@ mod tests {
             "!ほげ\u{3000}x",
             "cr\r\nl",
             "ƅ ⱥé",
+            "a\\ bé",
+            "a\\bé",
+            "'a\\ bé",
+            "x\\ yé",
         ]
         .iter()
         .map(|t| typing(t))

@@ -17,20 +17,21 @@ has no such mode; `Pattern::new` with a fixed kind drops the `^`, `$`,
 An option `projdex-match-style` (`fuzzy`, the default, or `substring`),
 sent per query as `:substring`. In the substring style projdex splits
 atoms the way nucleo does and parses each one with `Atom::parse`; an atom
-that comes out non-negated fuzzy is rebuilt as a substring atom with the
-same needle. A leading `'` marks a fuzzy term instead, as in fzf's
-`--exact` mode, so the syntax table stays the same with the meaning of
-`'` swapped.
+that comes out non-negated fuzzy gets the kind substring (the public
+`kind` field; needle, case and normalization stay as parsed). A leading
+`'` instead means "the rest of the term parsed as in the fuzzy style", so
+`'foo` is fuzzy, `'foo$` a fuzzy suffix and `'!foo` a negated substring.
+This is similar to fzf's `--exact` mode, but not the same in the corner
+cases (in fzf, `'!foo` is fuzzy).
 
 ## Consequences
 
 - `^`, `$`, `!` and escapes work identically in both styles; only plain
   and `'`-terms differ.
 - Narrowing stays valid: a growing substring term matches less, and a
-  term's kind is fixed by its first characters. The narrowing cache is
+  term's kind is fixed by its first characters. One exception, found in
+  review: nucleo unescapes non-ASCII needles differently, so a term with a
+  backslash that turns non-ASCII does not narrow (`matcher::narrows`). The narrowing cache is
   keyed by style, and the equivalence test runs in both styles.
 - The style is a query parameter, not a start argument: changing the
   option needs no restart.
-- The needle rebuilding mirrors nucleo's parsing of escapes; a nucleo
-  update that changes `Atom::parse` must be checked against
-  `substring_atom` (the matcher tests cover the escapes).

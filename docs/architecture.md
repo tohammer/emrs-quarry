@@ -115,8 +115,9 @@ The matcher remembers the last query, the index version and the full set of
 matching paths, and the style. The next query of the same style scores only
 that set when the index is unchanged and the new text extends the old text
 in a way that cannot match more (`matcher::narrows`: no `!` or `$`
-involved, the old text does not end in `\` or `$`, and not both the last
-atom and the appended text are non-ASCII). Otherwise it scores the whole
+involved, the old text does not end in `\` or `$`, not both the last
+atom and the appended text are non-ASCII, and not a backslash in the last
+atom with non-ASCII appended text). Otherwise it scores the whole
 index. When more than 10,000 paths are scored, the set is split into one
 chunk per core, each chunk is scored on a scoped thread with its own
 matcher, and the per-chunk top results are merged. Both optimisations
@@ -195,6 +196,13 @@ on timeout or error.
   user's global git excludes, also outside git repositories, so the number
   of indexed files can be lower than the number of files on disk, for
   example in a generated benchmark tree.
+- **nucleo unescapes ASCII and non-ASCII needles differently.** `\ ` is a
+  space only in an ASCII needle, and a backslash before another character
+  is doubled in a non-ASCII one. A term with a backslash that turns
+  non-ASCII changes its needle in the middle, which broke narrowing for
+  substring terms; `matcher::narrows` excludes that case. The substring
+  style reuses `Atom::parse` and only switches the kind, so it inherits
+  nucleo's unescaping instead of rebuilding needles.
 - **A category override does not replace `completion-styles`.** Emacs
   appends the user's styles behind the override's, and tries them when the
   first returns nothing. orderless then asked the table for the empty

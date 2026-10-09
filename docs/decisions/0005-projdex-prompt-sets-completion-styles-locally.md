@@ -17,7 +17,8 @@ every file was listed. Reported by the user in vertico.
 
 `projdex-find-file` keeps the override and additionally sets
 `completion-styles` to `(projdex)` with `setq-local` in its minibuffer
-(`minibuffer-with-setup-hook`). The table still answers any string it is
+(`minibuffer-with-setup-hook` with `:append`, so it runs after UIs that
+set styles in their own setup hook, such as fido-mode's `flex`). The table still answers any string it is
 given; it does not try to emulate `completion-regexp-list`.
 
 ## Consequences
@@ -26,7 +27,10 @@ given; it does not try to emulate `completion-regexp-list`.
   match shows no candidates.
 - The setting is local to the prompt's minibuffer buffer, so recursive and
   later minibuffers keep the user's styles, as before.
+- The local value also applies to completion-at-point inside that
+  minibuffer (corfu or cape enabled in minibuffers): its tables see only
+  the `projdex` style. Accepted as an edge case.
 - Other callers of `projdex--table` (a future consult source) must
   restrict the styles the same way. The regression test
   `projdex-test-ui-no-match-shows-nothing` uses a style that behaves like
-  orderless.
+  orderless; `projdex-test-ui-fido-keeps-projdex-style` covers fido-mode.

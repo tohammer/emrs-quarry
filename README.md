@@ -116,7 +116,9 @@ the project root:
 So by default `act man` also matches `a/c/t/m/a/n`-like paths, ranked
 below contiguous matches, and `'act 'man` only paths containing `act`
 and `man`. With `(setq projdex-match-style 'substring)` the two swap,
-like fzf's `--exact` mode (`docs/decisions/0004`).
+similar to fzf's `--exact` mode: `'` then means "the rest of this term in
+the fuzzy style's syntax", so `'foo$` is a fuzzy suffix and `'!foo`
+excludes `foo` (`docs/decisions/0004`).
 
 Case is smart: all lower case matches any case, an upper-case letter
 matches that case only. Results are ordered by score, then shorter path,

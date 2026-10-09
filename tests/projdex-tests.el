@@ -470,6 +470,24 @@ Without FACE, any face of `projdex-match-faces'."
       ;; Other prompts keep the user's styles.
       (should (equal completion-styles '(projdex-test-greedy))))))
 
+(ert-deftest projdex-test-ui-fido-keeps-projdex-style ()
+  "fido-mode's setup does not replace the projdex style."
+  (projdex-test--with-index dir
+    (let ((seen nil)
+          (fido fido-mode)
+          (minibuffer-setup-hook minibuffer-setup-hook))
+      (unwind-protect
+          (progn
+            (fido-mode 1)
+            ;; fido skips its setup while a keyboard macro runs.
+            (cl-letf (((symbol-function 'icomplete-simple-completing-p) (lambda () t)))
+              (add-hook 'minibuffer-setup-hook
+                        (lambda () (push completion-styles seen))
+                        95)
+              (projdex-test--find-file-with-keys dir "src/main.rs RET")))
+        (fido-mode (if fido 1 -1)))
+      (should (equal (car seen) '(projdex))))))
+
 (ert-deftest projdex-test-ui-multiple-matches-keep-input ()
   (projdex-test--with-index dir
     (let ((table (projdex--table dir)))

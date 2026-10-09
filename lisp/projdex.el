@@ -441,14 +441,17 @@ with INCLUDE-ALL."
               (cons '(project-file (styles projdex)) completion-category-overrides))
              (table (projdex--table root))
              (path (minibuffer-with-setup-hook
-                       (lambda ()
+                       ;; Appended, so it runs after UIs that set styles in
+                       ;; their own setup hook (fido-mode sets `flex').
+                       (:append
+                        (lambda ()
                          ;; The override only puts `projdex' first: Emacs
                          ;; appends `completion-styles', which would run
                          ;; when projdex finds nothing and, since the table
                          ;; ignores `completion-regexp-list', list every
                          ;; file.  Buffer-local, so other minibuffers keep
                          ;; the user's styles.
-                         (setq-local completion-styles '(projdex)))
+                         (setq-local completion-styles '(projdex))))
                      (completing-read (format "Find file in %s: " (project-name project))
                                       table nil 'confirm nil
                                       'projdex-file-history)))
