@@ -12,19 +12,121 @@ Status: version 1. It was built and tested on Linux only, with Emacs 31.1
 (the ERT suite and `cargo test` pass there) and, for the benchmark, Emacs
 31.0.50. It has not been run with Emacs 30. macOS and Windows are untested;
 the watcher code for them is type-checked but never ran against the real
-backends (`docs/backlog.md`). There is no CI.
+backends (`docs/backlog.md`). There is no CI. It installs from GitHub with
+package recipes and a local cargo build; only the Doom recipe is checked by
+hand, the straight, elpaca and package-vc variants are untested. There are
+no prebuilt binaries.
 
 ## Requirements
 
 - Emacs 30.1 or later, built with module support.
-- Rust 1.88 or later.
+- Rust 1.88 or later, with `cargo` on `PATH` (or set
+  `projdex-build-cargo-program`), to build the module.
+- Network access for cargo's first dependency fetch.
+- Git credentials for the repositories `tohammer/emrs-projdex` and
+  `tohammer/emrs`, which are private; the recipes use the default protocol.
 - Linux for anything you want to rely on (see Status).
 
 ## Installation
 
-There is no package recipe or prebuilt binary yet; install by hand.
+projdex needs two packages: `emrs` (the Elisp side of the runtime) and
+`projdex`, whose repository also holds the Rust source. The module is built
+on your machine with cargo and installed as `lisp/projdex-module` plus
+`module-file-suffix` inside projdex's repository, where projdex finds it
+(`docs/decisions/0006`). `emrs` follows the default branch of its
+repository and is not pinned (`docs/decisions/0007`).
 
-1. Build the module:
+### Doom Emacs
+
+In `packages.el`:
+
+```elisp
+(package! emrs
+  :recipe (:host github :repo "tohammer/emrs" :files ("elisp/emrs.el")))
+(package! projdex
+  :recipe (:host github :repo "tohammer/emrs-projdex" :files ("lisp/*.el")
+           :pre-build ((load (expand-file-name "lisp/projdex-build.el") nil t)
+                       (projdex-build-module-sync))))
+```
+
+In `config.el`:
+
+```elisp
+(use-package! projdex
+  :hook (doom-first-input . projdex-mode))
+```
+
+`doom sync` clones both repositories, and the `:pre-build` form runs
+`cargo build --release` in projdex's checkout. straight runs it whenever it
+rebuilds the package, so `doom sync -u` rebuilds the module when projdex
+changed. A rebuilt module is used after restarting Emacs; emrs warns when
+the module file it loaded has changed.
+
+`projdex-build-module-sync` never signals. Without a Rust toolchain, or if
+the build fails, `doom sync` still completes with a warning and the output
+in the buffer `*projdex-build*`. The first projdex command then asks
+"projdex module not built. Build it now with cargo?"; you can also run
+`M-x projdex-build-module` at any time.
+
+### straight.el without Doom
+
+Use the same two recipes with `straight-use-package`, then enable the mode:
+
+```elisp
+(straight-use-package
+ '(emrs :host github :repo "tohammer/emrs" :files ("elisp/emrs.el")))
+(straight-use-package
+ '(projdex :host github :repo "tohammer/emrs-projdex" :files ("lisp/*.el")
+           :pre-build ((load (expand-file-name "lisp/projdex-build.el") nil t)
+                       (projdex-build-module-sync))))
+(projdex-mode 1)
+```
+
+Untested.
+
+### elpaca
+
+Use the recipes with `:host`, `:repo` and `:files` only, with no
+`:pre-build`. Run `M-x projdex-build-module` once after installing and after
+each update, then restart Emacs. Untested.
+
+```elisp
+(elpaca (emrs :host github :repo "tohammer/emrs" :files ("elisp/emrs.el")))
+(elpaca (projdex :host github :repo "tohammer/emrs-projdex" :files ("lisp/*.el")))
+```
+
+### package-vc
+
+```elisp
+(package-vc-install '(emrs :url "https://github.com/tohammer/emrs"
+                           :lisp-dir "elisp"))
+(package-vc-install '(projdex :url "https://github.com/tohammer/emrs-projdex"
+                              :lisp-dir "lisp"))
+```
+
+Then run `M-x projdex-build-module` and restart Emacs; repeat the command
+after updates. Untested.
+
+For elpaca and package-vc, enable the mode with `(projdex-mode 1)` or a
+`use-package` form with `:config (projdex-mode 1)`.
+
+### Where projdex looks for the module
+
+First `lisp/projdex-module` plus `module-file-suffix` in the repository that
+holds the real `projdex.el` (symlinks are resolved), then `projdex-module`
+on `load-path`. If neither exists, the first command offers to build (see
+Doom Emacs above) or, in batch mode or without a repository, signals an
+error that names `M-x projdex-build-module` and the manual installation.
+If cargo is not on `PATH`, set `projdex-build-cargo-program`.
+
+### Manual installation
+
+This also works as a fallback, for example without a package manager or
+with a copy of `projdex.el` that is not inside its repository.
+
+1. Build the module. When `projdex.el` is loaded from the checkout,
+   `M-x projdex-build-module` does this and installs the module in
+   `lisp/`; skip step 2. Otherwise:
 
    ```sh
    cargo build --release
@@ -38,12 +140,14 @@ There is no package recipe or prebuilt binary yet; install by hand.
    cp target/release/libprojdex.dylib ~/.emacs.d/projdex/projdex-module.dylib # macOS
    ```
 
-3. Put `lisp/projdex.el` and `emrs.el` on `load-path`. `emrs.el` is
-   `elisp/emrs.el` of the [emrs repository](https://github.com/tohammer/emrs)
-   at the commit pinned in `Cargo.toml` (`rev = ...` of the `emrs`
-   dependency); use that exact commit so the Lisp and Rust halves match.
-   Either clone emrs and check out the commit, or take it from the checkout
-   Cargo made, as `tests/run-ert.sh` does:
+3. Put `lisp/projdex.el`, `lisp/projdex-build.el` and `emrs.el` on
+   `load-path`. `emrs.el` is `elisp/emrs.el` of the
+   [emrs repository](https://github.com/tohammer/emrs). The Lisp and Rust
+   halves must match: use the commit pinned in `Cargo.toml` (`rev = ...` of
+   the `emrs` dependency), or any newer emrs; an `emrs.el` that is too old
+   for the module fails with a protocol error. Either clone emrs and check
+   out the commit, or take it from the checkout Cargo made, as
+   `tests/run-ert.sh` does:
 
    ```sh
    cargo metadata --format-version 1 |
@@ -243,7 +347,50 @@ about 800 MB and 1.2 million inodes for 1m, more with the git repository for
 the baseline, and go to `target/bench-trees` or `$PROJDEX_BENCH_DIR`. The
 script exits non-zero if projdex's p99 exceeds 50 ms (100k) or 150 ms (1m).
 
-## Tests
+## Development
+
+Work in a checkout, for example `~/src/emacs-projdex`. With Doom, keep the
+user recipe and add the checkout when it exists (`my/projdex-dev` is any
+variable name you like):
+
+```elisp
+(defvar my/projdex-dev (file-directory-p "~/src/emacs-projdex"))
+(package! projdex
+  :recipe `(:host github :repo "tohammer/emrs-projdex" :files ("lisp/*.el")
+            :pre-build ((load (expand-file-name "lisp/projdex-build.el") nil t)
+                        (projdex-build-module-sync))
+            ,@(when my/projdex-dev
+                '(:local-repo "~/src/emacs-projdex" :build (:not compile)))))
+```
+
+With an absolute `:local-repo`, straight uses the checkout as the repository
+and never clones or pulls it. `:build (:not compile)` leaves no `.elc` that
+would shadow edits. With the switch on, any change in the checkout makes
+`doom sync` rebuild the package and so run cargo; that is incremental and
+does nothing when no Rust changed.
+
+| Change | Do | Takes effect |
+|---|---|---|
+| Elisp in `lisp/` | `eval-buffer`, or restart | at once, no `doom sync` |
+| Rust in `src/` | `M-x projdex-build-module` | after restarting Emacs |
+| New file in `lisp/` | `doom sync` once | the build directory gets the symlink |
+| emrs too | the same pattern for the emrs recipe (`:local-repo` and `:build (:not compile)`, file `elisp/emrs.el`), and a patch in an uncommitted `.cargo/config.toml` (below) | as above |
+
+To build against a local emrs checkout, put this in `.cargo/config.toml`
+and do not commit it:
+
+```toml
+[patch."https://github.com/tohammer/emrs.git"]
+emrs = { path = "../emrs/emrs" }
+```
+
+`Cargo.toml` must pin only emrs commits that are on emrs's default branch,
+because the recipe for `emrs` follows that branch (`docs/decisions/0007`).
+
+`tests/run-ert.sh` tests copies of the Lisp files in `target/elisp` with the
+debug module, so a module built in `lisp/` does not affect the tests.
+
+### Tests
 
 ```sh
 cargo test              # Rust unit and service tests

@@ -221,7 +221,7 @@ only), macOS and Windows.
   whole suite pass with `tests/run-ert.sh`, and `M-x projdex-build-module`
   in the checkout produces `lisp/projdex-module.so` that a fresh Emacs
   loads.
-- [ ] 2. Documentation. README: Requirements (Rust toolchain, git
+- [x] 2. Documentation. README: Requirements (Rust toolchain, git
   credentials), Installation with the Doom recipe first, then straight,
   elpaca, package-vc, and the manual installation as fallback; a
   Development section with the dev-mode recipe and table; Status line.

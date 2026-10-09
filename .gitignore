@@ -1,3 +1,4 @@
 /target
 *.elc
 lisp/projdex-module.*
+/.cargo/config.toml
