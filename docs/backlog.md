@@ -19,9 +19,38 @@ when quota allows; then mirror emrs's matrix (Linux, macOS, Emacs 30.1 and
 ## Distribution
 
 No package recipe, no prebuilt binaries, and the module and `emrs.el` are
-installed by hand (README, "Building"). Depends on emrs's own distribution
-work (emrs backlog, "Prebuilt artifacts and distribution"). Revisit before
-announcing projdex to users.
+installed by hand (README, "Installation"). Depends on emrs's own
+distribution work (emrs backlog, "Prebuilt artifacts and distribution").
+Revisit before announcing projdex to users.
+
+## Install from GitHub with one `package!` declaration
+
+Goal: a Doom user (or straight/elpaca user) installs projdex with a
+recipe pointing at the GitHub repo, without a local checkout:
+
+```elisp
+(package! projdex
+  :recipe (:host github :repo "tohammer/emacs-projdex" :files ("lisp/*.el")))
+```
+
+Today this does not work: the Rust module must be built and placed on
+`load-path` as `projdex-module.so`, and `emrs.el` comes from a separate
+local checkout (the developer's config uses `:local-repo` for both, plus a
+`target/emacs` symlink to the module). Needed:
+
+- Getting the module: either build it during the package build (straight
+  `:pre-build` running `cargo build --release` and copying the library into
+  the build directory as `projdex-module` plus `module-file-suffix`), or a
+  command such as `projdex-install-module` that builds it, or downloads a
+  prebuilt release binary on first use (see Distribution).
+- `emrs.el` must come with it at the commit `Cargo.toml` pins: its own
+  recipe (`:repo "tohammer/emrs" :files ("elisp/emrs.el")`) with a matching
+  pin, or a copy shipped in this repo.
+- README: document the recipe for Doom, straight and elpaca.
+
+Origin: the user's request when setting projdex up in their Doom config
+(2026-10-09). Revisit together with Distribution, before announcing
+projdex.
 
 ## nucleo-matcher back to a crates.io release
 
