@@ -105,15 +105,23 @@ the project root:
 | Syntax | Meaning |
 |---|---|
 | `foo bar` | Space-separated terms, all must match, in any order |
+| `foo` | Fuzzy: `f`, `o`, `o` in this order, gaps allowed (with `projdex-match-style` `substring`: the substring `foo`) |
+| `'foo` | The substring `foo` (with `projdex-match-style` `substring`: fuzzy) |
 | `^foo` | Prefix |
 | `foo$` | Suffix |
-| `!foo` | Does not match |
-| `'foo` | Exact (substring) match instead of fuzzy |
+| `!foo` | Does not contain `foo` |
 | `foo\ bar` | A literal space in a term |
+| `\!foo`, `\^foo`, `\'foo`, `foo\$` | A literal `!`, `^`, `'` or `$` |
+
+So by default `act man` also matches `a/c/t/m/a/n`-like paths, ranked
+below contiguous matches, and `'act 'man` only paths containing `act`
+and `man`. With `(setq projdex-match-style 'substring)` the two swap,
+like fzf's `--exact` mode (`docs/decisions/0004`).
 
 Case is smart: all lower case matches any case, an upper-case letter
 matches that case only. Results are ordered by score, then shorter path,
-then alphabetically; matched characters are highlighted.
+then alphabetically. Matched characters are highlighted, each term in its
+own colour (faces `projdex-match-0` to `projdex-match-3`, used in turn).
 
 projdex ranks in Rust and passes the result through a completion style also
 called `projdex`, bound only for the duration of its own prompt. Your
@@ -138,6 +146,8 @@ run `projdex-stop` to restart a project's instance.
 | `projdex-ignores` | `nil` | Extra gitignore-syntax patterns, relative to the project root. They add to the ignore files; a `!` pattern here cannot re-include a file a `.gitignore` hides. |
 | `projdex-limit` | `200` | Number of candidates returned per query (the service clamps it to 1..10000). |
 | `projdex-highlight` | `t` | Highlight matched characters in candidates. |
+| `projdex-match-style` | `fuzzy` | How plain terms match: `fuzzy` or `substring` (see Query syntax). Applies to the next query, no restart needed. |
+| `projdex-match-faces` | `(projdex-match-0 projdex-match-1 projdex-match-2 projdex-match-3)` | Faces for matched characters, one per term in turn. `(completions-common-part)` highlights all terms alike. |
 | `projdex-query-timeout` | `10.0` | Seconds before a query gives up. A safety net against a stuck instance, not a latency budget. |
 | `projdex-provide-project-files` | `nil` | With `projdex-mode`, serve `project-files` from the index. |
 | `projdex-files-timeout` | `10.0` | Seconds `project-files` waits for the index before falling back. |

@@ -45,11 +45,15 @@
           (should (equal (emrs-call-sync
                           inst '(:query :text "main" :limit 10 :positions t) 10)
                          '(:paths ("src/main.rs") :positions ((4 5 6 7))
-                           :total 1 :indexing nil)))
-          ;; :limit and :positions are optional.
+                           :groups ((0 0 0 0)) :total 1 :indexing nil)))
+          ;; :limit, :positions and :substring are optional.
           (should (equal (emrs-call-sync inst '(:query :text "rs") 10)
                          '(:paths ("src/lib.rs" "src/main.rs") :positions nil
-                           :total 2 :indexing nil))))
+                           :groups nil :total 2 :indexing nil)))
+          (should (equal (plist-get (emrs-call-sync
+                                     inst '(:query :text "smn" :substring t) 10)
+                                    :total)
+                         0)))
       (when inst
         (emrs-stop inst))
       (delete-directory dir t))))
@@ -104,7 +108,16 @@
     (emrs-call-sync (projdex--rec-instance (projdex--ensure dir)) '(:rescan) 10)
     (should (equal (projdex-query dir "main" 10 t)
                    '(:paths ("src/main.rs") :positions ((4 5 6 7))
-                     :total 1 :indexing nil)))
+                     :groups ((0 0 0 0)) :total 1 :indexing nil)))
+    ;; `projdex-match-style' applies to queries.
+    (should (equal (plist-get (projdex-query dir "smn" 10) :paths)
+                   '("src/main.rs")))
+    (let ((projdex-match-style 'substring))
+      (should (null (plist-get (projdex-query dir "smn" 10) :paths)))
+      (should (equal (plist-get (projdex-query dir "'smn" 10) :paths)
+                     '("src/main.rs")))
+      (should (equal (plist-get (projdex-query dir "ai rs" 10 t) :groups)
+                     '((0 0 1 1)))))
     (should (equal (plist-get (projdex-query dir "rs" 1) :total) 2))
     (should (= (length (plist-get (projdex-query dir "rs" 1) :paths)) 1))))
 
@@ -188,11 +201,13 @@
      (emrs-call-sync (projdex--rec-instance (projdex--ensure ,var)) '(:rescan) 10)
      ,@body))
 
-(defun projdex-test--faces-at (string)
-  "Return the indices of STRING that carry `completions-common-part'."
+(defun projdex-test--faces-at (string &optional face)
+  "Return the indices of STRING that carry FACE.
+Without FACE, any face of `projdex-match-faces'."
   (cl-loop for i below (length string)
-           when (memq 'completions-common-part
-                      (ensure-list (get-text-property i 'face string)))
+           for faces = (ensure-list (get-text-property i 'face string))
+           when (if face (memq face faces)
+                  (seq-intersection faces projdex-match-faces))
            collect i))
 
 (ert-deftest projdex-test-table-basics ()
@@ -268,6 +283,18 @@
       (let ((projdex-highlight nil))
         (should (null (projdex-test--faces-at
                        (car (funcall table "main" nil t))))))
+      ;; One face per term, in turn; negated terms get none.
+      (let ((p (car (funcall table "'rs !zz 'ai 'c 'm 'n" nil t))))
+        (should (equal p "src/main.rs"))
+        ;; The fifth term, n, wraps around to the first face.
+        (should (equal (projdex-test--faces-at p 'projdex-match-0) '(7 9 10)))
+        (should (equal (projdex-test--faces-at p 'projdex-match-1) '(5 6)))
+        (should (equal (projdex-test--faces-at p 'projdex-match-2) '(2)))
+        (should (equal (projdex-test--faces-at p 'projdex-match-3) '(4))))
+      (let ((projdex-match-faces '(completions-common-part)))
+        (should (equal (projdex-test--faces-at
+                        (car (funcall table "ai rs" nil t)) 'completions-common-part)
+                       '(5 6 9 10))))
       (should (equal (projdex-test--faces-at
                       (car (funcall table "main" nil t)))
                      '(4 5 6 7)))

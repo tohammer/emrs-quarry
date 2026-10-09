@@ -5,12 +5,17 @@
 //! order, which is code point order). Paths in an index are unique, so the order is total and deterministic.
 //! An empty or whitespace-only query matches every path with score 0, so it lists the index in tie-break order.
 //!
+//! [`Style`] decides how plain terms match: fuzzy (nucleo's syntax as is) or as substrings (fzf's `--exact`; a
+//! leading `'` then marks a fuzzy term).
+//!
 //! Match positions are character (Unicode scalar value) indices into the path, sorted and deduplicated. nucleo
 //! works on graphemes (it keeps the first code point of each); for paths with multi-codepoint graphemes the
-//! grapheme indices are converted to the character index of the grapheme's first code point.
+//! grapheme indices are converted to the character index of the grapheme's first code point. Each position has
+//! a group: the number of the term (non-negated atom, in query order) that matched it, so a UI can colour terms
+//! differently. A position two terms matched belongs to the earlier one.
 
 use crate::index::Index;
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Utf32String};
 use std::cmp::Ordering;
 use std::ops::Range;
@@ -21,12 +26,24 @@ pub const MAX_LIMIT: usize = 10_000;
 /// Above this many candidates, scoring is split over threads.
 pub const PARALLEL_THRESHOLD: usize = 10_000;
 
+/// How a plain term (an atom without `'`, `^`, `!` or `$`) matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Style {
+    /// A subsequence of the path, nucleo's default. `'term` matches a substring.
+    #[default]
+    Fuzzy,
+    /// A substring of the path. `'term` matches fuzzily, as in fzf's `--exact` mode.
+    Substring,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryResult {
     /// Best first, at most `limit`.
     pub paths: Vec<String>,
     /// Parallel to `paths`; character indices, sorted, deduplicated. `Some` only if requested.
     pub positions: Option<Vec<Vec<u32>>>,
+    /// Parallel to `positions`: the term number of each position. `Some` exactly when `positions` is.
+    pub groups: Option<Vec<Vec<u32>>>,
     /// Number of matching paths before the limit.
     pub total: usize,
 }
@@ -34,6 +51,7 @@ pub struct QueryResult {
 /// The previous query, for incremental narrowing.
 struct Cache {
     text: String,
+    style: Style,
     version: u64,
     /// Slots of every path that matched `text` (not only the returned ones).
     matches: Vec<u32>,
@@ -114,11 +132,25 @@ impl Matcher {
         Matcher { nucleos, parallel_threshold: threshold, cache: None, last_scored: 0 }
     }
 
+    /// A fuzzy-style query (see [`Matcher::query_styled`]).
+    #[cfg(test)]
     pub fn query(&mut self, index: &Index, text: &str, limit: usize, positions: bool) -> QueryResult {
-        let limit = limit.clamp(1, MAX_LIMIT);
-        let pattern = Pattern::parse(text, CaseMatching::Smart, Normalization::Smart);
+        self.query_styled(index, text, Style::Fuzzy, limit, positions)
+    }
 
-        let cache = self.cache.take().filter(|c| c.version == index.version() && narrows(&c.text, text));
+    pub fn query_styled(
+        &mut self,
+        index: &Index,
+        text: &str,
+        style: Style,
+        limit: usize,
+        positions: bool,
+    ) -> QueryResult {
+        let limit = limit.clamp(1, MAX_LIMIT);
+        let pattern = parse(text, style);
+
+        let cache =
+            self.cache.take().filter(|c| c.version == index.version() && c.style == style && narrows(&c.text, text));
         let candidates = match &cache {
             Some(cache) => Candidates::Slots(&cache.matches),
             None => Candidates::All(index.len()),
@@ -159,17 +191,22 @@ impl Matcher {
         };
         drop(cache);
 
-        let positions = positions.then(|| {
+        let (positions, groups) = if positions {
             let nucleo = &mut self.nucleos[0];
             let mut buf = Vec::new();
-            top.iter().map(|hit| match_positions(index, &pattern, hit.slot, nucleo, &mut buf)).collect()
-        });
+            let marked = top.iter().map(|hit| match_positions(index, &pattern, hit.slot, nucleo, &mut buf));
+            let (positions, groups) = marked.unzip();
+            (Some(positions), Some(groups))
+        } else {
+            (None, None)
+        };
         let result = QueryResult {
             paths: top.iter().map(|hit| index.path(hit.slot).to_owned()).collect(),
             positions,
+            groups,
             total: matches.len(),
         };
-        self.cache = Some(Cache { text: text.to_owned(), version: index.version(), matches });
+        self.cache = Some(Cache { text: text.to_owned(), style, version: index.version(), matches });
         result
     }
 }
@@ -192,6 +229,10 @@ impl Matcher {
 /// matches of its prefix. Smart case is decided per atom and only switches from insensitive to exact as the
 /// atom grows; a character matched exactly also matches insensitively, because the shorter atom has no upper
 /// case characters.
+///
+/// The same holds in [`Style::Substring`], where the cache must have been made in the same style: a plain atom
+/// is a substring atom, which only matches less as it grows, and an atom typed with a leading `'` is fuzzy from
+/// its first character on.
 ///
 /// The last atom is determined with nucleo's own splitting rule, escapes included. Splitting on whitespace
 /// while ignoring escapes would be wrong: for `old = "!a\ b"` it would see the last atom `b` (no `!`), yet
@@ -223,15 +264,54 @@ pub(crate) fn narrows(old: &str, new: &str) -> bool {
 /// The text of the last atom of `query` as nucleo splits it: everything after the last whitespace character
 /// that is not preceded by a backslash.
 fn last_atom(query: &str) -> &str {
-    let mut start = 0;
+    atoms(query).last().unwrap_or("")
+}
+
+/// The atoms of `query` as nucleo's `Pattern::parse` splits them: at whitespace characters not preceded by a
+/// backslash. Empty atoms included.
+fn atoms(query: &str) -> impl Iterator<Item = &str> {
     let mut prev = None;
-    for (i, c) in query.char_indices() {
-        if c.is_whitespace() && prev != Some('\\') {
-            start = i + c.len_utf8();
-        }
+    query.split(move |c: char| {
+        let split = c.is_whitespace() && prev != Some('\\');
         prev = Some(c);
+        split
+    })
+}
+
+/// Parses `text` into a pattern: nucleo's syntax, with plain terms matched as `style` says. Smart case and smart
+/// normalization; empty atoms are dropped.
+pub(crate) fn parse(text: &str, style: Style) -> Pattern {
+    match style {
+        Style::Fuzzy => Pattern::parse(text, CaseMatching::Smart, Normalization::Smart),
+        Style::Substring => {
+            let mut pattern = Pattern::default();
+            pattern.atoms = atoms(text).map(substring_atom).filter(|atom| !atom.needle_text().is_empty()).collect();
+            pattern
+        }
     }
-    &query[start..]
+}
+
+/// One atom in [`Style::Substring`]: `'term` is parsed as a plain nucleo atom (fuzzy, or prefix etc. if marked),
+/// an atom nucleo parses as non-negated fuzzy becomes a substring atom with the same needle, any other is kept.
+fn substring_atom(raw: &str) -> Atom {
+    if let Some(rest) = raw.strip_prefix('\'') {
+        return Atom::parse(rest, CaseMatching::Smart, Normalization::Smart);
+    }
+    let atom = Atom::parse(raw, CaseMatching::Smart, Normalization::Smart);
+    if atom.kind != AtomKind::Fuzzy || atom.negative {
+        return atom;
+    }
+    // The needle as `Atom::parse` derives it for a fuzzy atom: an escaped leading `!`, `^` or `'` loses its
+    // backslash, and an escaped trailing `$` stays as `$`. `\ ` is handled by `Atom::new`.
+    let needle = match raw.as_bytes() {
+        [b'\\', b'!' | b'^' | b'\'', ..] => &raw[1..],
+        _ => raw,
+    };
+    let needle = match needle.strip_suffix("\\$") {
+        Some(stem) => format!("{stem}$"),
+        None => needle.to_owned(),
+    };
+    Atom::new(&needle, CaseMatching::Smart, Normalization::Smart, AtomKind::Substring, true)
 }
 
 /// Scores candidates `range` with one nucleo matcher and keeps the best `limit`.
@@ -272,23 +352,26 @@ fn best(index: &Index, mut hits: Vec<Hit>, limit: usize) -> Vec<Hit> {
     hits
 }
 
-/// Character indices of the match of `pattern` in the path at `slot`, sorted and deduplicated.
+/// Character indices of the match of `pattern` in the path at `slot`, sorted and deduplicated, and the group
+/// (term number) of each.
 fn match_positions(
     index: &Index,
     pattern: &Pattern,
     slot: u32,
     nucleo: &mut nucleo_matcher::Matcher,
     buf: &mut Vec<u32>,
-) -> Vec<u32> {
-    buf.clear();
-    pattern.indices(index.haystack(slot), nucleo, buf);
-    buf.sort_unstable();
-    buf.dedup();
-    if index.chars_are_graphemes(slot) {
-        return buf.clone();
+) -> (Vec<u32>, Vec<u32>) {
+    let mut marks = Vec::new();
+    for (group, atom) in pattern.atoms.iter().filter(|atom| !atom.negative).enumerate() {
+        buf.clear();
+        atom.indices(index.haystack(slot), nucleo, buf);
+        marks.extend(buf.iter().map(|&g| (g, group as u32)));
     }
-    let starts = grapheme_starts(index.path(slot));
-    buf.iter().map(|&g| starts[g as usize]).collect()
+    // By position, then group: deduplicating keeps the earliest term.
+    marks.sort_unstable();
+    marks.dedup_by_key(|mark| mark.0);
+    let starts = (!index.chars_are_graphemes(slot)).then(|| grapheme_starts(index.path(slot)));
+    marks.into_iter().map(|(g, group)| (starts.as_ref().map_or(g, |starts| starts[g as usize]), group)).unzip()
 }
 
 /// For each nucleo character (grapheme) of `text`, the character index of its first code point.
@@ -335,9 +418,13 @@ mod tests {
 
     /// Single-threaded full scoring, written independently of `Matcher`: the reference for equivalence tests.
     fn reference(index: &Index, text: &str, limit: usize, positions: bool) -> QueryResult {
+        reference_styled(index, text, Style::Fuzzy, limit, positions)
+    }
+
+    fn reference_styled(index: &Index, text: &str, style: Style, limit: usize, positions: bool) -> QueryResult {
         let limit = limit.clamp(1, MAX_LIMIT);
         let mut nucleo = nucleo_matcher::Matcher::new(Config::DEFAULT.match_paths());
-        let pattern = Pattern::parse(text, CaseMatching::Smart, Normalization::Smart);
+        let pattern = parse(text, style);
         let mut hits: Vec<(u32, &str)> = index
             .iter()
             .filter_map(|p| {
@@ -348,21 +435,32 @@ mod tests {
         hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())).then(a.1.cmp(b.1)));
         let total = hits.len();
         hits.truncate(limit);
-        let positions = positions.then(|| {
+        let marked: Option<Vec<(Vec<u32>, Vec<u32>)>> = positions.then(|| {
             hits.iter()
                 .map(|(_, p)| {
                     let hay = Utf32String::from(*p);
-                    let mut idx = Vec::new();
-                    pattern.indices(hay.slice(..), &mut nucleo, &mut idx);
-                    idx.sort_unstable();
-                    idx.dedup();
-                    // Map grapheme index -> char index by walking graphemes with a simple re-segmentation.
+                    // Grapheme index -> group of the first term that matched it.
+                    let mut groups = std::collections::BTreeMap::new();
+                    for (group, atom) in pattern.atoms.iter().filter(|a| !a.negative).enumerate() {
+                        let mut idx = Vec::new();
+                        atom.indices(hay.slice(..), &mut nucleo, &mut idx);
+                        for g in idx {
+                            groups.entry(g).or_insert(group as u32);
+                        }
+                    }
                     let starts = grapheme_starts(p);
-                    idx.into_iter().map(|g| starts[g as usize]).collect()
+                    groups.into_iter().map(|(g, group)| (starts[g as usize], group)).unzip()
                 })
                 .collect()
         });
-        QueryResult { paths: hits.iter().map(|(_, p)| p.to_string()).collect(), positions, total }
+        let (positions, groups) = match marked {
+            Some(marked) => {
+                let (p, g) = marked.into_iter().unzip();
+                (Some(p), Some(g))
+            }
+            None => (None, None),
+        };
+        QueryResult { paths: hits.iter().map(|(_, p)| p.to_string()).collect(), positions, groups, total }
     }
 
     #[test]
@@ -488,14 +586,101 @@ mod tests {
         assert_eq!(result.paths, ["f1", "f10", "f11"]);
         assert_eq!(result.total, index.iter().filter(|p| p.contains('1')).count());
         let result = matcher.query(&index, "zzz", 3, false);
-        assert_eq!(result, QueryResult { paths: vec![], positions: None, total: 0 });
+        assert_eq!(result, QueryResult { paths: vec![], positions: None, groups: None, total: 0 });
     }
 
     #[test]
     fn empty_index() {
         let index = Index::new();
         let result = Matcher::new().query(&index, "a", 10, true);
-        assert_eq!(result, QueryResult { paths: vec![], positions: Some(vec![]), total: 0 });
+        assert_eq!(result, QueryResult { paths: vec![], positions: Some(vec![]), groups: Some(vec![]), total: 0 });
+    }
+
+    #[test]
+    fn groups_number_the_terms() {
+        let index = index_of(&["src/act/manager.rs"]);
+        let result = Matcher::new().query(&index, "man !x act", 10, true);
+        assert_eq!(result.positions, Some(vec![vec![4, 5, 6, 8, 9, 10]]));
+        // `man` is term 0, the negated `!x` is not a term, `act` is term 1.
+        assert_eq!(result.groups, Some(vec![vec![1, 1, 1, 0, 0, 0]]));
+        // Overlapping terms: a position belongs to the earlier term.
+        let result = Matcher::new().query(&index, "'ana 'man", 10, true);
+        assert_eq!(result.positions, Some(vec![vec![8, 9, 10, 11]]));
+        assert_eq!(result.groups, Some(vec![vec![1, 0, 0, 0]]));
+        let result = Matcher::new().query(&index, "act", 10, false);
+        assert_eq!((result.positions, result.groups), (None, None));
+    }
+
+    fn styled(index: &Index, text: &str, style: Style) -> Vec<String> {
+        let mut got = Matcher::new().query_styled(index, text, style, 100, false).paths;
+        got.sort();
+        got
+    }
+
+    #[test]
+    fn substring_style() {
+        let index = index_of(&[
+            "src/act/manager.rs",
+            "a/c/t/m/a/n",
+            "ManAct.java",
+            "x!y",
+            "^lit",
+            "'q",
+            "dir/my file",
+            "end$",
+            "lib.rs",
+            "rs.lib",
+        ]);
+        let sub = |text| styled(&index, text, Style::Substring);
+        let fuzzy = |text| styled(&index, text, Style::Fuzzy);
+        assert_eq!(fuzzy("act man"), ["ManAct.java", "a/c/t/m/a/n", "src/act/manager.rs"]);
+        assert_eq!(sub("act man"), ["ManAct.java", "src/act/manager.rs"]);
+        assert_eq!(sub("man act"), ["ManAct.java", "src/act/manager.rs"]);
+        // `'` marks a fuzzy term.
+        assert_eq!(sub("'actman"), ["a/c/t/m/a/n", "src/act/manager.rs"]);
+        assert_eq!(sub("'act man"), ["ManAct.java", "src/act/manager.rs"]);
+        assert_eq!(sub("'act 'man"), fuzzy("act man"));
+        assert_eq!(sub("'tn"), fuzzy("tn"));
+        // Anchors and negation work as in the fuzzy style.
+        assert_eq!(sub("^lib"), ["lib.rs"]);
+        assert_eq!(sub("lib$"), ["rs.lib"]);
+        assert_eq!(sub("^lib.rs$"), ["lib.rs"]);
+        assert_eq!(sub("rs !lib"), ["src/act/manager.rs"]);
+        assert_eq!(sub("'^lib"), ["lib.rs"]);
+        // Escapes keep the character literal, in a substring term.
+        assert_eq!(sub("x!"), ["x!y"]); // `!` is special only at the start of a term
+        assert_eq!(sub("\\!y"), ["x!y"]);
+        assert_eq!(sub("\\^l"), ["^lit"]);
+        assert_eq!(sub("\\'q"), ["'q"]);
+        assert_eq!(sub("d\\$"), ["end$"]);
+        assert_eq!(sub("my\\ f"), ["dir/my file"]);
+        assert_eq!(sub("myf"), Vec::<String>::new());
+        // Empty terms are dropped: everything matches.
+        assert_eq!(sub("' "), fuzzy(""));
+        // Smart case.
+        assert_eq!(sub("Man"), ["ManAct.java"]);
+        assert_eq!(sub("man").len(), 2);
+    }
+
+    #[test]
+    fn substring_style_positions() {
+        let index = index_of(&["src/act/manager.rs"]);
+        let result = Matcher::new().query_styled(&index, "man 'sat", Style::Substring, 10, true);
+        // `'sat` is fuzzy: s, a, t of `src/act`.
+        assert_eq!(result.positions, Some(vec![vec![0, 4, 6, 8, 9, 10]]));
+        assert_eq!(result.groups, Some(vec![vec![1, 1, 1, 0, 0, 0]]));
+    }
+
+    #[test]
+    fn narrowing_cache_is_per_style() {
+        let index = index_of(&["src/act/manager.rs", "a/c/t/m/a/n", "zzz"]);
+        let mut matcher = Matcher::new();
+        assert_eq!(matcher.query_styled(&index, "ac", Style::Substring, 10, false).total, 1);
+        let result = matcher.query_styled(&index, "act", Style::Fuzzy, 10, false);
+        assert_eq!(matcher.last_scored, 3, "style changed: full scoring");
+        assert_eq!(result.total, 2);
+        matcher.query_styled(&index, "actm", Style::Fuzzy, 10, false);
+        assert_eq!(matcher.last_scored, 2);
     }
 
     #[test]
@@ -742,6 +927,9 @@ mod tests {
             "^src ut",
             "^dö ñ",
             "'core f",
+            "'srcu ma 'tc",
+            "\\'core",
+            "' ut",
             "café",
             "cafe\u{301}",
             "e\u{301}t m",
@@ -791,7 +979,10 @@ mod tests {
         // One matcher per thread count, all fed the same steps; 1 thread scores sequentially even above the
         // threshold, so it checks narrowing alone.
         let mut narrowed = 0;
-        for (seq_no, sequence) in sequences.iter().enumerate() {
+        for (style, (seq_no, sequence)) in [Style::Fuzzy, Style::Substring]
+            .into_iter()
+            .flat_map(|style| sequences.iter().enumerate().map(move |s| (style, s)))
+        {
             let mut matchers: Vec<(usize, Matcher)> =
                 [1, 3, 8].into_iter().map(|t| (t, Matcher::with_parallelism(100, t))).collect();
             for (step_no, step) in sequence.iter().enumerate() {
@@ -800,16 +991,19 @@ mod tests {
                     Step::Remove(p) => assert!(index.remove(p)),
                     Step::Query(text) => {
                         let (limit, positions) = [(50, true), (1, true), (10_000, false), (7, true)][step_no % 4];
-                        let want = reference(&index, text, limit, positions);
+                        let want = reference_styled(&index, text, style, limit, positions);
                         for (threads, matcher) in &mut matchers {
-                            let got = matcher.query(&index, text, limit, positions);
-                            assert_eq!(got, want, "sequence {seq_no} step {step_no} {text:?} threads {threads}");
+                            let got = matcher.query_styled(&index, text, style, limit, positions);
+                            assert_eq!(
+                                got, want,
+                                "{style:?} sequence {seq_no} step {step_no} {text:?} threads {threads}"
+                            );
                             narrowed += usize::from(matcher.last_scored < index.len());
                         }
                     }
                 }
             }
         }
-        assert!(narrowed > 300, "narrowing was used {narrowed} times");
+        assert!(narrowed > 600, "narrowing was used {narrowed} times");
     }
 }

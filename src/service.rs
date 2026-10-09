@@ -4,12 +4,13 @@
 //!
 //! | Request | Reply |
 //! |---|---|
-//! | `(:query :text S :limit N :positions BOOL)` | `(:paths (P ...) :positions (POS ...) :total M :indexing BOOL)` |
+//! | `(:query :text S :limit N :positions BOOL :substring BOOL)` | `(:paths (P ...) :positions (POS ...) :groups (G ...) :total M :indexing BOOL)` |
 //! | `(:files)` | stream of strings (relative paths), capacity 4096 |
 //! | `(:rescan)` | number of files, once a walk that started after the request has finished |
 //! | `(:status)` | `(:root R :files N :indexing BOOL :watching BOOL :walks K :skipped S)` |
 //!
-//! `:limit` defaults to 200 and `:positions` to nil. Start arguments are
+//! `:limit` defaults to 200, `:positions` and `:substring` to nil. `:substring` selects [`Style::Substring`].
+//! `:groups` is parallel to `:positions`: for each path the term number of each matched character. Start arguments are
 //! `(:root "/abs/dir/" :include-hidden t :ignores ("*.min.js"))`; `:include-hidden` defaults to t, `:ignores` to
 //! nil. Events: `(:indexed :files N :millis T)`, `(:changed :added A :removed R)`, `(:watch-failed :message S)`.
 //!
@@ -51,7 +52,7 @@
 //! skipped), not fail.
 
 use crate::index::Index;
-use crate::matcher::Matcher;
+use crate::matcher::{Matcher, Style};
 use crate::walk::{self, WalkConfig};
 use crate::watch::{Change, Output, WalkStamp, Watcher};
 use emrs::{Context, Error, Level, Reply, Service};
@@ -88,13 +89,16 @@ pub struct Args {
 
 #[derive(Debug, Deserialize)]
 pub enum Request {
-    /// `(:query :text S :limit N :positions BOOL)`; replies with [`QueryReply`].
+    /// `(:query :text S :limit N :positions BOOL :substring BOOL)`; replies with [`QueryReply`].
     Query {
         text: String,
         #[serde(default = "default_limit")]
         limit: usize,
         #[serde(default)]
         positions: bool,
+        /// Plain terms match as substrings ([`Style::Substring`]) instead of fuzzily.
+        #[serde(default)]
+        substring: bool,
     },
     /// `(:files)`; replies with a stream of paths.
     Files,
@@ -119,12 +123,14 @@ pub enum Request {
     WatchFailed(String),
 }
 
-/// Reply to `(:query)`: `(:paths (P ...) :positions (POS ...) :total M :indexing BOOL)`.
+/// Reply to `(:query)`: `(:paths (P ...) :positions (POS ...) :groups (G ...) :total M :indexing BOOL)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct QueryReply {
     pub paths: Vec<String>,
     /// Parallel to `paths`, or nil when not requested.
     pub positions: Option<Vec<Vec<u32>>>,
+    /// Parallel to `positions`: the term number of each position.
+    pub groups: Option<Vec<Vec<u32>>>,
     pub total: usize,
     pub indexing: bool,
 }
@@ -428,12 +434,14 @@ impl Service for Projdex {
 
     fn handle(&mut self, request: Request, reply: Reply, ctx: &Context<Self>) {
         match request {
-            Request::Query { text, limit, positions } => {
+            Request::Query { text, limit, positions, substring } => {
                 let index = view(&self.current, self.has_index, &self.walk);
-                let result = self.matcher.query(index, &text, limit, positions);
+                let style = if substring { Style::Substring } else { Style::Fuzzy };
+                let result = self.matcher.query_styled(index, &text, style, limit, positions);
                 reply.ok(QueryReply {
                     paths: result.paths,
                     positions: result.positions,
+                    groups: result.groups,
                     total: result.total,
                     indexing: self.walk.is_some(),
                 });
@@ -634,7 +642,7 @@ mod tests {
     }
 
     fn query(text: &str, limit: usize, positions: bool) -> Request {
-        Request::Query { text: text.to_string(), limit, positions }
+        Request::Query { text: text.to_string(), limit, positions, substring: false }
     }
 
     fn status(host: &mut Host<Projdex>) -> Status {
@@ -755,6 +763,19 @@ mod tests {
         assert_eq!(reply.positions.as_ref().map(Vec::len), Some(5));
         assert_eq!(reply.total, 30);
         assert_eq!(host.call::<QueryReply>(query("nomatchzz", 5, false)).unwrap().total, 0);
+    }
+
+    #[test]
+    fn query_substring_and_groups() {
+        let t = tree(&["src/act/manager.rs", "a/c/t/m/a/n"]);
+        let mut host = started(t.path());
+        let fuzzy = host.call::<QueryReply>(query("act man", 10, true)).unwrap();
+        assert_eq!(fuzzy.total, 2);
+        let request = Request::Query { text: "man act".into(), limit: 10, positions: true, substring: true };
+        let reply = host.call::<QueryReply>(request).unwrap();
+        assert_eq!(reply.paths, vec!["src/act/manager.rs".to_string()]);
+        assert_eq!(reply.positions, Some(vec![vec![4, 5, 6, 8, 9, 10]]));
+        assert_eq!(reply.groups, Some(vec![vec![1, 1, 1, 0, 0, 0]]));
     }
 
     #[test]

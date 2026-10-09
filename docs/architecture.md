@@ -105,18 +105,23 @@ it fail with the message. The exact rules are in the spec, section
 
 A query parses the text with nucleo's `Pattern` (smart case, smart
 normalization) and ranks by score descending, then path length, then path.
-Match positions are computed only for the returned paths.
+In the substring style (`:substring t`, ADR 0004) `matcher::parse` builds
+the pattern atom by atom and turns plain fuzzy atoms into substring atoms;
+a leading `'` marks a fuzzy one. Match positions are computed only for the
+returned paths, atom by atom, so each position carries its term number
+(`:groups`).
 
-The matcher remembers the last query, the index version and the full set
-of matching paths. The next query scores only that set when the index is
-unchanged and the new text extends the old text in a way that cannot match
-more (`matcher::narrows`: no `!` or `$` involved, the old text
-does not end in `\` or `$`, and not both the last atom and the appended
-text are non-ASCII). Otherwise it scores the whole index. When more than
-10,000 paths are scored, the set is split into one chunk per core, each
-chunk is scored on a scoped thread with its own matcher, and the per-chunk
-top results are merged. Both optimisations return exactly what
-single-threaded scoring of the whole index returns; a Rust test checks it.
+The matcher remembers the last query, the index version and the full set of
+matching paths, and the style. The next query of the same style scores only
+that set when the index is unchanged and the new text extends the old text
+in a way that cannot match more (`matcher::narrows`: no `!` or `$`
+involved, the old text does not end in `\` or `$`, and not both the last
+atom and the appended text are non-ASCII). Otherwise it scores the whole
+index. When more than 10,000 paths are scored, the set is split into one
+chunk per core, each chunk is scored on a scoped thread with its own
+matcher, and the per-chunk top results are merged. Both optimisations
+return exactly what single-threaded scoring of the whole index returns; a
+Rust test checks it.
 
 ### Watching
 
@@ -146,10 +151,10 @@ before each prompt.
 `projdex--table` returns a completion table with category `project-file`,
 `identity` sort functions, and the whole input as the query. Completion UIs
 call the table several times per keystroke, so each table keeps its last
-four results in a cache keyed by (string, epoch, limit, highlight). A
-change event increments the epoch, which invalidates cached results.
-Highlighting copies each path and adds `completions-common-part` at the
-match positions.
+four results in a cache keyed by (string, record, epoch, limit, highlight,
+match style). A change event increments the epoch, which invalidates
+cached results. Highlighting copies each path and adds, at the positions
+of term N, face N of `projdex-match-faces` (modulo their number).
 
 The `projdex` completion style hands the input to the table unchanged and
 returns its result as is. `projdex-find-file` binds

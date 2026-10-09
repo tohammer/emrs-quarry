@@ -50,8 +50,54 @@
   :type 'natnum)
 
 (defcustom projdex-highlight t
-  "Non-nil means matched characters are highlighted in candidates."
+  "Non-nil means matched characters are highlighted in candidates.
+Each term of the query gets a face of `projdex-match-faces'."
   :type 'boolean)
+
+(defcustom projdex-match-style 'fuzzy
+  "How a plain term of the query matches a path.
+`fuzzy': its characters in order, with gaps allowed; a term written
+\='term matches as a substring.
+`substring': as a contiguous substring; a term written \='term
+matches fuzzily, as in fzf's --exact mode.
+The prefix ^, suffix $ and negation ! work the same in both."
+  :type '(choice (const :tag "Fuzzy" fuzzy)
+                 (const :tag "Substring" substring)))
+
+(defface projdex-match-0
+  '((default :weight bold)
+    (((class color) (min-colors 88) (background dark)) :foreground "#72a4ff")
+    (((class color) (min-colors 88) (background light)) :foreground "#223fbf")
+    (t :foreground "blue"))
+  "Face for the characters the first term of a query matched.")
+
+(defface projdex-match-1
+  '((default :weight bold)
+    (((class color) (min-colors 88) (background dark)) :foreground "#ed92f8")
+    (((class color) (min-colors 88) (background light)) :foreground "#8f0075")
+    (t :foreground "magenta"))
+  "Face for the characters the second term of a query matched.")
+
+(defface projdex-match-2
+  '((default :weight bold)
+    (((class color) (min-colors 88) (background dark)) :foreground "#90d800")
+    (((class color) (min-colors 88) (background light)) :foreground "#145a00")
+    (t :foreground "green"))
+  "Face for the characters the third term of a query matched.")
+
+(defface projdex-match-3
+  '((default :weight bold)
+    (((class color) (min-colors 88) (background dark)) :foreground "#f0ce43")
+    (((class color) (min-colors 88) (background light)) :foreground "#804000")
+    (t :foreground "yellow"))
+  "Face for the characters the fourth term of a query matched.")
+
+(defcustom projdex-match-faces
+  '(projdex-match-0 projdex-match-1 projdex-match-2 projdex-match-3)
+  "Faces for matched characters, one per query term, used in turn.
+A single face, such as `completions-common-part', highlights all terms
+alike."
+  :type '(repeat face))
 
 (defcustom projdex-query-timeout 10.0
   "Seconds before a query gives up.
@@ -170,8 +216,10 @@ This is a safety net against a stuck instance, not a latency budget."
     (remhash (projdex--rec-root rec) projdex--instances)))
 
 (defun projdex--request (text limit positions)
-  "Return the query request for TEXT, LIMIT and POSITIONS."
-  (list :query :text text :limit limit :positions (and positions t)))
+  "Return the query request for TEXT, LIMIT and POSITIONS.
+The match style is `projdex-match-style'."
+  (list :query :text text :limit limit :positions (and positions t)
+        :substring (eq projdex-match-style 'substring)))
 
 (defun projdex--call-sync (root request)
   "Send REQUEST to the instance of ROOT and return the reply.
@@ -190,8 +238,10 @@ Signal a `user-error' when the instance failed or stopped."
 
 (defun projdex-query (root text limit &optional positions)
   "Query the index of ROOT for TEXT, returning at most LIMIT paths.
-Return the reply plist (:paths :positions :total :indexing).  With
-POSITIONS, also return the matched character indices.  Signal a
+Return the reply plist (:paths :positions :groups :total :indexing).
+With POSITIONS, also return the matched character indices and, in
+:groups, the number of the query term that matched each of them.
+Plain terms match as `projdex-match-style' says.  Signal a
 `user-error' when the instance failed or stopped."
   (projdex--call-sync root (projdex--request text limit positions)))
 
@@ -211,40 +261,48 @@ error plist otherwise.  Return the call, which `emrs-cancel' cancels."
 (defconst projdex--cache-size 4
   "Number of recent query results a completion table keeps.")
 
-(defun projdex--highlight (path positions)
-  "Return a copy of PATH with the common-part face at POSITIONS."
-  (let ((copy (copy-sequence path)))
-    (dolist (pos positions)
-      (add-face-text-property pos (1+ pos) 'completions-common-part nil copy))
+(defun projdex--highlight (path positions groups)
+  "Return a copy of PATH with match faces at POSITIONS.
+GROUPS, parallel to POSITIONS, holds the term number of each position;
+term N gets face N of `projdex-match-faces', modulo their number."
+  (let ((copy (copy-sequence path))
+        (faces (or projdex-match-faces '(completions-common-part))))
+    (cl-loop for pos in positions
+             for group = (or (pop groups) 0)
+             do (add-face-text-property pos (1+ pos)
+                                        (nth (mod group (length faces)) faces)
+                                        nil copy))
     copy))
 
 (defun projdex--table (root)
   "Return a completion table for the files of the project at ROOT.
 The whole input is the query; the candidates keep the order of the
-index.  Results are cached per input, instance, epoch, limit and
-highlighting; replies of a still indexing instance are not cached.
+index.  Results are cached per input, instance, epoch, limit, highlighting
+and match style; replies of a still indexing instance are not cached.
 When the instance cannot be started or failed, the table reports it once
 and has no candidates from then on."
   (let ((cache nil)
         (warned nil)
         (failed nil))
     (cl-flet ((results (string)
-                ;; Return a list of (PATH . POSITIONS), best first.
+                ;; Return a list of (PATH POSITIONS GROUPS), best first.
                 (unless failed
                   (condition-case err
                       (let* ((rec (projdex--ensure root))
                              (limit projdex-limit)
                              (highlight (and projdex-highlight t))
                              (key (list string (projdex--rec-id rec)
-                                        (projdex--rec-epoch rec) limit highlight))
+                                        (projdex--rec-epoch rec) limit highlight
+                                        projdex-match-style))
                              (hit (assoc key cache)))
                         (if hit
                             (cdr hit)
                           (let* ((reply (projdex-query root string limit highlight))
-                                 (value (cl-mapcar #'cons (plist-get reply :paths)
-                                                   (or (plist-get reply :positions)
-                                                       (make-list (length (plist-get reply :paths))
-                                                                  nil)))))
+                                 (paths (plist-get reply :paths))
+                                 (none (make-list (length paths) nil))
+                                 (value (cl-mapcar #'list paths
+                                                   (or (plist-get reply :positions) none)
+                                                   (or (plist-get reply :groups) none))))
                             (unless (plist-get reply :indexing)
                               (setq cache (seq-take (cons (cons key value) cache)
                                                     projdex--cache-size)))
@@ -270,10 +328,10 @@ and has no candidates from then on."
           (`(boundaries . ,_) nil)
           ('t
            (let ((highlight (and projdex-highlight t)))
-             (cl-loop for (path . positions) in (results string)
+             (cl-loop for (path positions groups) in (results string)
                       when (or (null pred) (funcall pred path))
                       collect (if (and highlight positions)
-                                  (projdex--highlight path positions)
+                                  (projdex--highlight path positions groups)
                                 ;; UIs may add properties in place.
                                 (copy-sequence path)))))
           (_
