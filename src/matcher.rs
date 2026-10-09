@@ -19,7 +19,7 @@ use std::ops::Range;
 pub const MAX_LIMIT: usize = 10_000;
 
 /// Above this many candidates, scoring is split over threads.
-pub const PARALLEL_THRESHOLD: usize = 50_000;
+pub const PARALLEL_THRESHOLD: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryResult {

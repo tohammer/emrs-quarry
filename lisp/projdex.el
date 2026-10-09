@@ -104,8 +104,12 @@ This is a safety net against a stuck instance, not a latency budget."
        (setf (projdex--rec-warned rec) t)
        (display-warning
         'projdex
-        (format "File watching for %s failed, the index may become stale: %s"
-                (projdex--rec-root rec) (plist-get (cdr event) :message)))))))
+        (format "File watching for %s failed, so projdex rescans before each prompt: %s%s"
+                (projdex--rec-root rec) (plist-get (cdr event) :message)
+                (if (eq system-type 'gnu/linux)
+                    "\nIf the inotify watch limit was reached, raise it, e.g. \
+`sudo sysctl fs.inotify.max_user_watches=524288', then run `projdex-stop'."
+                  "")))))))
 
 (defun projdex--on-exit (rec status err)
   "Forget the record REC after its instance exited with STATUS and ERR."

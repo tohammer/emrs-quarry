@@ -56,3 +56,23 @@ directory walks; Windows buffer overflows, which notify does not report as
 lost events. Also, when creating the backend watcher fails,
 notify-debouncer-full leaves its own thread running (upstream). Origin:
 task 4, 2026-10-09. Revisit before claiming macOS or Windows support.
+
+## Faster scoring for very large indexes
+
+On 1M files, short queries (2–4 characters) still match most paths and
+exact nucleo scoring costs ~180 ms p99 on a 4-core laptop at low clock
+(benchmark, 2026-10-09). Option: above ~200k candidates, preselect the top
+10×limit with nucleo's greedy scoring (4–7× faster) and rank those exactly;
+needs a greedy mode on `Pattern`/`Atom` (private fields in nucleo) or our
+own per-atom dispatch, and relaxes the "identical to exact scoring"
+guarantee for huge sets. Origin: task 8 of the v1 spec. Revisit if the 1M
+target is missed on a quiet machine or users report slow prompts.
+
+## Ranking of equal scores
+
+Equal nucleo scores fall back to the shorter path, so `activitymanager`
+ranks `external/mesa3d/.../ActivityManager.h` above
+`frameworks/base/.../ActivityManager.java`. A tie-break or bonus that
+prefers more prominent paths (recently visited, shallower in a well-known
+tree) may help. Origin: task 8 benchmark observation, 2026-10-09.
+Revisit with real use.
