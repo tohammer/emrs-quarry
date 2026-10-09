@@ -5,20 +5,32 @@
 //! watch ([`Mode::PerDir`]): the root when the watcher starts, the others from the walk's directory callback
 //! ([`walk::walk_dirs`]), which runs before the walker lists the directory, so nothing created in it after
 //! that point is missed. In addition, `<dir>/.git/info` is watched when it exists, so a change to
-//! `.git/info/exclude` is seen although `.git` itself is not watched. Elsewhere (macOS FSEvents, Windows) the
+//! `.git/info/exclude` is seen although `.git` itself is not watched: it is checked (one `stat` while not
+//! watched) whenever a walk confirms the directory, the root at the start of every full walk, and when a `.git`
+//! (or `.git/info`) directory is created or renamed into a known directory (`git init`); if that new `.git`
+//! already has an `info/exclude`, whose rules now apply, a full rescan follows. Elsewhere (macOS FSEvents, Windows) the
 //! root is watched recursively and events below ignored directories are filtered ([`Mode::Recursive`]).
 //!
 //! In both modes the watcher keeps the set of known directories (root-relative), each stamped with the value of
 //! a clock when it was last confirmed by a walk or added by the watcher. A full walk starts by advancing the
 //! clock ([`Watcher::begin_walk`]) and confirms every directory it visits; when it finishes and its index
 //! becomes current, directories with an older stamp are dropped together with their watches
-//! ([`Watcher::walk_done`]). After lost events the next walk re-adds the watch of every directory it visits,
-//! because a directory may have been replaced while events were lost.
+//! ([`Watcher::walk_done`]). After lost events full walks re-add the watch of every directory they visit,
+//! because a directory may have been replaced while events were lost, until a walk that began after the last
+//! loss of events has finished and its index became current (a walk that fails does not count).
 //!
-//! **Threads.** `notify` runs its backend thread and the debouncer's thread. The debouncer hands each batch of
-//! debounced events to a channel; the watcher's own thread (`projdex-watch`) translates them into index
-//! changes, walking new directories itself, and sends the results to the service through a [`Sink`]. Nothing
-//! here touches the index: the service applies the changes in `handle`.
+//! **Threads.** `notify` runs its backend thread and the debouncer's thread. The backend is created first, so
+//! that a failure to create it (inotify instance limit, too many open files) leaves no debouncer thread behind.
+//! The debouncer hands each batch of debounced events to a channel; the watcher's own thread (`projdex-watch`)
+//! translates them into index changes, walking new directories itself, and sends the results to the service
+//! through a [`Sink`]. Nothing here touches the index: the service applies the changes in `handle`.
+//!
+//! **Swallowed events.** `notify-debouncer-full` drops every event of a path that was created and then removed,
+//! or created and then renamed away, within its window. A walk running meanwhile may have listed that file, and
+//! nothing would remove it. The backend's handler therefore also sends the paths of raw removal and rename-away
+//! events straight to the watcher thread ([`translate_removed`]): each such path that is gone from the disk is
+//! removed from the index (a known directory with everything below it); paths that exist again are left to the
+//! debounced events. Removals are idempotent, so handling a path twice is harmless.
 //!
 //! **Translation** ([`translate`]). Only creations, removals and renames are considered; content and metadata
 //! changes are ignored. Each affected path is compared with the disk at translation time, which makes the
@@ -103,18 +115,24 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// The backend watcher, shared between the debouncer and this module (see the module docs).
 type Backend = Arc<Mutex<Option<RecommendedWatcher>>>;
 
+/// Where the backend's event handler passes events on to: the debouncer's handler, once it exists.
+type Slot = Arc<Mutex<Option<Box<dyn notify::EventHandler>>>>;
+
 thread_local! {
-    /// Hands the backend created inside `new_debouncer_opt` back to [`Watcher::start`] on the same thread.
-    static CREATED: RefCell<Option<Backend>> = const { RefCell::new(None) };
+    /// Hands the backend created in [`Watcher::start`] to [`SharedWatcher::new`], which `new_debouncer_opt` calls
+    /// on the same thread.
+    static PREPARED: RefCell<Option<(Backend, Slot)>> = const { RefCell::new(None) };
 }
 
-/// The watcher type given to the debouncer: a handle on the shared backend.
+/// The watcher type given to the debouncer: a handle on the shared backend, which already exists.
 struct SharedWatcher(Backend);
 
 impl notify::Watcher for SharedWatcher {
-    fn new<F: notify::EventHandler>(handler: F, config: notify::Config) -> notify::Result<Self> {
-        let backend = Arc::new(Mutex::new(Some(RecommendedWatcher::new(handler, config)?)));
-        CREATED.with(|c| *c.borrow_mut() = Some(backend.clone()));
+    fn new<F: notify::EventHandler>(handler: F, _config: notify::Config) -> notify::Result<Self> {
+        let (backend, slot) = PREPARED
+            .with(|p| p.borrow_mut().take())
+            .ok_or_else(|| notify::Error::generic("no backend was prepared on this thread"))?;
+        *lock(&slot) = Some(Box::new(handler));
         Ok(SharedWatcher(backend))
     }
 
@@ -135,6 +153,37 @@ impl notify::Watcher for SharedWatcher {
     fn kind() -> notify::WatcherKind {
         RecommendedWatcher::kind()
     }
+}
+
+/// The paths a raw backend event reports as gone from where they were: removed, or renamed away.
+fn removed_paths(event: &notify::Event) -> &[PathBuf] {
+    match event.kind {
+        EventKind::Remove(_)
+        | EventKind::Modify(ModifyKind::Name(RenameMode::From | RenameMode::Any | RenameMode::Other)) => &event.paths,
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => &event.paths[..event.paths.len().min(1)],
+        _ => &[],
+    }
+}
+
+/// Creates the backend watcher. Its handler forwards the paths of removals and renames to the watcher thread
+/// at once (see "Swallowed events" in the module docs) and passes every event on to `slot`.
+fn create_backend(_root: &Path, tx: Sender<Msg>, slot: Slot) -> notify::Result<RecommendedWatcher> {
+    #[cfg(test)]
+    if hook::backend_fails(_root) {
+        return Err(notify::Error::generic("simulated backend failure"));
+    }
+    let handler = move |result: notify::Result<notify::Event>| {
+        if let Ok(event) = &result {
+            let removed = removed_paths(event);
+            if !removed.is_empty() {
+                let _ = tx.send(Msg::Removed(removed.to_vec()));
+            }
+        }
+        if let Some(next) = lock(&slot).as_mut() {
+            next.handle_event(result);
+        }
+    };
+    RecommendedWatcher::new(handler, notify::Config::default())
 }
 
 /// Is an error from adding a watch fatal for the whole watcher (rather than for one directory)?
@@ -182,8 +231,11 @@ struct Shared {
     active: AtomicBool,
     /// The service dropped the watcher.
     closed: AtomicBool,
-    /// Events were lost: the next full walk re-adds the watches of the directories it visits.
-    force_rewatch: AtomicBool,
+    /// How many times events were lost.
+    lost: AtomicU64,
+    /// The value of `lost` when the last full walk that re-added its watches began; while `lost` is larger, full
+    /// walks re-add the watches of the directories they visit (see [`Watcher::begin_walk`]).
+    rewatched: AtomicU64,
     /// Counts full walks; the watcher thread clears its rule cache when it changes.
     walks: AtomicU64,
     sink: Sink,
@@ -252,7 +304,8 @@ impl Shared {
     }
 
     /// Records the directory `rel` as known (and watches it in [`Mode::PerDir`]). With `force` the watch is
-    /// added again even if the directory is already known.
+    /// added again even if the directory is already known. In [`Mode::PerDir`] its `.git/info` is watched too
+    /// when that is a directory and not watched yet (again with `force`).
     fn mark(&self, rel: &str, force: bool) {
         if self.closed.load(Ordering::Relaxed) {
             return;
@@ -263,34 +316,23 @@ impl Shared {
                 return;
             }
             let clock = st.clock;
-            if let Some(stamp) = st.dirs.get_mut(rel) {
-                *stamp = clock;
-                if !force {
-                    return;
+            let known = match st.dirs.get_mut(rel) {
+                Some(stamp) => {
+                    *stamp = clock;
+                    true
                 }
-            }
+                None => false,
+            };
             match self.mode {
                 Mode::Recursive => {
                     st.dirs.insert(rel.to_string(), clock);
                     None
                 }
+                Mode::PerDir if known && !force => self.watch_git_info(&mut st, rel, clock, false).err(),
                 Mode::PerDir => match self.watch(&self.abs(rel)) {
                     Ok(true) => {
                         st.dirs.insert(rel.to_string(), clock);
-                        let info = git_info(rel);
-                        let info_abs = self.abs(&info);
-                        if info_abs.is_dir() {
-                            match self.watch(&info_abs) {
-                                Ok(true) => {
-                                    st.dirs.insert(info, clock);
-                                    None
-                                }
-                                Ok(false) => None,
-                                Err(message) => Some(message),
-                            }
-                        } else {
-                            None
-                        }
+                        self.watch_git_info(&mut st, rel, clock, true).err()
                     }
                     Ok(false) => {
                         st.dirs.remove(rel);
@@ -298,6 +340,37 @@ impl Shared {
                     }
                     Err(message) => Some(message),
                 },
+            }
+        };
+        if let Some(message) = failure {
+            self.fail(message);
+        }
+    }
+
+    /// Watches `<rel>/.git/info` if it is a directory, unless it is watched already (`again` watches it anyway);
+    /// [`Mode::PerDir`] only. A cheap check when it is watched: no system call.
+    fn watch_git_info(&self, st: &mut DirState, rel: &str, clock: u64, again: bool) -> Result<(), String> {
+        let info = git_info(rel);
+        if !again && st.dirs.contains_key(&info) {
+            return Ok(());
+        }
+        let abs = self.abs(&info);
+        if abs.is_dir() && self.watch(&abs)? {
+            st.dirs.insert(info, clock);
+        }
+        Ok(())
+    }
+
+    /// A `.git` (or `.git/info`) directory appeared in the known directory `owner`: watches its `.git/info`.
+    fn git_dir_created(&self, owner: &str) {
+        if self.mode != Mode::PerDir || self.closed.load(Ordering::Relaxed) {
+            return;
+        }
+        let failure = {
+            let mut st = lock(&self.state);
+            match st.dirs.get(owner) {
+                Some(&stamp) if !st.failed => self.watch_git_info(&mut st, owner, stamp, false).err(),
+                _ => None,
             }
         };
         if let Some(message) = failure {
@@ -377,6 +450,8 @@ impl Shared {
 /// Messages to the watcher thread.
 enum Msg {
     Events(DebounceEventResult),
+    /// Paths a raw backend event reported removed or renamed away (see "Swallowed events" in the module docs).
+    Removed(Vec<PathBuf>),
     /// A full walk that began at this clock value finished and its index became current.
     Prune(u64),
 }
@@ -386,6 +461,15 @@ pub struct Watcher {
     debouncer: Option<Debouncer<SharedWatcher, NoCache>>,
     tx: Sender<Msg>,
     shared: Arc<Shared>,
+}
+
+/// Returned by [`Watcher::begin_walk`], passed back to [`Watcher::walk_done`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WalkStamp {
+    /// The clock value when the walk began.
+    clock: u64,
+    /// The lost-events count when the walk began.
+    lost: u64,
 }
 
 /// Handed to a full walk: records the directories it visits.
@@ -411,19 +495,30 @@ impl Watcher {
         }
         let mode = mode_for(&config.root);
         let (tx, rx) = channel();
+        // The backend is created before the debouncer, whose thread runs from its construction: when the backend
+        // cannot be created (inotify instance limit, too many open files), no thread has been started yet.
+        let slot: Slot = Arc::new(Mutex::new(None));
+        let backend: Backend = Arc::new(Mutex::new(Some(
+            create_backend(&config.root, tx.clone(), slot.clone())
+                .map_err(|e| format!("cannot start the file watcher: {}", describe(&e)))?,
+        )));
+        #[cfg(test)]
+        hook::debouncer_started(&config.root);
         let handler_tx = tx.clone();
         let handler = move |result: DebounceEventResult| {
             let _ = handler_tx.send(Msg::Events(result));
         };
+        PREPARED.with(|p| *p.borrow_mut() = Some((backend.clone(), slot)));
         let debouncer = new_debouncer_opt::<_, SharedWatcher, NoCache>(
             DEBOUNCE,
             None,
             handler,
             NoCache::new(),
             notify::Config::default(),
-        )
-        .map_err(|e| format!("cannot start the file watcher: {}", describe(&e)))?;
-        let backend = CREATED.with(|c| c.borrow_mut().take()).expect("the backend was created on this thread");
+        );
+        // Not consumed if the debouncer failed before creating its watcher.
+        PREPARED.with(|p| p.borrow_mut().take());
+        let debouncer = debouncer.map_err(|e| format!("cannot start the file watcher: {}", describe(&e)))?;
 
         let root = config.root.clone();
         let mut roots = vec![root.clone()];
@@ -440,7 +535,8 @@ impl Watcher {
             state: Mutex::new(DirState::default()),
             active: AtomicBool::new(true),
             closed: AtomicBool::new(false),
-            force_rewatch: AtomicBool::new(false),
+            lost: AtomicU64::new(0),
+            rewatched: AtomicU64::new(0),
             walks: AtomicU64::new(0),
             sink,
         });
@@ -480,27 +576,39 @@ impl Watcher {
         self.shared.is_active()
     }
 
-    /// Called when a full walk starts; returns its directory tracker and the clock value to pass to
-    /// [`Watcher::walk_done`].
-    pub fn begin_walk(&self) -> (DirTracker, u64) {
-        let stamp = {
+    /// Called when a full walk starts; returns its directory tracker and the stamp to pass to
+    /// [`Watcher::walk_done`]. If events were lost since the last full walk that re-added its watches began and
+    /// that walk's index became current, this walk re-adds the watch of every directory it visits.
+    pub fn begin_walk(&self) -> (DirTracker, WalkStamp) {
+        let lost = self.shared.lost.load(Ordering::Relaxed);
+        let force = lost > self.shared.rewatched.load(Ordering::Relaxed);
+        let (clock, failure) = {
             let mut st = lock(&self.shared.state);
             st.clock += 1;
             let clock = st.clock;
+            let mut failure = None;
             if let Some(root) = st.dirs.get_mut("") {
                 *root = clock;
+                // The walk does not report the root; its `.git/info` is checked here.
+                if self.shared.mode == Mode::PerDir && !st.failed && !self.shared.closed.load(Ordering::Relaxed) {
+                    failure = self.shared.watch_git_info(&mut st, "", clock, force).err();
+                }
             }
-            clock
+            (clock, failure)
         };
+        if let Some(message) = failure {
+            self.shared.fail(message);
+        }
         self.shared.walks.fetch_add(1, Ordering::Relaxed);
-        let force = self.shared.force_rewatch.swap(false, Ordering::Relaxed);
-        (DirTracker { shared: self.shared.clone(), force }, stamp)
+        (DirTracker { shared: self.shared.clone(), force }, WalkStamp { clock, lost })
     }
 
     /// Called when the full walk begun with `stamp` finished and its index became current: drops the
-    /// directories (and watches) it did not see, unless the watcher added them since.
-    pub fn walk_done(&self, stamp: u64) {
-        let _ = self.tx.send(Msg::Prune(stamp));
+    /// directories (and watches) it did not see, unless the watcher added them since. Lost events up to the
+    /// walk's beginning no longer force later walks to re-add watches.
+    pub fn walk_done(&self, stamp: WalkStamp) {
+        self.shared.rewatched.fetch_max(stamp.lost, Ordering::Relaxed);
+        let _ = self.tx.send(Msg::Prune(stamp.clock));
     }
 }
 
@@ -516,10 +624,27 @@ impl Drop for Watcher {
 fn run(shared: Arc<Shared>, config: Arc<WalkConfig>, rx: Receiver<Msg>) {
     let mut rules = IgnoreRules::new(&config);
     let mut walks = shared.walks.load(Ordering::Relaxed);
-    for msg in rx {
+    // A message taken from the channel while collecting removals, handled next.
+    let mut next: Option<Msg> = None;
+    loop {
+        let msg = match next.take() {
+            Some(msg) => msg,
+            None => match rx.recv() {
+                Ok(msg) => msg,
+                Err(_) => break,
+            },
+        };
         if shared.closed.load(Ordering::Relaxed) {
             break;
         }
+        // The rule cache is cleared at every full walk.
+        let mut refresh_rules = |rules: &mut IgnoreRules| {
+            let now = shared.walks.load(Ordering::Relaxed);
+            if now != walks {
+                rules.clear();
+                walks = now;
+            }
+        };
         match msg {
             Msg::Prune(stamp) => shared.prune(stamp),
             Msg::Events(Err(errors)) => {
@@ -527,21 +652,39 @@ fn run(shared: Arc<Shared>, config: Arc<WalkConfig>, rx: Receiver<Msg>) {
                     shared.fail(message);
                 }
             }
+            Msg::Removed(mut paths) => {
+                // Removals that are already queued are handled together (a large tree removed at once).
+                loop {
+                    match rx.try_recv() {
+                        Ok(Msg::Removed(more)) => paths.extend(more),
+                        Ok(other) => {
+                            next = Some(other);
+                            break;
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if !shared.is_active() {
+                    continue;
+                }
+                refresh_rules(&mut rules);
+                let mut fs = DiskFs { shared: &shared, config: &config, rules: &mut rules };
+                let changes = translate_removed(&paths, &shared.roots, &mut fs);
+                if !changes.is_empty() && !shared.closed.load(Ordering::Relaxed) {
+                    (shared.sink)(Output::Changes(changes));
+                }
+            }
             Msg::Events(Ok(events)) => {
                 if !shared.is_active() {
                     continue;
                 }
-                let now = shared.walks.load(Ordering::Relaxed);
-                if now != walks {
-                    rules.clear();
-                    walks = now;
-                }
+                refresh_rules(&mut rules);
                 let mut fs = DiskFs { shared: &shared, config: &config, rules: &mut rules };
                 match translate(&events, &shared.roots, &mut fs) {
                     Outcome::Rescan { lost } => {
                         rules.clear();
                         if lost {
-                            shared.force_rewatch.store(true, Ordering::Relaxed);
+                            shared.lost.fetch_add(1, Ordering::Relaxed);
                         }
                         (shared.sink)(Output::Rescan);
                     }
@@ -576,6 +719,9 @@ pub(crate) trait Fs {
     fn forget_dir(&mut self, rel: &str);
     /// Watches the directory `rel` and the directories below it, and returns the files below it.
     fn add_dir(&mut self, rel: &str) -> Vec<String>;
+    /// A `.git` (or `.git/info`) directory appeared in `owner`: watches `<owner>/.git/info` if `owner` is a known
+    /// directory. Returns whether `<owner>/.git/info/exclude` is a file (whose rules now apply).
+    fn git_dir_created(&mut self, owner: &str) -> bool;
 }
 
 struct DiskFs<'a> {
@@ -627,6 +773,13 @@ impl Fs for DiskFs<'_> {
         let _ = walk::walk_dirs(self.config, Some(Path::new(rel)), &closed, &on_batch, Some(on_dir));
         files.into_inner().unwrap_or_else(|e| e.into_inner())
     }
+
+    fn git_dir_created(&mut self, owner: &str) -> bool {
+        self.shared.git_dir_created(owner);
+        let exclude =
+            if owner.is_empty() { ".git/info/exclude".to_string() } else { format!("{owner}/.git/info/exclude") };
+        self.kind(&exclude) == Kind::File
+    }
 }
 
 /// The result of translating one batch of debounced events.
@@ -652,6 +805,14 @@ fn ignore_file_owner(rel: &str) -> Option<&str> {
         None if owner.is_empty() => Some(""),
         None => None,
     }
+}
+
+/// The directory holding `rel`, if `rel` is a `.git` or `.git/info` entry.
+fn git_dir_owner(rel: &str) -> Option<&str> {
+    [".git", ".git/info"].into_iter().find_map(|suffix| match rel.strip_suffix(suffix)? {
+        "" => Some(""),
+        owner => owner.strip_suffix('/'),
+    })
 }
 
 /// Translates one batch of debounced events (see the module docs).
@@ -687,6 +848,13 @@ pub(crate) fn translate(events: &[DebouncedEvent], roots: &[PathBuf], fs: &mut i
                 EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => i == 0,
                 _ => true,
             };
+            if !removed
+                && let Some(owner) = git_dir_owner(&rel)
+                && (owner.is_empty() || !fs.is_ignored(owner, true))
+                && fs.git_dir_created(owner)
+            {
+                return Outcome::Rescan { lost: false };
+            }
             match paths.iter_mut().find(|(p, _)| *p == rel) {
                 Some((_, r)) => *r |= removed,
                 None => paths.push((rel, removed)),
@@ -731,8 +899,35 @@ pub(crate) fn translate(events: &[DebouncedEvent], roots: &[PathBuf], fs: &mut i
     Outcome::Changes(changes)
 }
 
-/// Test hooks keyed by the project root: make set-up fail, force [`Mode::Recursive`], and inspect the known
-/// (watched) directories.
+/// Translates the paths raw backend events reported removed or renamed away: each path that is gone from the
+/// disk now (or is no entry) is removed, like in [`translate`]; paths that exist are left to the debounced
+/// events.
+pub(crate) fn translate_removed(paths: &[PathBuf], roots: &[PathBuf], fs: &mut impl Fs) -> Vec<Change> {
+    let mut changes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    // Known directories removed in this batch; paths below them need nothing more.
+    let mut covered: Vec<String> = Vec::new();
+    for path in paths {
+        let Some(rel) = relative(roots, path) else { continue };
+        if rel.is_empty() || !seen.insert(rel.clone()) || covered.iter().any(|d| at_or_below(&rel, d)) {
+            continue;
+        }
+        if !matches!(fs.kind(&rel), Kind::Missing | Kind::Other) {
+            continue;
+        }
+        if fs.is_known_dir(&rel) {
+            changes.push(Change::RemoveDir(rel.clone()));
+            fs.forget_dir(&rel);
+            covered.push(rel);
+        } else if !fs.is_ignored(&rel, false) {
+            changes.push(Change::Remove(rel));
+        }
+    }
+    changes
+}
+
+/// Test hooks keyed by the project root: make set-up or the backend fail, force [`Mode::Recursive`], inspect the
+/// known (watched) directories, and simulate lost events and lost watches.
 #[cfg(test)]
 pub(crate) mod hook {
     use super::Shared;
@@ -741,12 +936,32 @@ pub(crate) mod hook {
     use std::sync::{Arc, LazyLock, Mutex, Weak};
 
     static FAIL_SETUP: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
+    static FAIL_BACKEND: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
+    static DEBOUNCERS: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
     static RECURSIVE: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
     static WATCHERS: LazyLock<Mutex<HashMap<PathBuf, Weak<Shared>>>> = LazyLock::new(Default::default);
 
     /// Watcher set-up for `root` fails from now on.
     pub fn fail_setup(root: &Path) {
         FAIL_SETUP.lock().unwrap().insert(root.to_path_buf());
+    }
+
+    /// Creating the backend watcher for `root` fails from now on.
+    pub fn fail_backend(root: &Path) {
+        FAIL_BACKEND.lock().unwrap().insert(root.to_path_buf());
+    }
+
+    pub(super) fn backend_fails(root: &Path) -> bool {
+        FAIL_BACKEND.lock().unwrap().contains(root)
+    }
+
+    pub(super) fn debouncer_started(root: &Path) {
+        DEBOUNCERS.lock().unwrap().insert(root.to_path_buf());
+    }
+
+    /// Whether a debouncer (and so its thread) was started for `root`.
+    pub fn has_debouncer(root: &Path) -> bool {
+        DEBOUNCERS.lock().unwrap().contains(root)
     }
 
     /// The watcher for `root` uses one recursive watch, as on macOS and Windows.
@@ -768,8 +983,35 @@ pub(crate) mod hook {
 
     /// Makes the live watcher for `root` fail as after a backend error.
     pub fn fail_now(root: &Path, message: &str) {
-        let shared = WATCHERS.lock().unwrap().get(root).and_then(Weak::upgrade).expect("a live watcher");
-        shared.fail(message.to_string());
+        live(root).fail(message.to_string());
+    }
+
+    fn live(root: &Path) -> Arc<Shared> {
+        WATCHERS.lock().unwrap().get(root).and_then(Weak::upgrade).expect("a live watcher")
+    }
+
+    /// Reports lost events for `root`, as the watcher thread does on notify's rescan flag.
+    pub fn lose_events(root: &Path) {
+        let shared = live(root);
+        shared.lost.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        (shared.sink)(super::Output::Rescan);
+    }
+
+    /// Drops the backend's watch of the known directory `rel` without forgetting it, as when a directory was
+    /// replaced while events were lost.
+    pub fn drop_watch(root: &Path, rel: &str) {
+        let shared = live(root);
+        let abs = shared.abs(rel);
+        notify::Watcher::unwatch(super::lock(&shared.backend).as_mut().expect("open"), &abs).expect("watched");
+    }
+
+    /// Forgets and unwatches `<owner>/.git/info`, as if its creation had been missed.
+    pub fn forget_git_info(root: &Path, owner: &str) {
+        let shared = live(root);
+        let info = super::git_info(owner);
+        assert!(super::lock(&shared.state).dirs.remove(&info).is_some(), "{info} is not watched");
+        let abs = shared.abs(&info);
+        notify::Watcher::unwatch(super::lock(&shared.backend).as_mut().expect("open"), &abs).expect("watched");
     }
 
     /// The known directories of the live watcher for `root` (each watched in per-directory mode).
@@ -853,6 +1095,14 @@ mod tests {
                 }
             }
             files
+        }
+        fn git_dir_created(&mut self, owner: &str) -> bool {
+            if self.known.contains(owner) {
+                self.log.push(format!("git {owner}"));
+            }
+            let exclude =
+                if owner.is_empty() { ".git/info/exclude".into() } else { format!("{owner}/.git/info/exclude") };
+            self.kind(&exclude) == Kind::File
         }
     }
 
@@ -1094,5 +1344,110 @@ mod tests {
         assert_eq!(relative(&roots, Path::new("/rx/a")), None);
         assert!(at_or_below("a/b", "a") && at_or_below("a", "a") && at_or_below("x", ""));
         assert!(!at_or_below("ab", "a") && !at_or_below("a", "a/b"));
+    }
+
+    fn abs(paths: &[&str]) -> Vec<PathBuf> {
+        paths.iter().map(|p| PathBuf::from(format!("{ROOT}/{p}"))).collect()
+    }
+
+    #[test]
+    fn removed_paths_of_raw_events() {
+        let event = |kind, paths: &[&str]| abs(paths).into_iter().fold(Event::new(kind), Event::add_path);
+        let got = |kind, paths: &[&str]| removed_paths(&event(kind, paths)).to_vec();
+        assert_eq!(got(REMOVE, &["a"]), abs(&["a"]));
+        assert_eq!(got(RENAME_FROM, &["a"]), abs(&["a"]));
+        assert_eq!(got(RENAME_ANY, &["a"]), abs(&["a"]));
+        assert_eq!(got(RENAME_BOTH, &["a", "b"]), abs(&["a"]));
+        assert_eq!(got(RENAME_TO, &["b"]), abs(&[]));
+        assert_eq!(got(CREATE_FILE, &["a"]), abs(&[]));
+        assert_eq!(got(DATA, &["a"]), abs(&[]));
+    }
+
+    #[test]
+    fn raw_removals_translate_only_paths_gone_from_disk() {
+        let mut fs = FakeFs::default()
+            .with("back", Kind::File)
+            .with("link", Kind::Other)
+            .known("d")
+            .known("d/sub")
+            .ignore("build");
+        let got = translate_removed(
+            &abs(&["tmp", "back", "link", "d/sub/f", "d", "d/sub", "build/x", "tmp", "back"]),
+            &[PathBuf::from(ROOT)],
+            &mut fs,
+        );
+        assert_eq!(got, vec![rm("tmp"), rm("link"), rm("d/sub/f"), rmdir("d")]);
+        assert_eq!(fs.log, vec!["forget d"]);
+        // The root and paths outside it are skipped.
+        assert_eq!(translate_removed(&[PathBuf::from(ROOT), "/x/y".into()], &[PathBuf::from(ROOT)], &mut fs), vec![]);
+    }
+
+    #[test]
+    fn git_dir_created_watches_info_and_rescans_with_exclude() {
+        // A `.git` directory with no exclude file: watched, no rescan, the rest of the batch is translated.
+        let mut fs = FakeFs::default().known("").known("sub").with("x", Kind::File).ignore(".git").ignore("sub/.git");
+        assert_eq!(changes(&[ev(CREATE_DIR, &["sub/.git"]), ev(CREATE_FILE, &["x"])], &mut fs), vec![add("x")]);
+        assert_eq!(fs.log, vec!["git sub"]);
+        // With an exclude file its rules now apply: a rescan.
+        let mut fs = FakeFs::default().known("").with(".git/info/exclude", Kind::File).ignore(".git");
+        assert_eq!(run(&[ev(RENAME_TO, &[".git"])], &mut fs), Outcome::Rescan { lost: false });
+        assert_eq!(fs.log, vec!["git "]);
+        // `.git/info` itself (seen in recursive mode), and not for removals or `.git` in an ignored directory.
+        let mut fs = FakeFs::default().known("a").ignore("build");
+        changes(&[ev(CREATE_DIR, &["a/.git/info"]), ev(REMOVE, &[".git"]), ev(CREATE_DIR, &["build/.git"])], &mut fs);
+        assert_eq!(fs.log, vec!["git a"]);
+        assert_eq!(git_dir_owner("a.git"), None);
+        assert_eq!(git_dir_owner("a/x.git/info"), None);
+        assert_eq!(git_dir_owner(".git/info"), Some(""));
+    }
+
+    fn quiet_watcher(root: &Path) -> Watcher {
+        let config = WalkConfig { root: root.to_path_buf(), include_hidden: true, ignores: Vec::new() };
+        Watcher::start(Arc::new(config), Arc::new(|_| {})).unwrap()
+    }
+
+    #[test]
+    fn lost_events_force_rewatch_until_a_forced_walk_completes() {
+        let t = tempfile::TempDir::new().unwrap();
+        let watcher = quiet_watcher(t.path());
+        let begin = || {
+            let (tracker, stamp) = watcher.begin_walk();
+            (tracker.force, stamp)
+        };
+        assert!(!begin().0);
+        watcher.shared.lost.fetch_add(1, Ordering::Relaxed);
+        // A forced walk that does not complete (superseded, failed) leaves the next walk forced.
+        let (force, _abandoned) = begin();
+        assert!(force);
+        let (force, stamp) = begin();
+        assert!(force);
+        // Events lost again during the forced walk force the walk after it too.
+        watcher.shared.lost.fetch_add(1, Ordering::Relaxed);
+        watcher.walk_done(stamp);
+        let (force, stamp) = begin();
+        assert!(force);
+        watcher.walk_done(stamp);
+        assert!(!begin().0);
+        // A walk that began before a forced one but completes after it does not undo it.
+        watcher.shared.lost.fetch_add(1, Ordering::Relaxed);
+        let (_, old) = begin();
+        let (_, new) = begin();
+        watcher.walk_done(new);
+        watcher.walk_done(old);
+        assert!(!begin().0);
+    }
+
+    #[test]
+    fn backend_failure_starts_no_debouncer_thread() {
+        let t = tempfile::TempDir::new().unwrap();
+        hook::fail_backend(t.path());
+        let config = WalkConfig { root: t.path().to_path_buf(), include_hidden: true, ignores: Vec::new() };
+        let error = Watcher::start(Arc::new(config), Arc::new(|_| {})).err().expect("a set-up error");
+        assert!(error.contains("simulated backend failure"), "{error}");
+        assert!(!hook::has_debouncer(t.path()));
+        // Without the failure, the debouncer is started.
+        let other = tempfile::TempDir::new().unwrap();
+        let _watcher = quiet_watcher(other.path());
+        assert!(hook::has_debouncer(other.path()));
     }
 }

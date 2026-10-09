@@ -119,8 +119,13 @@ projdex ranks in Rust and passes the result through a completion style also
 called `projdex`, bound only for the duration of its own prompt. Your
 `completion-styles` (orderless, flex, ...) do not apply inside projdex
 prompts and other prompts are unaffected (`docs/decisions/0002`). In the
-default completion UI, TAB does not expand a unique match (`docs/backlog.md`);
-UIs that select candidates, such as vertico, are unaffected.
+default completion UI, TAB completes the input when exactly one file
+matches, and RET on input that matches exactly one file visits that file.
+
+`projdex-mode` remaps the key bindings of `project-find-file`. Commands
+that call `project-find-file` by name, such as the `project-switch-project`
+menu (`project-switch-commands`), are not remapped; add
+`projdex-find-file` to `project-switch-commands` if you want it there.
 
 ## Options
 

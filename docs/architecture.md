@@ -55,8 +55,8 @@ and benchmark scripts use the `emrs.el` from that checkout.
 count, `indexing`, `watching`, epoch). `projdex--ensure` returns the
 running record or starts an instance with `emrs-start` and the start
 arguments (`:root`, `:include-hidden`, `:ignores`). Events update the
-record: `:indexed` and `:changed` set the file count and increment the
-epoch, `:watch-failed` clears `watching` and shows one warning. On exit the
+record: `:indexed` sets the file count, `:changed` adjusts it by the
+added and removed counts, and both increment the epoch; `:watch-failed` clears `watching` and shows one warning. On exit the
 record is removed; a failed instance leaves a warning and its message. There
 is no automatic restart; the next command starts a new instance.
 
@@ -82,18 +82,24 @@ are in the module docs of `src/service.rs`.
 `start` validates the root, creates the watcher (a failure only disables
 watching), and spawns the first walk without waiting for it.
 
-### Generations
+### Generations and rescans
 
 Every walk has a generation number and builds a fresh index from its
-batches. Until `WalkDone` of the newest walk, queries use the previous
-index (or, during the first walk, the partial fresh one). Starting a walk
-cancels the running one; batches and `WalkDone` of any other generation are
-discarded. Pending `:rescan` replies and `:files` streams are answered at
-the `WalkDone` of the newest walk. File-system changes during a walk are
+batches. Until the walk's `WalkDone`, queries use the previous index (or,
+during the first walk, the partial fresh one); batches and `WalkDone` of
+any other generation are discarded. File-system changes during a walk are
 applied to the index queries use and recorded; at `WalkDone` they are
-replayed on the fresh index before it becomes current, so no change is lost.
-A walk that fails keeps the old index; pending `:rescan` calls fail with the
-message.
+replayed on the fresh index before it becomes current, so no change is
+lost.
+
+Rescans coalesce: a `:rescan` or watcher `FsRescan` while a walk runs only
+sets "walk again", and one follow-up walk starts when the running walk
+ends. Only `stop()` cancels a walk. `:rescan` replies are answered by the
+first walk that started after the request; `:files` streams wait only for
+the running walk. A walk that fails keeps the old index (or makes the
+partial one current when there was none); the `:rescan` calls waiting for
+it fail with the message. The exact rules are in the spec, section
+"Rescans".
 
 ### Queries, narrowing and scoring
 

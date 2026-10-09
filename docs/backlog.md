@@ -29,24 +29,6 @@ projdex pins `nucleo-matcher` to an upstream git commit because 0.3.1 has
 the case-sensitive prefix bug (ADR 0003). Revisit when a release after
 0.3.1 appears on crates.io.
 
-## TAB completion in the default completion UI
-
-The `projdex` style's try-completion returns the input unchanged unless it
-already equals the only match (spec, "Completion table"). In the default
-UI, TAB therefore never expands `main` to `src/main.rs` even when that is
-the only match; vertico and similar UIs select candidates instead and are
-unaffected. Origin: task 6 of the v1 spec, 2026-10-09. Revisit after the
-manual UI checks: returning the sole match when `:total` is 1 is a likely
-fix.
-
-## `.git/info/exclude` created after the first walk
-
-The watcher watches each repository's `.git/info` only if it existed when
-its directory was walked. After `git init` in an indexed tree, edits to
-`.git/info/exclude` go unnoticed until the next full rescan
-(`projdex-rescan`, a `.gitignore` change, or lost events). Origin: task 4
-of the v1 spec, 2026-10-09. Revisit if users report it.
-
 ## Watcher on macOS and Windows
 
 The recursive-watch path for non-Linux platforms is type-checked for
@@ -76,3 +58,49 @@ ranks `external/mesa3d/.../ActivityManager.h` above
 prefers more prominent paths (recently visited, shallower in a well-known
 tree) may help. Origin: task 8 benchmark observation, 2026-10-09.
 Revisit with real use.
+
+## `remove_dir` scans the whole index
+
+`Index::remove_dir` is O(n). A batch with many sibling directory removals
+on a 1M-path index (`rm -rf` of a large non-ignored tree) costs k × n inside
+`handle`, twice during a walk (apply and replay), and can stall queries.
+Origin: v1 review (Rust correctness), 2026-10-09; deferred because large
+deletions usually happen in ignored build directories. Revisit with a
+prefix structure or one combined scan per `FsChanges` batch if prompts
+stall after big deletions.
+
+## Watches left on newly ignored directories
+
+A cancelled walk's worker threads finish the directory listings they have
+started and can mark directories that the new ignore rules exclude, so they
+keep their watches until the next walk. Only wasted watches; events there
+are still ignored. Origin: v1 review (Rust correctness), 2026-10-09;
+deferred as low impact (rarer still since rescans coalesce). Revisit if
+watch limits become tight.
+
+## Unbounded memory during walks and `(:files)`
+
+Changes recorded during a walk (`Walk.changes`) grow without a cap, and
+each `(:files)` call copies the whole index into a `Vec<String>`. Origin:
+v1 review (Rust correctness), 2026-10-09; deferred because walks are
+seconds long and `(:files)` is opt-in. Revisit if memory use is reported
+on huge trees (cap the change log and force a follow-up walk; snapshot
+shared strings).
+
+## Waiting for `(:files)` runs other process filters
+
+`projdex--collect-files` waits with `(accept-process-output nil 0.05)`,
+so other processes' filters and timers can run inside `project-files`.
+`emrs-call-sync` waits on the module pipe only, but that pipe is private
+to emrs. Origin: v1 review (Elisp), 2026-10-09; deferred because it needs
+a public helper in emrs (a synchronous stream collect, or access to the
+pipe). Revisit with the next emrs change.
+
+## Symlinked project roots get separate instances
+
+`projdex--root` does not resolve symlinks, so one directory reached by two
+spellings gets two instances and two sets of watches. Using
+`file-truename` only for the instance key would fix it, but
+`project-files` must keep returning paths under the project's own
+spelling. Origin: v1 review (Elisp), 2026-10-09; deferred as rare.
+Revisit on a report.

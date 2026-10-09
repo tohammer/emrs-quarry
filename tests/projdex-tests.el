@@ -69,8 +69,10 @@
   `(let ,(mapcar (lambda (b) `(,(car b) (projdex-test--make-tree ,(cadr b)))) bindings)
      (unwind-protect (progn ,@body)
        (projdex-stop-all)
-       (projdex-test--wait (lambda () (zerop (hash-table-count projdex--instances))) 3)
-       ,@(mapcar (lambda (b) `(delete-directory ,(car b) t)) bindings))))
+       (let ((gone (projdex-test--wait
+                    (lambda () (zerop (hash-table-count projdex--instances))) 3)))
+         ,@(mapcar (lambda (b) `(delete-directory ,(car b) t)) bindings)
+         (should gone)))))
 
 (ert-deftest projdex-test-one-instance-per-root ()
   (projdex-test--with-roots ((a '("a.txt")) (b '("b.txt")))
@@ -208,7 +210,8 @@
                      (plist-get (projdex-query dir "" 200) :paths)))
       ;; try-completion
       (should (eq (funcall table "src/main.rs" nil nil) t))
-      (should (equal (funcall table "main" nil nil) "main"))
+      (should (equal (funcall table "main" nil nil) "src/main.rs"))
+      (should (equal (funcall table "rs$" nil nil) "rs$"))
       (should (null (funcall table "zzzzqq" nil nil)))
       ;; test-completion
       (should (funcall table "src/main.rs" nil 'lambda))
@@ -238,7 +241,9 @@
                      expected))
       (should (= (cdr (last all)) 0))
       (should (null (completion-all-completions "zzzzqq" table nil 6)))
-      (should (equal (completion-try-completion "main" table nil 4) '("main" . 4)))
+      (should (equal (completion-try-completion "main" table nil 4)
+                     '("src/main.rs" . 11)))
+      (should (equal (completion-try-completion "rs$" table nil 3) '("rs$" . 3)))
       (should (eq (completion-try-completion "src/main.rs" table nil 11) t))
       (should (null (completion-try-completion "zzzzqq" table nil 6))))))
 
@@ -266,7 +271,20 @@
       (should (equal (projdex-test--faces-at
                       (car (funcall table "main" nil t)))
                      '(4 5 6 7)))
-      (should-not (get-text-property 0 'face (car (plist-get (projdex-query dir "main" 10) :paths)))))))
+      (should-not (get-text-property 0 'face (car (plist-get (projdex-query dir "main" 10) :paths))))
+      ;; A UI that adds properties in place does not corrupt the cache,
+      ;; with highlighting and without.
+      (let ((str (car (funcall table "main" nil t))))
+        (put-text-property 0 (length str) 'face 'bold str)
+        (should (equal (projdex-test--faces-at (car (funcall table "main" nil t)))
+                       '(4 5 6 7)))
+        (should-not (memq 'bold (ensure-list
+                                 (get-text-property 0 'face (car (funcall table "main" nil t)))))))
+      (let ((projdex-highlight nil)
+            (table (projdex--table dir)))
+        (let ((str (car (funcall table "main" nil t))))
+          (put-text-property 0 (length str) 'face 'bold str))
+        (should-not (get-text-property 0 'face (car (funcall table "main" nil t))))))))
 
 (ert-deftest projdex-test-cache ()
   (projdex-test--with-index dir
@@ -307,7 +325,8 @@
       (should-not (funcall table "newfile" nil t))
       (let ((epoch (projdex--rec-epoch rec)))
         (write-region "" nil (expand-file-name "newfile.txt" dir) nil 'silent)
-        (should (projdex-test--wait (lambda () (> (projdex--rec-epoch rec) epoch))))
+        (unless (projdex-test--wait (lambda () (> (projdex--rec-epoch rec) epoch)))
+          (ert-fail "No :changed event: this test needs a working file watcher (inotify, FSEvents or ReadDirectoryChanges)"))
         (should (equal (funcall table "newfile" nil t) '("newfile.txt")))))))
 
 (ert-deftest projdex-test-table-timeout ()
@@ -349,6 +368,152 @@
               (should (equal (buffer-file-name buf)
                              (expand-file-name "src/main.rs" dir))))
           (when buf (kill-buffer buf)))))))
+
+(defun projdex-test--find-file-with-keys (dir keys)
+  "Run `projdex-find-file' in project DIR typing KEYS; return the visited file."
+  (let* ((project-find-functions (list (lambda (_) (list 'transient dir))))
+         (buf nil))
+    (cl-letf (((symbol-function 'project-root) (lambda (p) (cadr p))))
+      (unwind-protect
+          (progn
+            (execute-kbd-macro (kbd (concat "M-x projdex-find-file RET " keys)))
+            (setq buf (current-buffer))
+            (buffer-file-name buf))
+        (when buf (kill-buffer buf))))))
+
+(ert-deftest projdex-test-ui-unique-match ()
+  "TAB completes a unique match and RET accepts the completion."
+  (projdex-test--with-index dir
+    (let* ((contents nil)
+           (orig (symbol-function 'completing-read))
+           )
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest args)
+                   (setq contents (apply orig args)))))
+      ;; TAB completes `main' to the only candidate; RET visits it.
+      (should (equal (projdex-test--find-file-with-keys dir "main TAB RET")
+                     (concat dir "src/main.rs")))
+      (should (equal contents "src/main.rs"))
+      ;; `confirm' makes the first RET ask for confirmation and the
+      ;; second accept the input as typed; `projdex-find-file' then
+      ;; resolves it to the unique match instead of <root>/main.
+      (setq contents nil)
+      (should (equal (projdex-test--find-file-with-keys dir "main RET RET")
+                     (concat dir "src/main.rs")))
+      (should (equal contents "main"))
+      ;; Input matching several files is visited as typed.
+      (should (equal (projdex-test--find-file-with-keys dir "rs$ RET RET")
+                     (concat dir "rs$")))))))
+
+(ert-deftest projdex-test-ui-multiple-matches-keep-input ()
+  (projdex-test--with-index dir
+    (let ((table (projdex--table dir)))
+      (should (equal (funcall table "rs$" nil nil) "rs$"))
+      (should (equal (completion-try-completion "rs$" table nil 3) '("rs$" . 3))))))
+
+(ert-deftest projdex-test-find-file-tilde-directory ()
+  "An index path starting with a `~' directory stays below the root."
+  (let ((dir (projdex-test--make-tree '("a.txt"))))
+    (make-directory (concat dir "~/") t)
+    (write-region "" nil (concat dir "~/x") nil 'silent)
+    (unwind-protect
+        (progn
+          (emrs-call-sync (projdex--rec-instance (projdex--ensure dir)) '(:rescan) 10)
+          (let ((file (projdex-test--find-file-with-keys dir "~/x RET")))
+            (should (equal file (concat dir "~/x")))
+            (should (string-prefix-p dir file))))
+      (projdex-stop-all)
+      (projdex-test--wait (lambda () (zerop (hash-table-count projdex--instances))) 3)
+      (delete-directory dir t))))
+
+(ert-deftest projdex-test-find-file-failed-root ()
+  "A project root the service cannot index gives a `user-error'."
+  (let* ((dir (projdex-test--make-tree nil))
+         (missing (file-name-as-directory (expand-file-name "nope" dir)))
+         (project-find-functions (list (lambda (_) (list 'transient missing)))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-root) (lambda (p) (cadr p))))
+          (let ((err (should-error (projdex-find-file) :type 'user-error)))
+            (should (string-prefix-p "projdex: " (cadr err)))
+            (should (> (length (cadr err)) (length "projdex: ")))))
+      (projdex-stop-all)
+      (delete-directory dir t))))
+
+(ert-deftest projdex-test-module-not-found ()
+  (let ((dir (projdex-test--make-tree nil)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'emrs-load-module)
+                   (lambda (&rest _) (signal 'file-missing '("Cannot open load file" "projdex-module")))))
+          (let ((err (should-error (projdex--ensure dir) :type 'user-error)))
+            (should (string-match-p "Cannot load the projdex module" (cadr err)))
+            (should (string-match-p "load-path" (cadr err))))
+          (should-not (projdex--lookup dir)))
+      (delete-directory dir t))))
+
+(ert-deftest projdex-test-failed-instance-table ()
+  "A table on a failed instance starts it once and reports it once."
+  (let* ((dir (projdex-test--make-tree nil))
+         (missing (file-name-as-directory (expand-file-name "nope" dir)))
+         (starts 0) (msgs nil) (queries 0))
+    (advice-add 'projdex--start :before (lambda (&rest _) (cl-incf starts))
+                '((name . projdex-test-count-start)))
+    (advice-add 'projdex-query :before (lambda (&rest _) (cl-incf queries))
+                '((name . projdex-test-count-query)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args) (push (apply #'format fmt args) msgs))))
+          (let ((table (projdex--table missing)))
+            (dotimes (_ 4)
+              (should (null (funcall table "x" nil t)))
+              (should (null (funcall table "xy" nil nil))))
+            (should (= starts 1))
+            (should (= queries 1))
+            (should (= (length msgs) 1))
+            (should (string-prefix-p "projdex: " (car msgs)))))
+      (advice-remove 'projdex--start 'projdex-test-count-start)
+      (advice-remove 'projdex-query 'projdex-test-count-query)
+      (projdex-stop-all)
+      (delete-directory dir t))))
+
+(ert-deftest projdex-test-cache-instance-identity ()
+  "A restarted instance does not hit the cache of the old one."
+  (projdex-test--with-index dir
+    (let ((calls 0)
+          (table (projdex--table dir)))
+      (advice-add 'projdex-query :before (lambda (&rest _) (cl-incf calls))
+                  '((name . projdex-test-count)))
+      (unwind-protect
+          (progn
+            (funcall table "main" nil t)
+            (should (= calls 1))
+            (let ((old (projdex--ensure dir)))
+              (projdex--stop dir)
+              (should (projdex-test--wait (lambda () (null (projdex--lookup dir)))))
+              (let ((new (projdex--ensure dir)))
+                (should-not (eq old new))
+                (should-not (= (projdex--rec-id old) (projdex--rec-id new)))
+                ;; Same epoch number on purpose.
+                (setf (projdex--rec-epoch new) (projdex--rec-epoch old))
+                (funcall table "main" nil t)
+                (should (= calls 2)))))
+        (advice-remove 'projdex-query 'projdex-test-count)))))
+
+(ert-deftest projdex-test-cache-skips-indexing-replies ()
+  (let ((calls 0)
+        (rec (projdex--make-rec :root "/x/")))
+    (cl-letf (((symbol-function 'projdex--ensure) (lambda (_) rec))
+              ((symbol-function 'projdex-query)
+               (lambda (&rest _)
+                 (cl-incf calls)
+                 (list :paths '("a") :positions nil :total 1 :indexing (< calls 3)))))
+      (let ((table (projdex--table "/x/")))
+        (funcall table "a" nil t)
+        (funcall table "a" nil t)
+        (should (= calls 2))
+        ;; The third reply is complete and cached.
+        (funcall table "a" nil t)
+        (funcall table "a" nil t)
+        (should (= calls 3))))))
 
 (ert-deftest projdex-test-find-file-fallbacks ()
   (projdex-test--with-index dir
@@ -447,6 +612,29 @@
                     (should (equal (project-files project (list dir (concat dir "src/")))
                                    '("NEXT-METHOD")))
                     (should (= n 0)))))
+            (projdex-mode -1)))
+      (projdex-stop-all)
+      (projdex-test--wait (lambda () (zerop (hash-table-count projdex--instances))) 3)
+      (delete-directory dir t))))
+
+(ert-deftest projdex-test-project-files-stopping ()
+  "While an instance is stopping, `project-files' uses the next method."
+  (let ((dir (projdex-test--files-tree)))
+    (unwind-protect
+        (let ((projdex-provide-project-files t))
+          (emrs-call-sync (projdex--rec-instance (projdex--ensure dir)) '(:rescan) 10)
+          (unwind-protect
+              (progn
+                (projdex-mode 1)
+                (projdex--stop dir)
+                (should (eq (emrs-instance-state (projdex--rec-instance (projdex--lookup dir)))
+                            'stopping))
+                (should (equal (project-files (cons 'projdex-test dir)) '("NEXT-METHOD")))
+                ;; The same when the state changes after the applicability check.
+                (cl-letf (((symbol-function 'projdex--files-applicable-p)
+                           (lambda (&rest _) (projdex--lookup dir))))
+                  (should (equal (project-files (cons 'projdex-test dir))
+                                 '("NEXT-METHOD")))))
             (projdex-mode -1)))
       (projdex-stop-all)
       (projdex-test--wait (lambda () (zerop (hash-table-count projdex--instances))) 3)

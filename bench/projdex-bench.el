@@ -398,6 +398,11 @@ completion call, ROWS per query (QUERY CALLS MAX-MS RESULTS FIRST)."
                  (mapconcat (lambda (kv) (format " %s=%s" (car kv) (cdr kv))) extra "")
                  "\n")))
 
+(defvar projdex-bench-index-timeout
+  (let ((env (getenv "PROJDEX_BENCH_INDEX_TIMEOUT")))
+    (if (and env (> (string-to-number env) 0)) (string-to-number env) 600))
+  "Seconds to wait for the first `:indexed' event.")
+
 (defun projdex-bench--run-projdex (size tree)
   "Benchmark projdex on TREE, labelled SIZE; return its p99 in ms."
   (emrs-load-module 'projdex)
@@ -407,8 +412,21 @@ completion call, ROWS per query (QUERY CALLS MAX-MS RESULTS FIRST)."
          (rss0 (projdex-bench--rss-mb))
          (start (float-time))
          (rec (projdex--ensure root)))
-    (while (= (projdex--rec-epoch rec) 0)
-      (accept-process-output nil 0.005))
+    (let ((deadline (+ start projdex-bench-index-timeout)))
+      (while (= (projdex--rec-epoch rec) 0)
+        (cond
+         ((not (eq (projdex--lookup root) rec))
+          (error "Instance for %s went away before the first :indexed%s" root
+                 (let ((msg (gethash root projdex--failures)))
+                   (if msg (format ": %s" msg) ""))))
+         ((not (memq (emrs-instance-state (projdex--rec-instance rec))
+                     '(starting running)))
+          (error "Instance for %s is %s before the first :indexed" root
+                 (emrs-instance-state (projdex--rec-instance rec))))
+         ((> (float-time) deadline)
+          (error "No :indexed event for %s within %s s (set PROJDEX_BENCH_INDEX_TIMEOUT)"
+                 root projdex-bench-index-timeout)))
+        (accept-process-output nil 0.005)))
     (let* ((index-ms (* 1000 (- (float-time) start)))
            (rss1 (projdex-bench--rss-mb))
            (status (projdex--status root))
@@ -475,7 +493,10 @@ Exit with status 1 when projdex's p99 exceeds THRESHOLD-MS."
         (projdex-bench--run-baseline size tree))
       (if (> p99 limit)
           (progn
-            (princ (format "\nFAIL size=%s: projdex p99 %.1f ms exceeds %d ms\n" size p99 limit))
+            ;; 1M files is a goal, not a requirement (spec).
+            (princ (format "\n%s size=%s: projdex p99 %.1f ms exceeds %d ms\n"
+                           (if (equal size "1m") "GOAL MISSED" "FAIL")
+                           size p99 limit))
             (kill-emacs 1))
         (princ (format "\nPASS size=%s: projdex p99 %.1f ms within %d ms\n" size p99 limit))
         (kill-emacs 0)))))

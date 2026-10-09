@@ -68,9 +68,13 @@ This is a safety net against a stuck instance, not a latency budget."
 
 ;;;; Instances
 
+(defvar projdex--next-id 0
+  "Counter giving each instance record a unique id.")
+
 (cl-defstruct (projdex--rec (:constructor projdex--make-rec) (:copier nil))
   "State of the service instance of one project root."
-  instance root (files 0) indexing watching (epoch 0) warned)
+  instance root (files 0) indexing watching (epoch 0) warned
+  (id (cl-incf projdex--next-id)))
 
 (defvar projdex--instances (make-hash-table :test 'equal)
   "Running instance records, keyed by project root.")
@@ -169,16 +173,12 @@ This is a safety net against a stuck instance, not a latency budget."
   "Return the query request for TEXT, LIMIT and POSITIONS."
   (list :query :text text :limit limit :positions (and positions t)))
 
-(defun projdex-query (root text limit &optional positions)
-  "Query the index of ROOT for TEXT, returning at most LIMIT paths.
-Return the reply plist (:paths :positions :total :indexing).  With
-POSITIONS, also return the matched character indices.  Signal a
-`user-error' when the instance failed or stopped."
+(defun projdex--call-sync (root request)
+  "Send REQUEST to the instance of ROOT and return the reply.
+Signal a `user-error' when the instance failed or stopped."
   (let ((rec (projdex--ensure root)))
     (condition-case err
-        (emrs-call-sync (projdex--rec-instance rec)
-                        (projdex--request text limit positions)
-                        projdex-query-timeout)
+        (emrs-call-sync (projdex--rec-instance rec) request projdex-query-timeout)
       (emrs-error
        (pcase (cadr err)
          ((or 'failed 'stopped)
@@ -187,6 +187,13 @@ POSITIONS, also return the matched character indices.  Signal a
                       (or (gethash (projdex--rec-root rec) projdex--failures)
                           (nth 2 err))))
          (_ (signal (car err) (cdr err))))))))
+
+(defun projdex-query (root text limit &optional positions)
+  "Query the index of ROOT for TEXT, returning at most LIMIT paths.
+Return the reply plist (:paths :positions :total :indexing).  With
+POSITIONS, also return the matched character indices.  Signal a
+`user-error' when the instance failed or stopped."
+  (projdex--call-sync root (projdex--request text limit positions)))
 
 (defun projdex-query-async (root text limit positions callback)
   "Query the index of ROOT for TEXT like `projdex-query', asynchronously.
@@ -214,37 +221,46 @@ error plist otherwise.  Return the call, which `emrs-cancel' cancels."
 (defun projdex--table (root)
   "Return a completion table for the files of the project at ROOT.
 The whole input is the query; the candidates keep the order of the
-index.  Results are cached per input, epoch, limit and highlighting."
+index.  Results are cached per input, instance, epoch, limit and
+highlighting; replies of a still indexing instance are not cached.
+When the instance cannot be started or failed, the table reports it once
+and has no candidates from then on."
   (let ((cache nil)
-        (warned nil))
+        (warned nil)
+        (failed nil))
     (cl-flet ((results (string)
                 ;; Return a list of (PATH . POSITIONS), best first.
-                (let* ((rec (projdex--ensure root))
-                       (limit projdex-limit)
-                       (highlight (and projdex-highlight t))
-                       (key (list string (projdex--rec-epoch rec) limit highlight))
-                       (hit (assoc key cache)))
-                  (if hit
-                      (cdr hit)
-                    (let ((value
-                           (condition-case err
-                               (let ((reply (projdex-query root string limit highlight)))
-                                 (cl-mapcar #'cons (plist-get reply :paths)
-                                            (or (plist-get reply :positions)
-                                                (make-list (length (plist-get reply :paths))
-                                                           nil))))
-                             (emrs-error
-                              (if (eq (cadr err) 'timeout)
-                                  (progn
-                                    (unless warned
-                                      (setq warned t)
-                                      (message "projdex: query timed out"))
-                                    'timeout)
-                                (signal (car err) (cdr err)))))))
-                      (unless (eq value 'timeout)
-                        (setq cache (seq-take (cons (cons key value) cache)
-                                              projdex--cache-size)))
-                      (if (eq value 'timeout) nil value))))))
+                (unless failed
+                  (condition-case err
+                      (let* ((rec (projdex--ensure root))
+                             (limit projdex-limit)
+                             (highlight (and projdex-highlight t))
+                             (key (list string (projdex--rec-id rec)
+                                        (projdex--rec-epoch rec) limit highlight))
+                             (hit (assoc key cache)))
+                        (if hit
+                            (cdr hit)
+                          (let* ((reply (projdex-query root string limit highlight))
+                                 (value (cl-mapcar #'cons (plist-get reply :paths)
+                                                   (or (plist-get reply :positions)
+                                                       (make-list (length (plist-get reply :paths))
+                                                                  nil)))))
+                            (unless (plist-get reply :indexing)
+                              (setq cache (seq-take (cons (cons key value) cache)
+                                                    projdex--cache-size)))
+                            value)))
+                    (user-error
+                     (setq failed t)
+                     (message "%s" (cadr err))
+                     nil)
+                    (emrs-error
+                     (if (eq (cadr err) 'timeout)
+                         (progn
+                           (unless warned
+                             (setq warned t)
+                             (message "projdex: query timed out"))
+                           nil)
+                       (signal (car err) (cdr err))))))))
       (lambda (string pred action)
         (pcase action
           ('metadata
@@ -258,7 +274,8 @@ index.  Results are cached per input, epoch, limit and highlighting."
                       when (or (null pred) (funcall pred path))
                       collect (if (and highlight positions)
                                   (projdex--highlight path positions)
-                                path))))
+                                ;; UIs may add properties in place.
+                                (copy-sequence path)))))
           (_
            (let ((paths (cl-loop for (path . _) in (results string)
                                  when (or (null pred) (funcall pred path))
@@ -266,14 +283,19 @@ index.  Results are cached per input, epoch, limit and highlighting."
              (if (eq action 'lambda)
                  (and (member string paths) t)
                (cond ((null paths) nil)
-                     ((and (null (cdr paths)) (equal string (car paths))) t)
-                     (t string))))))))))
+                     ((cdr paths) string)
+                     ((equal string (car paths)) t)
+                     ;; Exactly one match: complete to it.
+                     (t (car paths)))))))))))
 
 (defun projdex-completion-try (string table pred point)
   "Try-completion function of the `projdex' style.
-Pass STRING to TABLE with PRED unchanged; POINT is kept."
+Pass STRING to TABLE with PRED.  A string TABLE completes STRING to is
+returned with point at its end; otherwise STRING and POINT are kept."
   (let ((result (funcall table string pred nil)))
-    (if (stringp result) (cons result point) result)))
+    (cond ((not (stringp result)) result)
+          ((equal result string) (cons string point))
+          (t (cons result (length result))))))
 
 (defun projdex-completion-all (string table pred _point)
   "All-completions function of the `projdex' style.
@@ -353,19 +375,29 @@ with INCLUDE-ALL."
       (let ((rec (projdex--ensure root)))
         (unless (projdex--rec-watching rec)
           (emrs-send (projdex--rec-instance rec) '(:rescan))))
+      ;; A cheap probe, so that an instance that cannot be started or
+      ;; failed is reported here, before the prompt, as a `user-error'.
+      ;; `:status' does not score the index, unlike an empty query.
+      (projdex--call-sync root '(:status))
       (let* ((completion-category-overrides
               (cons '(project-file (styles projdex)) completion-category-overrides))
+             (table (projdex--table root))
              (path (completing-read (format "Find file in %s: " (project-name project))
-                                    (projdex--table root) nil 'confirm nil
-                                    'projdex-file-history)))
-        (find-file (expand-file-name path root))))))
+                                    table nil 'confirm nil
+                                    'projdex-file-history))
+             ;; With `confirm', RET accepts the input as typed.  When it
+             ;; is not a file of the index but completes to exactly one,
+             ;; visit that one rather than a new file.
+             (match (and (not (equal path "")) (funcall table path nil nil))))
+        ;; Not `expand-file-name': a path like "~/x" must stay below ROOT.
+        (find-file (concat root (if (stringp match) match path)))))))
 
 ;;;; project-files
 
 (defun projdex--files-applicable-p (project dirs)
   "Return the root record when `project-files' of PROJECT in DIRS is served.
 That needs `projdex-mode', `projdex-provide-project-files', DIRS nil or
-the project root alone, a local root and an existing instance."
+the project root alone, a local root and a starting or running instance."
   (and (bound-and-true-p projdex-mode)
        projdex-provide-project-files
        (let ((root (projdex--root (project-root project))))
@@ -373,7 +405,11 @@ the project root alone, a local root and an existing instance."
               (or (null dirs)
                   (and (null (cdr dirs))
                        (equal (projdex--root (car dirs)) root)))
-              (projdex--lookup root)))))
+              (let ((rec (projdex--lookup root)))
+                (and rec
+                     (memq (emrs-instance-state (projdex--rec-instance rec))
+                           '(starting running))
+                     rec))))))
 
 (defun projdex--collect-files (rec)
   "Return the absolute file names the index of REC holds, or `fail'.
@@ -383,22 +419,25 @@ Wait up to `projdex-files-timeout' seconds for the stream to end."
          (end nil)
          (call nil))
     (unwind-protect
-        (progn
-          (setq call (emrs-call-stream
-                      (projdex--rec-instance rec) '(:files)
-                      :on-batch (lambda (items) (push items batches))
-                      :on-end (lambda (status _err) (setq end status))))
-          (let ((deadline (+ (float-time) projdex-files-timeout)))
-            (while (and (not end) (< (float-time) deadline))
-              (accept-process-output nil 0.05)))
-          (if (eq end 'done)
-              (let ((files nil))
-                ;; BATCHES is newest first; keep the order of the index.
-                (dolist (batch batches)
-                  (dolist (path (nreverse (copy-sequence batch)))
-                    (push (concat root path) files)))
-                files)
-            'fail))
+        (condition-case nil
+            (progn
+              (setq call (emrs-call-stream
+                          (projdex--rec-instance rec) '(:files)
+                          :on-batch (lambda (items) (push items batches))
+                          :on-end (lambda (status _err) (setq end status))))
+              (let ((deadline (+ (float-time) projdex-files-timeout)))
+                (while (and (not end) (< (float-time) deadline))
+                  (accept-process-output nil 0.05)))
+              (if (eq end 'done)
+                  (let ((files nil))
+                    ;; BATCHES is newest first; keep the order of the index.
+                    (dolist (batch batches)
+                      (dolist (path (nreverse (copy-sequence batch)))
+                        (push (concat root path) files)))
+                    files)
+                'fail))
+          ;; The instance stopped or failed in the meantime.
+          (emrs-error 'fail))
       ;; Cancels on timeout and on a quit; does nothing for a call that
       ;; has already ended.
       (when (and call (not end)) (emrs-cancel call)))))

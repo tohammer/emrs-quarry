@@ -6,7 +6,7 @@
 //! |---|---|
 //! | `(:query :text S :limit N :positions BOOL)` | `(:paths (P ...) :positions (POS ...) :total M :indexing BOOL)` |
 //! | `(:files)` | stream of strings (relative paths), capacity 4096 |
-//! | `(:rescan)` | number of files, once the walk it started has finished |
+//! | `(:rescan)` | number of files, once a walk that started after the request has finished |
 //! | `(:status)` | `(:root R :files N :indexing BOOL :watching BOOL :walks K :skipped S)` |
 //!
 //! `:limit` defaults to 200 and `:positions` to nil. Start arguments are
@@ -16,9 +16,18 @@
 //! **Generations.** Every walk has a generation number and builds a fresh [`Index`] from its batches
 //! (self-messages [`Request::WalkBatch`]); the fresh index becomes current at the walk's [`Request::WalkDone`].
 //! Until then queries use the previous index, except during the first walk, when there is none and queries see
-//! the partial fresh index. Starting a walk cancels the running one (its per-walk flag); batches and `WalkDone`
-//! of any generation other than the running walk's are discarded. Pending `(:rescan)` and `(:files)` replies are
-//! answered only at the `WalkDone` of the running (newest) walk.
+//! the partial fresh index. Batches and `WalkDone` of any generation other than the running walk's are
+//! discarded. At most one walk runs; only `stop` cancels it (its per-walk flag).
+//!
+//! **Rescans coalesce.** A rescan — `(:rescan)` with or without a reply, or [`Request::FsRescan`] from the
+//! watcher (ignore-file change, lost events) — starts a walk when none is running. While a walk runs it does not
+//! cancel it but marks "walk again": when the running walk ends, its index becomes current as usual (with
+//! `:indexed`), and then one follow-up walk starts, however many rescans were requested meanwhile. The running
+//! walk may have used old ignore rules; the follow-up walk applies the new ones (and after lost events re-adds
+//! watches, see `src/watch.rs`). Pending replies: a `(:rescan)` registered when its walk started (no walk was
+//! running) is answered at that walk's `WalkDone`; one registered while a walk ran is answered at the end of the
+//! follow-up walk; `(:files)` waits only for the running walk's `WalkDone` (it needs a consistent index, not a
+//! new walk).
 //!
 //! **Watching** (`src/watch.rs`). `start` sets up the [`Watcher`]; if that fails the instance runs without it and
 //! emits `(:watch-failed ...)`. The watcher thread sends [`Request::FsChanges`], [`Request::FsRescan`] and
@@ -33,15 +42,18 @@
 //! `:watching` is false and the index stays as it is.
 //!
 //! **Walk errors.** A walk that fails (`walk` returns an error) or reports itself cancelled although it is the
-//! newest walk does not replace the index: the error is logged, no `:indexed` event is emitted, `:walks` and
-//! `:skipped` are unchanged, pending `(:rescan)` replies fail with the error, and pending `(:files)` replies are
-//! streamed from the index queries currently use. With the start-time checks in place this is not expected to
-//! happen; a vanished root makes the walk succeed with no files (counted as skipped), not fail.
+//! running walk does not replace an existing index: the error is logged, no `:indexed` event is emitted,
+//! `:walks` and `:skipped` are unchanged, the `(:rescan)` replies waiting for that walk fail with the error, and
+//! pending `(:files)` replies are streamed from the index queries currently use. If there is no index yet (the
+//! first walk failed), the walk's partial index becomes current (`:files` and queries use it, still without
+//! `:indexed`). A follow-up walk requested meanwhile starts as after a successful walk. With the start-time
+//! checks in place failures are not expected; a vanished root makes the walk succeed with no files (counted as
+//! skipped), not fail.
 
 use crate::index::Index;
 use crate::matcher::Matcher;
 use crate::walk::{self, WalkConfig};
-use crate::watch::{Change, Output, Watcher};
+use crate::watch::{Change, Output, WalkStamp, Watcher};
 use emrs::{Context, Error, Level, Reply, Service};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -151,8 +163,8 @@ struct Walk {
     index: Index,
     /// File-system changes that arrived during the walk, replayed on `index` at `WalkDone`.
     changes: Vec<Change>,
-    /// The watcher's clock value when the walk began (see [`Watcher::begin_walk`]).
-    watch_stamp: Option<u64>,
+    /// From [`Watcher::begin_walk`], for [`Watcher::walk_done`].
+    watch_stamp: Option<WalkStamp>,
 }
 
 pub struct Projdex {
@@ -166,8 +178,14 @@ pub struct Projdex {
     /// Generation of the most recently started walk.
     generation: u64,
     matcher: Matcher,
+    /// `(:files)` replies waiting for the running walk to end.
     pending_files: Vec<Reply>,
+    /// `(:rescan)` replies answered when the running walk ends.
     pending_rescans: Vec<Reply>,
+    /// A rescan was requested while a walk ran: another walk starts when it ends.
+    walk_again: bool,
+    /// `(:rescan)` replies answered when that follow-up walk ends.
+    next_rescans: Vec<Reply>,
     walks: u64,
     skipped: usize,
     /// The file watcher; `None` when set-up failed, after it failed, and after `stop`.
@@ -196,11 +214,23 @@ impl Projdex {
         view(&self.current, self.has_index, &self.walk)
     }
 
-    /// Starts a new walk generation, cancelling the running walk.
-    fn start_walk(&mut self, ctx: &Context<Self>) {
-        if let Some(old) = self.walk.take() {
-            old.cancel.store(true, Ordering::Relaxed);
+    /// Starts a full walk, or, while one runs, has another one start when it ends; `reply` (of `(:rescan)`) is
+    /// answered when the walk that starts after this request ends.
+    fn rescan(&mut self, reply: Option<Reply>, ctx: &Context<Self>) {
+        if self.walk.is_some() {
+            self.walk_again = true;
+            self.next_rescans.extend(reply);
+            #[cfg(test)]
+            hook::walk_again(&self.config.root);
+        } else {
+            self.start_walk(ctx);
+            self.pending_rescans.extend(reply);
         }
+    }
+
+    /// Starts a new walk generation; no walk is running.
+    fn start_walk(&mut self, ctx: &Context<Self>) {
+        debug_assert!(self.walk.is_none(), "a walk is running");
         self.generation += 1;
         let generation = self.generation;
         let cancel = Arc::new(AtomicBool::new(false));
@@ -248,6 +278,11 @@ impl Projdex {
                 for reply in rescans {
                     reply.err(Error::new(message.clone()));
                 }
+                if !self.has_index {
+                    // Better than nothing: the partial index (which file-system changes already reached) stays.
+                    self.current = walk.index;
+                    self.has_index = true;
+                }
             }
             None => {
                 let mut index = walk.index;
@@ -273,6 +308,10 @@ impl Projdex {
         }
         for reply in std::mem::take(&mut self.pending_files) {
             self.stream_files(reply, ctx);
+        }
+        if std::mem::take(&mut self.walk_again) {
+            self.pending_rescans = std::mem::take(&mut self.next_rescans);
+            self.start_walk(ctx);
         }
     }
 
@@ -377,6 +416,8 @@ impl Service for Projdex {
             matcher: Matcher::new(),
             pending_files: Vec::new(),
             pending_rescans: Vec::new(),
+            walk_again: false,
+            next_rescans: Vec::new(),
             walks: 0,
             skipped: 0,
             watch,
@@ -404,10 +445,7 @@ impl Service for Projdex {
                     self.stream_files(reply, ctx);
                 }
             }
-            Request::Rescan => {
-                self.start_walk(ctx);
-                self.pending_rescans.push(reply);
-            }
+            Request::Rescan => self.rescan(Some(reply), ctx),
             Request::Status => reply.ok(Status {
                 root: self.root.clone(),
                 files: self.view().len(),
@@ -430,7 +468,7 @@ impl Service for Projdex {
                 }
             }
             Request::FsChanges(changes) => self.fs_changes(changes, ctx),
-            Request::FsRescan => self.start_walk(ctx),
+            Request::FsRescan => self.rescan(None, ctx),
             Request::WatchFailed(message) => {
                 if self.watch.take().is_some() {
                     self.watch_failed(message, ctx);
@@ -462,8 +500,12 @@ pub(crate) mod hook {
     #[derive(Default)]
     struct State {
         held: bool,
+        /// While held, the walks numbered up to this one (counting from 1 in the order they reach the hook) pass.
+        released_through: usize,
         /// Walks that reached the point before sending `WalkDone`.
         reached: usize,
+        /// Rescans requested while a walk ran.
+        walks_again: usize,
         /// `(sent, total)` of each ended `(:files)` task.
         files_tasks: Vec<(usize, usize)>,
     }
@@ -498,6 +540,12 @@ pub(crate) mod hook {
             self.changed.notify_all();
         }
 
+        /// Lets the held walks numbered up to `n` go on; later ones stay held.
+        pub fn release_through(&self, n: usize) {
+            self.state.lock().unwrap().released_through = n;
+            self.changed.notify_all();
+        }
+
         fn wait_until(&self, done: impl Fn(&State) -> bool) -> bool {
             let deadline = Instant::now() + LIMIT;
             let mut state = self.state.lock().unwrap();
@@ -516,6 +564,16 @@ pub(crate) mod hook {
             self.wait_until(|s| s.reached >= n)
         }
 
+        /// Walks that reached the point before sending `WalkDone` so far.
+        pub fn reached(&self) -> usize {
+            self.state.lock().unwrap().reached
+        }
+
+        /// Waits until `n` rescans have been requested while a walk ran.
+        pub fn wait_walks_again(&self, n: usize) -> bool {
+            self.wait_until(|s| s.walks_again >= n)
+        }
+
         /// Waits until `n` `(:files)` tasks have ended and returns their `(sent, total)`.
         pub fn wait_files_tasks(&self, n: usize) -> Vec<(usize, usize)> {
             assert!(self.wait_until(|s| s.files_tasks.len() >= n), "files tasks did not end");
@@ -527,11 +585,18 @@ pub(crate) mod hook {
         let Some(probe) = get(root) else { return };
         let mut state = probe.state.lock().unwrap();
         state.reached += 1;
+        let number = state.reached;
         probe.changed.notify_all();
         let deadline = Instant::now() + LIMIT;
-        while state.held && Instant::now() < deadline {
+        while state.held && number > state.released_through && Instant::now() < deadline {
             state = probe.changed.wait_timeout(state, deadline - Instant::now()).unwrap().0;
         }
+    }
+
+    pub(super) fn walk_again(root: &Path) {
+        let Some(probe) = get(root) else { return };
+        probe.state.lock().unwrap().walks_again += 1;
+        probe.changed.notify_all();
     }
 
     pub(super) fn files_task_ended(root: &Path, sent: usize, total: usize) {
@@ -595,6 +660,11 @@ mod tests {
                 None => panic!("no :indexed event"),
             }
         }
+    }
+
+    /// Waits for an `:indexed` event with `files` files, skipping other events.
+    fn wait_indexed(host: &mut Host<Projdex>, files: usize) {
+        while indexed_files(host) != files {}
     }
 
     /// Starts an instance and waits for its first `:indexed` event.
@@ -758,27 +828,67 @@ mod tests {
         assert_eq!((st.walks, st.files, st.indexing), (2, 2, false));
     }
 
+    /// Rescans during a walk do not cancel it: they start one follow-up walk when it ends.
     #[test]
-    fn two_rescans_answered_from_newest_walk() {
+    fn rescans_during_walk_coalesce() {
         let t = tree(&["a", "b"]);
+        // Without a watcher, so that writing "c" changes nothing but the next walk.
+        watch_hook::fail_setup(t.path());
         let probe = hook::install(t.path());
         let mut host = started(t.path());
         probe.hold();
         let first = host.begin_stream(Request::Rescan).unwrap();
+        // Walk 2 has listed "a" and "b".
+        assert!(probe.wait_reached(2));
         write(t.path(), "c");
         let second = host.begin_stream(Request::Rescan).unwrap();
-        // Both new walks have finished walking (the first possibly cut short by its cancellation).
+        let files = host.begin_stream(Request::Files).unwrap();
+        let third = host.begin_stream(Request::Rescan).unwrap();
+        host.send(Request::FsRescan);
+        assert!(probe.wait_walks_again(3));
+        let st = status(&mut host);
+        assert_eq!((st.walks, st.indexing), (1, true));
+        // Walk 3 stays held until it is checked that walk 2 ended first.
+        probe.release_through(2);
+        // Requested before walk 2 started: answered from it, as is `(:files)`.
+        assert_eq!(host.finish_stream::<usize>(first).items, vec![2]);
+        assert_eq!(indexed_files(&mut host), 2);
+        let result = host.finish_stream::<String>(files);
+        assert_eq!(result.items.into_iter().collect::<BTreeSet<_>>(), set(&["a", "b"]));
         assert!(probe.wait_reached(3));
+        let st = status(&mut host);
+        assert_eq!((st.walks, st.files, st.indexing), (2, 2, true));
         probe.release();
-        for call in [first, second] {
+        // Requested while walk 2 ran: answered from the single follow-up walk.
+        for call in [second, third] {
             let result = host.finish_stream::<usize>(call);
             assert_eq!(result.status, StreamEnd::Done);
             assert_eq!(result.items, vec![3]);
         }
         assert_eq!(indexed_files(&mut host), 3);
         let st = status(&mut host);
-        assert_eq!((st.walks, st.files, st.indexing), (2, 3, false));
+        assert_eq!((st.walks, st.files, st.indexing), (3, 3, false));
+        assert_eq!(probe.reached(), 3);
         assert_eq!(all_paths(&mut host), set(&["a", "b", "c"]));
+    }
+
+    /// A rescan during the first walk runs after it; the first walk's index becomes current meanwhile.
+    #[test]
+    fn rescan_during_first_walk() {
+        let t = tree(&["a"]);
+        watch_hook::fail_setup(t.path());
+        let probe = hook::install(t.path());
+        probe.hold();
+        let mut host = Host::<Projdex>::start(args(t.path()));
+        assert!(probe.wait_reached(1));
+        write(t.path(), "b");
+        let rescan = host.begin_stream(Request::Rescan).unwrap();
+        assert!(probe.wait_walks_again(1));
+        probe.release();
+        assert_eq!(indexed_files(&mut host), 1);
+        assert_eq!(host.finish_stream::<usize>(rescan).items, vec![2]);
+        assert_eq!(indexed_files(&mut host), 2);
+        assert_eq!(status(&mut host).walks, 2);
     }
 
     #[test]
@@ -825,6 +935,63 @@ mod tests {
         let st = status(&mut host);
         assert_eq!((st.walks, st.files, st.indexing), (1, 2, false));
         assert!(host.logs().iter().any(|l| l.starts_with("[error]") && l.contains("boom")));
+        probe.release();
+    }
+
+    /// A failed first walk leaves its partial index current, without an `:indexed` event.
+    #[test]
+    fn first_walk_error_keeps_partial_index() {
+        let t = tree(&["a", "b"]);
+        watch_hook::fail_setup(t.path());
+        let probe = hook::install(t.path());
+        probe.hold();
+        let mut host = Host::<Projdex>::start(args(t.path()));
+        assert!(probe.wait_reached(1));
+        let files = host.begin_stream(Request::Files).unwrap();
+        let rescan = host.begin_stream(Request::Rescan).unwrap();
+        host.send(Request::WalkDone {
+            generation: 1,
+            skipped: 0,
+            millis: 0,
+            cancelled: false,
+            error: Some("boom".into()),
+        });
+        let result = host.finish_stream::<String>(files);
+        assert_eq!(result.status, StreamEnd::Done);
+        assert_eq!(result.items.into_iter().collect::<BTreeSet<_>>(), set(&["a", "b"]));
+        // The rescan requested during the failed walk starts the next walk, whose `:indexed` is the first one.
+        probe.release();
+        assert_eq!(host.finish_stream::<usize>(rescan).items, vec![2]);
+        loop {
+            match host.next_event() {
+                Some(Event::Indexed { files, .. }) => break assert_eq!(files, 2),
+                Some(Event::WatchFailed { .. }) => {}
+                other => panic!("expected :indexed, got {other:?}"),
+            }
+        }
+        assert_eq!(status(&mut host).walks, 1);
+        assert!(host.logs().iter().any(|l| l.starts_with("[error]") && l.contains("boom")));
+    }
+
+    #[test]
+    fn first_walk_error_without_rescan_keeps_partial_index() {
+        let t = tree(&["a", "b"]);
+        watch_hook::fail_setup(t.path());
+        let probe = hook::install(t.path());
+        probe.hold();
+        let mut host = Host::<Projdex>::start(args(t.path()));
+        assert!(probe.wait_reached(1));
+        host.send(Request::WalkDone {
+            generation: 1,
+            skipped: 0,
+            millis: 0,
+            cancelled: false,
+            error: Some("boom".into()),
+        });
+        let st = status(&mut host);
+        assert_eq!((st.files, st.walks, st.indexing), (2, 0, false));
+        assert_eq!(all_paths(&mut host), set(&["a", "b"]));
+        assert_eq!(host.call::<QueryReply>(query("b", 10, false)).unwrap().paths, vec!["b"]);
         probe.release();
     }
 
@@ -1078,6 +1245,92 @@ mod tests {
         eventually("the ignored directory's watch is dropped", || watched(r) == set(&["", ".git/info"]));
     }
 
+    /// An ignore-file change during a walk does not cancel it; the follow-up walk applies the new rules.
+    #[test]
+    fn watch_ignore_change_during_walk_walks_again() {
+        let t = tree(&["a.zz", "b.txt"]);
+        let r = t.path();
+        std::fs::write(r.join(".gitignore"), "").unwrap();
+        let probe = hook::install(r);
+        let mut host = started(r);
+        probe.hold();
+        let rescan = host.begin_stream(Request::Rescan).unwrap();
+        assert!(probe.wait_reached(2));
+        std::fs::write(r.join(".gitignore"), "*.zz\n").unwrap();
+        assert!(probe.wait_walks_again(1));
+        probe.release();
+        // Walk 2 used the old rules.
+        assert_eq!(host.finish_stream::<usize>(rescan).items, vec![3]);
+        assert_eq!(indexed_files(&mut host), 3);
+        assert_eq!(indexed_files(&mut host), 2);
+        assert_eq!(view_paths(&mut host), set(&[".gitignore", "b.txt"]));
+        assert_eq!(status(&mut host).walks, 3);
+    }
+
+    /// Events lost during a walk: the follow-up walk re-adds the watches of directories it already knows.
+    #[test]
+    fn watch_lost_events_during_walk_rewatch() {
+        let t = tree(&["a", "d/x"]);
+        let r = t.path();
+        let probe = hook::install(r);
+        let mut host = started(r);
+        probe.hold();
+        let rescan = host.begin_stream(Request::Rescan).unwrap();
+        assert!(probe.wait_reached(2));
+        // As if "d" had been replaced while events were lost: known, but no longer watched.
+        watch_hook::drop_watch(r, "d");
+        watch_hook::lose_events(r);
+        assert!(probe.wait_walks_again(1));
+        probe.release();
+        assert_eq!(host.finish_stream::<usize>(rescan).items, vec![2]);
+        assert_eq!(indexed_files(&mut host), 2);
+        assert_eq!(indexed_files(&mut host), 2);
+        write(r, "d/new");
+        wait_paths(&mut host, &["a", "d/x", "d/new"]);
+    }
+
+    /// `git init` in an indexed tree: `.git/info` is watched, so later `exclude` edits rescan.
+    #[test]
+    fn watch_git_info_created_after_start() {
+        let t = tree(&["a.zz", "b.txt", "sub/c.zz", "sub/d.txt"]);
+        let r = t.path();
+        let mut host = started(r);
+        assert_eq!(watched(r), set(&["", "sub"]));
+        // At the root, as `git init` does it: `.git` first, `exclude` later.
+        std::fs::create_dir_all(r.join(".git/info")).unwrap();
+        eventually("the root's .git/info is watched", || watched(r).contains(".git/info"));
+        std::fs::write(r.join(".git/info/exclude"), "*.zz\n").unwrap();
+        wait_indexed(&mut host, 2);
+        assert_eq!(view_paths(&mut host), set(&["b.txt", "sub/d.txt"]));
+        // In a subdirectory, with `exclude` already there when `.git` appears: a rescan applies it.
+        std::fs::create_dir_all(r.join("sub/.tmp-git/info")).unwrap();
+        std::fs::write(r.join("sub/.tmp-git/info/exclude"), "d.txt\n").unwrap();
+        rename(r, "sub/.tmp-git", "sub/.git");
+        wait_indexed(&mut host, 1);
+        assert_eq!(view_paths(&mut host), set(&["b.txt"]));
+        eventually("sub/.git/info is watched", || watched(r).contains("sub/.git/info"));
+        std::fs::write(r.join("sub/.git/info/exclude"), "").unwrap();
+        wait_indexed(&mut host, 2);
+        assert_eq!(view_paths(&mut host), set(&["b.txt", "sub/d.txt"]));
+    }
+
+    /// A `.git/info` that appeared unseen is watched when a walk confirms its directory.
+    #[test]
+    fn watch_git_info_found_by_walk() {
+        let t = tree(&["a.zz", "b.txt"]);
+        let r = t.path();
+        let mut host = started(r);
+        std::fs::create_dir_all(r.join(".git/info")).unwrap();
+        eventually("the root's .git/info is watched", || watched(r).contains(".git/info"));
+        // As if its creation had been missed.
+        watch_hook::forget_git_info(r, "");
+        assert_eq!(host.call::<usize>(Request::Rescan).unwrap(), 2);
+        assert!(watched(r).contains(".git/info"));
+        std::fs::write(r.join(".git/info/exclude"), "*.zz\n").unwrap();
+        wait_indexed(&mut host, 1);
+        assert_eq!(view_paths(&mut host), set(&["b.txt"]));
+    }
+
     #[test]
     fn watch_changes_during_walk_are_kept() {
         let t = tree(&["a", "b", "d/x"]);
@@ -1099,6 +1352,28 @@ mod tests {
         assert_eq!(result.items, vec![2]);
         assert_eq!(indexed_files(&mut host), 2);
         assert_eq!(all_paths(&mut host), set(&["b", "c"]));
+    }
+
+    /// The debouncer drops every event of a path created and removed within its window; a walk that listed the
+    /// file in between must not leave it in the index.
+    #[test]
+    fn watch_file_created_and_removed_during_walk() {
+        let t = tree(&["a"]);
+        let r = t.path();
+        let probe = hook::install(r);
+        let mut host = started(r);
+        probe.hold();
+        write(r, "tmp");
+        let created = Instant::now();
+        let rescan = host.begin_stream(Request::Rescan).unwrap();
+        // The walk has listed "tmp".
+        assert!(probe.wait_reached(2));
+        // Well inside the debouncing window, so the debouncer swallows both events.
+        std::thread::sleep(Duration::from_millis(4).saturating_sub(created.elapsed()));
+        std::fs::remove_file(r.join("tmp")).unwrap();
+        probe.release();
+        assert_eq!(host.finish_stream::<usize>(rescan).status, StreamEnd::Done);
+        wait_paths(&mut host, &["a"]);
     }
 
     #[test]
