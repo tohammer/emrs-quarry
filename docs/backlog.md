@@ -43,9 +43,13 @@ local checkout (the developer's config uses `:local-repo` for both, plus a
   the build directory as `projdex-module` plus `module-file-suffix`), or a
   command such as `projdex-install-module` that builds it, or downloads a
   prebuilt release binary on first use (see Distribution).
-- `emrs.el` must come with it at the commit `Cargo.toml` pins: its own
-  recipe (`:repo "tohammer/emrs" :files ("elisp/emrs.el")`) with a matching
-  pin, or a copy shipped in this repo.
+- `emrs.el` is installed as its own package, not copied into this repo:
+  for now from GitHub (`(package! emrs :recipe (:host github :repo
+  "tohammer/emrs" :files ("elisp/emrs.el")))`, pinned to the commit
+  `Cargo.toml` pins), later from MELPA as the ordinary dependency that
+  `Package-Requires` already declares (`(emrs "0.1.0")`). The emrs package
+  version then has to match the emrs crate version projdex is built
+  against; the protocol check in `emrs-load-module` reports a mismatch.
 - README: document the recipe for Doom, straight and elpaca.
 
 Origin: the user's request when setting projdex up in their Doom config
