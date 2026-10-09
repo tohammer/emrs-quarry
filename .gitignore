@@ -1,2 +1,3 @@
 /target
 *.elc
+lisp/projdex-module.*

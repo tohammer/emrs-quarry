@@ -20,13 +20,15 @@
 ;;
 ;; This file holds the core: one service instance per project root
 ;; (started lazily), event and exit handling, the query entry points and
-;; the user commands.  The module must be installed as `projdex-module'
-;; plus `module-file-suffix' on `load-path'.
+;; the user commands.  The module is the file projdex-build.el installs
+;; next to this one, or `projdex-module' plus `module-file-suffix' on
+;; `load-path'.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'emrs)
+(require 'projdex-build)
 (require 'project)
 (require 'seq)
 
@@ -172,13 +174,32 @@ This is a safety net against a stuck instance, not a latency budget."
         (display-warning
          'projdex (format "Instance for %s failed: %s" root message))))))
 
+(defun projdex--module-file ()
+  "Return the module file next to the true projdex.el, or nil.
+Nil when the repository cannot be found or the file does not exist."
+  (let* ((repo (ignore-errors (projdex-build--find-repo)))
+         (file (and repo (projdex-build--module-file repo))))
+    (and file (file-exists-p file) file)))
+
+(defun projdex--offer-build ()
+  "Offer to build the missing module; signal a `user-error' either way."
+  (let ((repo (ignore-errors (projdex-build--find-repo))))
+    (if (and repo
+             (file-exists-p (expand-file-name "Cargo.toml" repo))
+             (not noninteractive)
+             (y-or-n-p "projdex module not built. Build it now with cargo? "))
+        (progn
+          (projdex-build-module)
+          (user-error "Building the projdex module; run the command again when it is done"))
+      (user-error "Cannot load the projdex module: install it as projdex-module%s on `load-path', or run M-x projdex-build-module"
+                  module-file-suffix))))
+
 (defun projdex--start (root)
   "Start an instance for ROOT and return its record."
   (condition-case err
-      (emrs-load-module 'projdex)
+      (emrs-load-module 'projdex (projdex--module-file))
     (file-missing
-     (user-error "Cannot load the projdex module: install it as projdex-module%s on `load-path' (%s)"
-                 module-file-suffix (error-message-string err)))
+     (projdex--offer-build))
     (error
      (user-error "Cannot load the projdex module (install it as projdex-module%s on `load-path'): %s"
                  module-file-suffix (error-message-string err))))

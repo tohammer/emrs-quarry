@@ -214,7 +214,7 @@ only), macOS and Windows.
 
 ## Tasks
 
-- [ ] 1. Build logic and module lookup. `lisp/projdex-build.el`
+- [x] 1. Build logic and module lookup. `lisp/projdex-build.el`
   (repository detection, sync and async build, install by rename),
   module lookup and missing-module offer in `projdex.el`, `.gitignore`,
   and the ERT tests listed under Testing. *Done when* those tests and the
