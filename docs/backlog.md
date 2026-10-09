@@ -28,3 +28,13 @@ announcing projdex to users.
 projdex pins `nucleo-matcher` to an upstream git commit because 0.3.1 has
 the case-sensitive prefix bug (ADR 0003). Revisit when a release after
 0.3.1 appears on crates.io.
+
+## TAB completion in the default completion UI
+
+The `projdex` style's try-completion returns the input unchanged unless it
+already equals the only match (spec, "Completion table"). In the default
+UI, TAB therefore never expands `main` to `src/main.rs` even when that is
+the only match; vertico and similar UIs select candidates instead and are
+unaffected. Origin: task 6 of the v1 spec, 2026-10-09. Revisit after the
+manual UI checks: returning the sole match when `:total` is 1 is a likely
+fix.

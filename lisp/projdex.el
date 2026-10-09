@@ -28,6 +28,7 @@
 (require 'cl-lib)
 (require 'emrs)
 (require 'project)
+(require 'seq)
 
 (defgroup projdex nil
   "Fast project file finder backed by a Rust module."
@@ -191,6 +192,96 @@ error plist otherwise.  Return the call, which `emrs-cancel' cancels."
              (projdex--request text limit positions)
              callback))
 
+;;;; Completion
+
+(defvar projdex-file-history nil
+  "Minibuffer history of `projdex-find-file'.")
+
+(defconst projdex--cache-size 4
+  "Number of recent query results a completion table keeps.")
+
+(defun projdex--highlight (path positions)
+  "Return a copy of PATH with the common-part face at POSITIONS."
+  (let ((copy (copy-sequence path)))
+    (dolist (pos positions)
+      (add-face-text-property pos (1+ pos) 'completions-common-part nil copy))
+    copy))
+
+(defun projdex--table (root)
+  "Return a completion table for the files of the project at ROOT.
+The whole input is the query; the candidates keep the order of the
+index.  Results are cached per input, epoch, limit and highlighting."
+  (let ((cache nil)
+        (warned nil))
+    (cl-flet ((results (string)
+                ;; Return a list of (PATH . POSITIONS), best first.
+                (let* ((rec (projdex--ensure root))
+                       (limit projdex-limit)
+                       (highlight (and projdex-highlight t))
+                       (key (list string (projdex--rec-epoch rec) limit highlight))
+                       (hit (assoc key cache)))
+                  (if hit
+                      (cdr hit)
+                    (let ((value
+                           (condition-case err
+                               (let ((reply (projdex-query root string limit highlight)))
+                                 (cl-mapcar #'cons (plist-get reply :paths)
+                                            (or (plist-get reply :positions)
+                                                (make-list (length (plist-get reply :paths))
+                                                           nil))))
+                             (emrs-error
+                              (if (eq (cadr err) 'timeout)
+                                  (progn
+                                    (unless warned
+                                      (setq warned t)
+                                      (message "projdex: query timed out"))
+                                    'timeout)
+                                (signal (car err) (cdr err)))))))
+                      (unless (eq value 'timeout)
+                        (setq cache (seq-take (cons (cons key value) cache)
+                                              projdex--cache-size)))
+                      (if (eq value 'timeout) nil value))))))
+      (lambda (string pred action)
+        (pcase action
+          ('metadata
+           '(metadata (category . project-file)
+                      (display-sort-function . identity)
+                      (cycle-sort-function . identity)))
+          (`(boundaries . ,_) nil)
+          ('t
+           (let ((highlight (and projdex-highlight t)))
+             (cl-loop for (path . positions) in (results string)
+                      when (or (null pred) (funcall pred path))
+                      collect (if (and highlight positions)
+                                  (projdex--highlight path positions)
+                                path))))
+          (_
+           (let ((paths (cl-loop for (path . _) in (results string)
+                                 when (or (null pred) (funcall pred path))
+                                 collect path)))
+             (if (eq action 'lambda)
+                 (and (member string paths) t)
+               (cond ((null paths) nil)
+                     ((and (null (cdr paths)) (equal string (car paths))) t)
+                     (t string))))))))))
+
+(defun projdex-completion-try (string table pred point)
+  "Try-completion function of the `projdex' style.
+Pass STRING to TABLE with PRED unchanged; POINT is kept."
+  (let ((result (funcall table string pred nil)))
+    (if (stringp result) (cons result point) result)))
+
+(defun projdex-completion-all (string table pred _point)
+  "All-completions function of the `projdex' style.
+Return the candidates of TABLE for STRING and PRED as they are, with
+base size 0."
+  (let ((all (funcall table string pred t)))
+    (and all (nconc all 0))))
+
+(add-to-list 'completion-styles-alist
+             '(projdex projdex-completion-try projdex-completion-all
+                       "Pass the input to the table unchanged and keep its ranking."))
+
 ;;;; Commands
 
 (defun projdex--rescan (root)
@@ -244,6 +335,38 @@ The next command starts a new one, with the current options."
   "Show the status of the current project's index in the echo area."
   (interactive)
   (message "%s" (projdex--status (projdex--current-root))))
+
+;;;###autoload
+(defun projdex-find-file (&optional include-all)
+  "Visit a file of the current project, chosen from projdex's index.
+With INCLUDE-ALL, or in a remote project, defer to `project-find-file'
+with INCLUDE-ALL."
+  (interactive "P")
+  (let* ((project (project-current t))
+         (root (projdex--root (project-root project))))
+    (if (or include-all (file-remote-p root))
+        (project-find-file include-all)
+      (let ((rec (projdex--ensure root)))
+        (unless (projdex--rec-watching rec)
+          (emrs-send (projdex--rec-instance rec) '(:rescan))))
+      (let* ((completion-category-overrides
+              (cons '(project-file (styles projdex)) completion-category-overrides))
+             (path (completing-read (format "Find file in %s: " (project-name project))
+                                    (projdex--table root) nil 'confirm nil
+                                    'projdex-file-history)))
+        (find-file (expand-file-name path root))))))
+
+;;;; Mode
+
+(defvar-keymap projdex-mode-map
+  :doc "Keymap of `projdex-mode'."
+  "<remap> <project-find-file>" #'projdex-find-file)
+
+;;;###autoload
+(define-minor-mode projdex-mode
+  "Use projdex's index for `project-find-file'."
+  :global t
+  :keymap projdex-mode-map)
 
 (provide 'projdex)
 ;;; projdex.el ends here

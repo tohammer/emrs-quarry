@@ -173,5 +173,205 @@
         (should (string-match-p "2 files" (car msgs)))
         (should (string-match-p "2 files, indexing no" (projdex--status dir)))))))
 
+;;;; Completion table, style, finder
+
+(defconst projdex-test--files
+  '("src/main.rs" "src/lib.rs" "README.md" "docs/ünï/größe.txt" "a/b/foo_bar.el" "foobar.el")
+  "Files of the completion test tree.")
+
+(defmacro projdex-test--with-index (var &rest body)
+  "Run BODY with VAR bound to an indexed temp tree."
+  (declare (indent 1))
+  `(projdex-test--with-roots ((,var projdex-test--files))
+     (emrs-call-sync (projdex--rec-instance (projdex--ensure ,var)) '(:rescan) 10)
+     ,@body))
+
+(defun projdex-test--faces-at (string)
+  "Return the indices of STRING that carry `completions-common-part'."
+  (cl-loop for i below (length string)
+           when (memq 'completions-common-part
+                      (ensure-list (get-text-property i 'face string)))
+           collect i))
+
+(ert-deftest projdex-test-table-basics ()
+  (projdex-test--with-index dir
+    (let ((table (projdex--table dir)))
+      (should (equal (funcall table "" nil 'metadata)
+                     '(metadata (category . project-file)
+                                (display-sort-function . identity)
+                                (cycle-sort-function . identity))))
+      (should (equal (funcall table "main" nil t) '("src/main.rs")))
+      (should (equal (funcall table "rs$" nil t) (quote ("src/lib.rs" "src/main.rs"))))
+      (should (equal (funcall table "" (lambda (p) (string-suffix-p ".md" p)) t)
+                     '("README.md")))
+      (should (equal (funcall table "" nil t)
+                     (plist-get (projdex-query dir "" 200) :paths)))
+      ;; try-completion
+      (should (eq (funcall table "src/main.rs" nil nil) t))
+      (should (equal (funcall table "main" nil nil) "main"))
+      (should (null (funcall table "zzzzqq" nil nil)))
+      ;; test-completion
+      (should (funcall table "src/main.rs" nil 'lambda))
+      (should-not (funcall table "main" nil 'lambda))
+      (should-not (funcall table "src/main.rs"
+                           (lambda (_) nil) 'lambda))
+      ;; boundaries
+      (should (null (funcall table "a/b" nil '(boundaries . "c")))))))
+
+(ert-deftest projdex-test-table-limit ()
+  (projdex-test--with-index dir
+    (let ((projdex-limit 2))
+      (should (= (length (funcall (projdex--table dir) "" nil t)) 2)))))
+
+(ert-deftest projdex-test-style-keeps-rust-order ()
+  (projdex-test--with-index dir
+    (let* ((completion-styles '(projdex))
+           ;; The table's category has its own default styles.
+           (completion-category-overrides '((project-file (styles projdex))))
+           (table (projdex--table dir))
+           (expected (plist-get (projdex-query dir "foobar" 200) :paths))
+           (all (completion-all-completions "foobar" table nil 6)))
+      ;; The nucleo order differs from the alphabetical one here.
+      (should (cdr expected))
+      (should-not (equal expected (sort (copy-sequence expected) #'string<)))
+      (should (equal (cl-loop for c on all while (consp c) collect (car c))
+                     expected))
+      (should (= (cdr (last all)) 0))
+      (should (null (completion-all-completions "zzzzqq" table nil 6)))
+      (should (equal (completion-try-completion "main" table nil 4) '("main" . 4)))
+      (should (eq (completion-try-completion "src/main.rs" table nil 11) t))
+      (should (null (completion-try-completion "zzzzqq" table nil 6))))))
+
+(ert-deftest projdex-test-highlighting ()
+  (projdex-test--with-index dir
+    (let* ((table (projdex--table dir))
+           (reply (projdex-query dir "main" 10 t))
+           (paths (funcall table "main" nil t)))
+      (should (equal (projdex-test--faces-at (car paths))
+                     (car (plist-get reply :positions))))
+      (should (equal (projdex-test--faces-at (car paths)) '(4 5 6 7)))
+      ;; Non-ASCII: indices are characters.
+      (let* ((p (car (funcall table "größe" nil t)))
+             (pos (car (plist-get (projdex-query dir "größe" 10 t) :positions))))
+        (should (equal p "docs/ünï/größe.txt"))
+        (should (equal (projdex-test--faces-at p) pos))
+        (should (equal (mapcar (lambda (i) (aref p i)) pos)
+                       (string-to-list "größe"))))
+      ;; Cached originals are not mutated: a repeated call is identical and
+      ;; highlighting off yields plain strings from the same cache epoch.
+      (should (equal-including-properties (funcall table "main" nil t) paths))
+      (let ((projdex-highlight nil))
+        (should (null (projdex-test--faces-at
+                       (car (funcall table "main" nil t))))))
+      (should (equal (projdex-test--faces-at
+                      (car (funcall table "main" nil t)))
+                     '(4 5 6 7)))
+      (should-not (get-text-property 0 'face (car (plist-get (projdex-query dir "main" 10) :paths)))))))
+
+(ert-deftest projdex-test-cache ()
+  (projdex-test--with-index dir
+    (let ((calls 0)
+          (table (projdex--table dir))
+          (rec (projdex--ensure dir)))
+      (advice-add 'projdex-query :before (lambda (&rest _) (cl-incf calls))
+                  '((name . projdex-test-count)))
+      (unwind-protect
+          (progn
+            (funcall table "main" nil t)
+            (funcall table "main" nil nil)
+            (funcall table "main" nil 'lambda)
+            (should (= calls 1))
+            (funcall table "lib" nil t)
+            (should (= calls 2))
+            (cl-incf (projdex--rec-epoch rec))
+            (funcall table "main" nil t)
+            (should (= calls 3)))
+        (advice-remove 'projdex-query 'projdex-test-count)))))
+
+(ert-deftest projdex-test-cache-invalidation-synthetic ()
+  (projdex-test--with-index dir
+    (let ((table (projdex--table dir))
+          (rec (projdex--ensure dir)))
+      (should-not (funcall table "newfile" nil t))
+      (write-region "" nil (expand-file-name "newfile.txt" dir) nil 'silent)
+      (emrs-call-sync (projdex--rec-instance rec) '(:rescan) 10)
+      (projdex--on-event rec '(:changed :added 1 :removed 0))
+      (should (equal (funcall table "newfile" nil t) '("newfile.txt"))))))
+
+(ert-deftest projdex-test-cache-invalidation-watcher ()
+  :tags '(watcher)
+  (projdex-test--with-roots ((dir '("a.txt")))
+    (let* ((rec (projdex--ensure dir))
+           (table (projdex--table dir)))
+      (should (projdex-test--wait (lambda () (> (projdex--rec-epoch rec) 0))))
+      (should-not (funcall table "newfile" nil t))
+      (let ((epoch (projdex--rec-epoch rec)))
+        (write-region "" nil (expand-file-name "newfile.txt" dir) nil 'silent)
+        (should (projdex-test--wait (lambda () (> (projdex--rec-epoch rec) epoch))))
+        (should (equal (funcall table "newfile" nil t) '("newfile.txt")))))))
+
+(ert-deftest projdex-test-table-timeout ()
+  (let ((msgs nil)
+        (table nil))
+    (cl-letf (((symbol-function 'projdex--ensure)
+               (lambda (_) (projdex--make-rec :root "/x/")))
+              ((symbol-function 'projdex-query)
+               (lambda (&rest _) (signal 'emrs-error '(timeout "slow"))))
+              ((symbol-function 'message)
+               (lambda (fmt &rest args) (push (apply #'format fmt args) msgs))))
+      (setq table (projdex--table "/x/"))
+      (should (null (funcall table "a" nil t)))
+      (should (null (funcall table "ab" nil t)))
+      (should (= (length msgs) 1)))))
+
+(ert-deftest projdex-test-find-file-round-trip ()
+  (projdex-test--with-index dir
+    (let* ((project-find-functions (list (lambda (_) (list 'transient dir))))
+           (buf nil))
+      (cl-letf (((symbol-function 'project-root) (lambda (p) (cadr p))))
+        (unwind-protect
+            (progn
+              ;; In batch mode the minibuffer would read stdin, but not
+              ;; while a keyboard macro runs, so drive the command with one.
+              (let ((seen nil))
+                (let ((minibuffer-setup-hook
+                       (cons (lambda ()
+                               (push (list (minibuffer-prompt)
+                                           (cadr (assq 'styles (assq 'project-file
+                                                                     completion-category-overrides))))
+                                     seen))
+                             minibuffer-setup-hook)))
+                  (execute-kbd-macro (kbd "M-x projdex-find-file RET src/main.rs RET")))
+                (should (equal (car seen) (list (format "Find file in %s: "
+                                                  (project-name (project-current)))
+                                          'projdex))))
+              (setq buf (current-buffer))
+              (should (equal (buffer-file-name buf)
+                             (expand-file-name "src/main.rs" dir))))
+          (when buf (kill-buffer buf)))))))
+
+(ert-deftest projdex-test-find-file-fallbacks ()
+  (projdex-test--with-index dir
+    (let* ((project-find-functions (list (lambda (_) (list 'transient dir))))
+           (args nil))
+      (cl-letf (((symbol-function 'project-root) (lambda (p) (cadr p)))
+                ((symbol-function 'project-find-file)
+                 (lambda (&optional a) (push (list a) args))))
+        (projdex-find-file t)
+        (should (equal args '((t))))
+        (cl-letf (((symbol-function 'file-remote-p) (lambda (&rest _) "/ssh:x:")))
+          (projdex-find-file nil))
+        (should (equal args '((nil) (t))))))))
+
+(ert-deftest projdex-test-mode-remap ()
+  (let ((was projdex-mode))
+    (unwind-protect
+        (progn
+          (projdex-mode 1)
+          (should (eq (command-remapping 'project-find-file) 'projdex-find-file))
+          (projdex-mode -1)
+          (should-not (eq (command-remapping 'project-find-file) 'projdex-find-file)))
+      (projdex-mode (if was 1 -1)))))
+
 (provide 'projdex-tests)
 ;;; projdex-tests.el ends here
