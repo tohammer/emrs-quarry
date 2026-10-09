@@ -420,6 +420,23 @@ The next command starts a new one, with the current options."
   (interactive)
   (message "%s" (projdex--status (projdex--current-root))))
 
+(defvar projdex--first-page-wait 1.0
+  "Seconds `projdex-find-file' waits at most for a first page of files.")
+
+(defun projdex--await-first-page (root)
+  "Wait until the index of ROOT can fill the first page of a prompt.
+That is when no walk runs or the index holds `projdex-limit' files, or
+after `projdex--first-page-wait' seconds.  Completion UIs ask for the
+empty input once and do not refresh, so a prompt opened on a new
+instance would otherwise stay empty until the user types.  Signal a
+`user-error' when the instance failed or stopped."
+  (let ((deadline (+ (float-time) projdex--first-page-wait)))
+    (while (let ((status (projdex--call-sync root '(:status))))
+             (and (plist-get status :indexing)
+                  (< (or (plist-get status :files) 0) projdex-limit)
+                  (< (float-time) deadline)))
+      (sleep-for 0.02))))
+
 ;;;###autoload
 (defun projdex-find-file (&optional include-all)
   "Visit a file of the current project, chosen from projdex's index.
@@ -433,10 +450,11 @@ with INCLUDE-ALL."
       (let ((rec (projdex--ensure root)))
         (unless (projdex--rec-watching rec)
           (emrs-send (projdex--rec-instance rec) '(:rescan))))
-      ;; A cheap probe, so that an instance that cannot be started or
-      ;; failed is reported here, before the prompt, as a `user-error'.
-      ;; `:status' does not score the index, unlike an empty query.
-      (projdex--call-sync root '(:status))
+      ;; `:status' probes, so that an instance that cannot be started or
+      ;; failed is reported here, before the prompt, as a `user-error',
+      ;; and a new instance has files to show.  `:status' does not score
+      ;; the index, unlike an empty query.
+      (projdex--await-first-page root)
       (let* ((completion-category-overrides
               (cons '(project-file (styles projdex)) completion-category-overrides))
              (table (projdex--table root))

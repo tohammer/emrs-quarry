@@ -248,6 +248,7 @@ script exits non-zero if projdex's p99 exceeds 50 ms (100k) or 150 ms (1m).
 ```sh
 cargo test              # Rust unit and service tests
 tests/run-ert.sh        # builds the module and runs the ERT suite in Emacs
+ERT_SELECTOR=cache tests/run-ert.sh   # only tests whose name matches the regexp
 bench/run-bench.sh      # benchmark, run by hand
 ```
 

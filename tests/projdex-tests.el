@@ -396,6 +396,50 @@ Without FACE, any face of `projdex-match-faces'."
                              (expand-file-name "src/main.rs" dir))))
           (when buf (kill-buffer buf)))))))
 
+(defun projdex-test--find-file-while-indexing (dir fake)
+  "Run `projdex-find-file' in DIR; the first FAKE `:status' replies say
+indexing with no files.  Return (FAKE-LEFT SHOWN): the fake replies
+not used up when the prompt opened, and the candidates for empty input."
+  (let ((project-find-functions (list (lambda (_) (list 'transient dir))))
+        (call-sync (symbol-function 'projdex--call-sync))
+        (left nil)
+        (shown nil)
+        (buf nil))
+    (cl-letf (((symbol-function 'project-root) (lambda (p) (cadr p)))
+              ((symbol-function 'projdex--call-sync)
+               (lambda (root request)
+                 (if (and (equal request '(:status)) (> fake 0))
+                     (progn (cl-decf fake) '(:files 0 :indexing t))
+                   (funcall call-sync root request))))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _)
+                 (setq left fake
+                       shown (all-completions "" table))
+                 "a.txt")))
+      (unwind-protect
+          (progn
+            (projdex-find-file)
+            (setq buf (current-buffer))
+            (list left shown))
+        (when buf (kill-buffer buf))))))
+
+(ert-deftest projdex-test-find-file-waits-for-first-page ()
+  "The prompt of a new instance opens once its index has files to show.
+UIs ask for the empty input once and do not refresh while indexing runs."
+  (projdex-test--with-roots ((dir '("a.txt" "b.txt")))
+    (pcase-let ((`(,left ,shown) (projdex-test--find-file-while-indexing dir 3)))
+      (should (= left 0))
+      (should (equal (sort shown #'string<) '("a.txt" "b.txt"))))))
+
+(ert-deftest projdex-test-find-file-first-page-wait-is-capped ()
+  "An index that stays empty does not hold the prompt back for long."
+  (projdex-test--with-roots ((dir '("a.txt")))
+    (let ((projdex--first-page-wait 0.2)
+          (start (float-time)))
+      (pcase-let ((`(,left ,_) (projdex-test--find-file-while-indexing dir 1000)))
+        (should (> left 0))
+        (should (< (- (float-time) start) 2))))))
+
 (defun projdex-test--find-file-with-keys (dir keys)
   "Run `projdex-find-file' in project DIR typing KEYS; return the visited file."
   (let* ((project-find-functions (list (lambda (_) (list 'transient dir))))

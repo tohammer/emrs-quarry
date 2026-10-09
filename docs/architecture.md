@@ -179,8 +179,13 @@ candidates for the rest of the prompt; a timeout gives no candidates and
 one message.
 
 `projdex-find-file` sends `(:rescan)` first when the instance is not
-watching, then a `(:status)` probe, so a failed or unstartable instance is
-a `user-error` before the prompt. It reads with require-match `confirm`
+watching, then `(:status)` probes, so a failed or unstartable instance is
+a `user-error` before the prompt. While a walk runs and the index holds
+fewer than `projdex-limit` files, it keeps probing, for at most 1 s
+(`projdex--first-page-wait`): completion UIs ask for the empty input once
+and do not refresh while indexing runs, so a prompt opened on a new
+instance would stay empty until the user types. Results for typed input
+during a long first walk still reflect the paths seen so far. It reads with require-match `confirm`
 and history `projdex-file-history`; input that is not an indexed path but
 completes to exactly one is visited as that file.
 
