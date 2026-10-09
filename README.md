@@ -26,6 +26,9 @@ no prebuilt binaries.
 - Git credentials for the repositories `tohammer/emrs-projdex` and
   `tohammer/emrs`, which are private; the recipes use the default protocol.
 - Linux for anything you want to rely on (see Status).
+- Optional: [consult](https://github.com/minad/consult) 2.0 or later for
+  the consult front end (see "consult front end"). projdex does not depend
+  on it and never loads it.
 
 ## Installation
 
@@ -143,7 +146,8 @@ with a copy of `projdex.el` that is not inside its repository.
    cp target/release/libprojdex.dylib ~/.emacs.d/projdex/projdex-module.dylib # macOS
    ```
 
-3. Put `lisp/projdex.el`, `lisp/projdex-build.el` and `emrs.el` on
+3. Put `lisp/projdex.el`, `lisp/projdex-build.el` (and
+   `lisp/projdex-consult.el` for the consult front end) and `emrs.el` on
    `load-path`. `emrs.el` is `elisp/emrs.el` of the
    [emrs repository](https://github.com/tohammer/emrs). The Lisp and Rust
    halves must match: use the commit pinned in `Cargo.toml` (`rev = ...` of
@@ -185,16 +189,17 @@ ranked paths of a project directly (see their docstrings).
 | Command | What it does |
 |---|---|
 | `projdex-find-file` | Visit a file of the current project, chosen from the index. Starts the project's instance on first use. |
-| `projdex-mode` | Global minor mode. Remaps `project-find-file` to `projdex-find-file`; with `projdex-provide-project-files` set, it also serves `project-files` from the index. |
+| `projdex-consult-find-file` | The same in a consult prompt that queries the index asynchronously (see "consult front end"). Needs consult 2.0 or later. |
+| `projdex-mode` | Global minor mode. Remaps `project-find-file` to `projdex-find-file-command` (default `projdex-find-file`); with `projdex-provide-project-files` set, it also serves `project-files` from the index. |
 | `projdex-rescan` | Walk the current project again and report the file count when done. |
 | `projdex-stop` | Stop the current project's instance. The next command starts a new one with the current options. |
 | `projdex-stop-all` | Stop all instances. |
 | `projdex-status` | Show root, file count, whether it is indexing or watching, number of walks and skipped paths in the echo area. |
 
-`projdex-find-file` falls back to `project-find-file` with a prefix argument
-(which asks for ignored files too) and in remote (TRAMP) projects. With
-`projdex-mode` the same applies to `project-find-file`, since it is
-remapped to `projdex-find-file`.
+`projdex-find-file` and `projdex-consult-find-file` fall back to
+`project-find-file` with a prefix argument (which asks for ignored files
+too) and in remote (TRAMP) projects. With `projdex-mode` the same applies
+to `project-find-file`, since it is remapped to one of them.
 
 One instance runs per project root, started lazily on first use. While the
 first walk runs, queries answer from the files seen so far.
@@ -256,6 +261,45 @@ switching projects (with Doom's workspaces module:
 directory). To use Projectile's root, wrap `projdex-find-file` in a
 command that binds `project-find-functions` to return that root.
 
+### consult front end
+
+`projdex-consult-find-file` is an optional front end for
+[consult](https://github.com/minad/consult) users. Each input goes to the
+index asynchronously, so typing never waits for the module; a query that a
+newer input supersedes is cancelled. While the first walk of a project
+still runs, the candidates are queried again every
+`projdex-consult-refresh-interval` seconds, so the list fills without
+typing. The indicator shows whether a query is running.
+
+It needs consult 2.0 or later, which is not a dependency of projdex:
+`lisp/projdex-consult.el` loads without consult, and the command then
+signals a `user-error`. `projdex.el` never loads it. The package recipes
+above include the file (`lisp/*.el`). It uses consult's internal async
+pipeline (`docs/decisions/0008`), so a consult upgrade can break it.
+
+To make `projdex-mode` run it in place of `project-find-file`:
+
+```elisp
+(setq projdex-find-file-command 'projdex-consult-find-file)
+```
+
+A plain `setq` takes effect at once, before or after the mode is enabled.
+The command is autoloaded; without package autoloads, `(require
+'projdex-consult)` first. You can also bind or call it directly.
+
+Differences from `projdex-find-file`:
+
+- A candidate must be chosen. A path that is not in the index cannot be
+  visited, unlike `projdex-find-file`, which accepts it.
+- The query syntax and the ranking are the same, but the completion styles
+  of your UI (orderless, ...) never re-filter projdex's results, as in
+  `projdex-find-file`. What the styles see depends on
+  `consult-async-split-style`. With the default `perl` style the input
+  `#query#filter` sends `query` to the index and filters the results with
+  `filter` locally, using your completion styles. With the style `none`
+  the whole input is the query and nothing is filtered locally.
+- The history is separate: `projdex-consult-history`.
+
 ## Options
 
 Customize group `projdex`. `projdex-include-hidden` and `projdex-ignores`
@@ -273,6 +317,10 @@ project's instance. The other options apply at once.
 | `projdex-query-timeout` | `10.0` | Seconds before a query gives up. A safety net against a stuck instance, not a latency budget. |
 | `projdex-provide-project-files` | `nil` | With `projdex-mode`, serve `project-files` from the index. |
 | `projdex-files-timeout` | `10.0` | Seconds `project-files` waits for the index before falling back. |
+| `projdex-find-file-command` | `projdex-find-file` | Command `projdex-mode` runs in place of `project-find-file`: `projdex-find-file` or `projdex-consult-find-file`. |
+| `projdex-consult-input-debounce` | `0.05` | Seconds without typing before the consult front end queries. |
+| `projdex-consult-input-throttle` | `0.1` | Minimum seconds between two queries of the consult front end. |
+| `projdex-consult-refresh-interval` | `0.25` | Seconds between queries of the consult front end while the instance is indexing. |
 
 ## What is indexed
 
@@ -400,7 +448,16 @@ cargo test              # Rust unit and service tests
 tests/run-ert.sh        # builds the module and runs the ERT suite in Emacs
 ERT_SELECTOR=cache tests/run-ert.sh   # only tests whose name matches the regexp
 bench/run-bench.sh      # benchmark, run by hand
+PROJDEX_TEST_LOAD_PATH=~/.emacs.d/straight/build/consult:~/.emacs.d/straight/build/compat tests/run-ert.sh
 ```
+
+The consult front end tests (`tests/projdex-consult-tests.el`) need consult
+2.0 or later and its dependency compat. `PROJDEX_TEST_LOAD_PATH`
+is a colon-separated list of directories that the script adds to
+`load-path`; put the directories of consult and compat there. Without it,
+or when consult cannot be loaded from it, the script says so and skips
+those tests, and the rest of the suite runs as usual. Rerun them after
+upgrading consult.
 
 Set `EMACS` to use another Emacs binary. There is no CI (`docs/backlog.md`),
 so run the first two before merging.

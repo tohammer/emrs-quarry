@@ -3,19 +3,6 @@
 Open points only. Delete an item when it is done; git keeps the history.
 Deferred review findings name their origin, the reason and when to revisit.
 
-## consult async source
-
-An optional `projdex-consult.el` that adapts the asynchronous core to
-consult: debounced queries, one cancellable stream per query, results shown
-while indexing runs. Deferred by ADR 0001. Revisit after version 1 works.
-
-When the module is missing, `projdex--start` asks whether to build it, from
-whatever caller started the instance: also `projdex-query-async` or a
-completion table inside the minibuffer. `projdex-find-file` probes before
-its prompt and is not affected. A consult source must start or probe the
-instance before its prompt too, or the question should move to the
-commands. Origin: review of the install-from-GitHub spec (2026-10-09).
-
 ## Continuous integration
 
 No CI yet. The emrs repository had to disable GitHub Actions for lack of

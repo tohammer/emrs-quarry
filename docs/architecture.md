@@ -7,7 +7,8 @@ This document describes the system as it is now.
 projdex is an Emacs package with two parts: a Rust `cdylib` built on emrs
 (`src/`) that keeps one file index per project root, and the Elisp library
 `lisp/projdex.el` that starts the instances, owns the completion table and
-provides the commands.
+provides the commands. An optional file, `lisp/projdex-consult.el`, adds a
+consult front end.
 
 ```text
  Emacs thread                               runtime threads (emrs pool)
@@ -36,9 +37,10 @@ as a self-message through `ctx.address()`, so all index access happens in
 | `src/matcher.rs` | Query text to ranked paths with match positions; parallel scoring; incremental narrowing | `index`, `nucleo-matcher` |
 | `src/walk.rs` | Walker configuration (`ignore` crate), parallel walk sending batches of at most 1000 paths, skipped count | `ignore` |
 | `src/watch.rs` | Watch set, debouncing, translation of file-system events into index changes, rescan triggers, failure reporting | `walk`, `notify`, `notify-debouncer-full` |
-| `lisp/projdex.el` | Options, module lookup, instance table, event and exit handling, query entry points, completion table and `projdex` style, commands, `projdex-mode`, `project-files` method | `emrs.el`, `projdex-build.el`, `project` |
+| `lisp/projdex.el` | Options, module lookup, instance table, event and exit handling, query entry points, completion table and `projdex` style, `projdex--prepare`, commands, `projdex-mode` and its remap through `projdex-find-file-command`, `project-files` method | `emrs.el`, `projdex-build.el`, `project` |
+| `lisp/projdex-consult.el` | Optional consult front end: `projdex-consult-find-file`, the async pipeline step that queries the index, its options and history. Loads and byte-compiles without consult; `projdex.el` never loads it | `projdex.el`, `emrs.el`, consult 2.0 or later (optional) |
 | `lisp/projdex-build.el` | Builds the module with cargo and installs it as `lisp/projdex-module` plus `module-file-suffix` in the repository: repository detection, `projdex-build-module` (async), `projdex-build-module-sync` (for `:pre-build`), install by rename. Needs neither emrs nor the module | Cargo, Emacs |
-| `tests/projdex-tests.el`, `tests/run-ert.sh` | ERT suite on generated trees. The script builds the debug module, copies the Lisp files and the module as `projdex-module` to `target/elisp` (so a module built in `lisp/` is not the one under test), takes `emrs.el` from the emrs checkout Cargo resolved and runs with `--module-assertions` | Cargo, Emacs |
+| `tests/projdex-tests.el`, `tests/projdex-consult-tests.el`, `tests/run-ert.sh` | ERT suite on generated trees. The script builds the debug module, copies the Lisp files and the module as `projdex-module` to `target/elisp` (so a module built in `lisp/` is not the one under test), takes `emrs.el` from the emrs checkout Cargo resolved and runs with `--module-assertions`. The script also adds the directories of `PROJDEX_TEST_LOAD_PATH` (consult, compat) to `load-path` and loads the consult tests, which are skipped when consult 2.0 or later cannot be loaded | Cargo, Emacs |
 | Rust tests (in each `src/*.rs`) | Unit tests per module; service and watcher tests through `emrs::testing::Host` on temporary trees | `tempfile` |
 | `bench/run-bench.sh`, `bench/projdex-bench.el` | Generates 100k and 1M file trees, measures indexing time, memory and per-call latency against a `project-files` + `flex` baseline | Cargo, Emacs, git |
 
@@ -211,7 +213,7 @@ returns its result as is. `projdex-find-file` binds
 `completion-category-overrides` for the `project-file` category and sets
 `completion-styles` to `(projdex)` buffer-locally in its minibuffer, so
 only that style applies during its prompt (ADR 0005). Remote projects and a prefix
-argument defer to `project-find-file`.
+argument defer to `project-find-file`, in `projdex-consult-find-file` too.
 
 The table's try-completion returns nil without results, the input for
 several, `t` for a sole exact match and the sole match otherwise, so TAB
@@ -221,22 +223,89 @@ are not cached. After a failure the table reports once and has no
 candidates for the rest of the prompt; a timeout gives no candidates and
 one message.
 
-`projdex-find-file` sends `(:rescan)` first when the instance is not
-watching, then `(:status)` probes, so a failed or unstartable instance is
-a `user-error` before the prompt. While a walk runs and the index holds
+`projdex--prepare (root)` makes the instance ready for a prompt and is
+the first step of both commands, so no table or async step starts an
+instance, or asks whether to build the module (`projdex--offer-build`),
+from inside the minibuffer. It ensures the instance, sends `(:rescan)`
+when the instance is not watching, then probes with `(:status)`
+(`projdex--await-first-page`), so a failed or unstartable instance is a
+`user-error` before the prompt. While a walk runs and the index holds
 fewer than `projdex-limit` files, it keeps probing, for at most 1 s
 (`projdex--first-page-wait`): completion UIs ask for the empty input once
 and do not refresh while indexing runs, so a prompt opened on a new
 instance would stay empty until the user types. Results for typed input
-during a long first walk still reflect the paths seen so far. It reads with require-match `confirm`
-and history `projdex-file-history`; input that is not an indexed path but
-completes to exactly one is visited as that file.
+during a long first walk still reflect the paths seen so far.
+
+`projdex-find-file` reads with require-match `confirm` and history
+`projdex-file-history`; input that is not an indexed path but completes to
+exactly one is visited as that file.
+
+`projdex-mode-map` remaps `project-find-file` through a `menu-item` whose
+`:filter` returns the value of `projdex-find-file-command`, read on each
+lookup. The option is `projdex-find-file` or `projdex-consult-find-file`,
+and changing it with `setq` takes effect at once, with the mode on or off.
 
 `project-files` is overridden by an `:around` method that applies only with
 `projdex-mode` and `projdex-provide-project-files`, for the whole root of a
 local project that has a running instance. It collects the `:files` stream
 while waiting in `accept-process-output` and falls back to the next method
 on timeout or error.
+
+### The consult front end
+
+`projdex-consult-find-file` (`lisp/projdex-consult.el`) shows candidates
+from `consult--read` with an async pipeline of consult 2.0 or later
+(ADR 0008). The file requires consult optionally and declares the
+functions it calls, so it loads and compiles without it; the command
+signals a `user-error` when `consult--async-pipeline` is not fbound.
+After the same remote and prefix-argument fallback and
+`projdex--prepare`, it reads with category `project-file`, no sorting,
+require-match `t` (a candidate must be chosen, a new file cannot be
+visited) and history `projdex-consult-history`, and visits the root plus
+the chosen path.
+
+The pipeline is, in order, `consult--async-split` (which honours
+`consult-async-split-style`), `consult--async-throttle` (with
+`projdex-consult-input-throttle` and `projdex-consult-input-debounce`,
+since consult's defaults are tuned for processes), the projdex step,
+`consult--async-indicator` and `consult--async-refresh`. There is no
+minimum input: the empty input lists files. The pipeline is complete, so
+`consult--read` gets `:async-wrap #'identity`.
+
+The step, `projdex-consult--async`, keeps the current input, the pending
+call, a timer and a flag for the first error:
+
+- A new input string cancels the pending call (`emrs-cancel`) and the
+  timer, sends the input with `projdex-query-async` (`projdex-limit`,
+  `projdex-highlight`) and shows the indicator as running. Nothing else
+  is passed on. A call carries a serial number, so a reply of a
+  superseded call is ignored.
+- The step sends `flush` to the sink only when a reply arrives, then the
+  candidates (the paths copied, highlighted with `projdex--highlight`,
+  the strings `projdex--table` returns) and the finished indicator. The
+  old candidates stay on screen until the new ones are there.
+- A reply with `:indexing` true arms a timer that sends the current input
+  again after `projdex-consult-refresh-interval`, so the list fills while
+  the first walk runs. A reply with `:indexing` false arms nothing.
+- A call error is shown once with `message`, followed by `flush` and the
+  failed indicator, and arms no timer. The next input queries again,
+  which may start a new instance; an error from that is reported the same
+  way. A cancelled call is ignored.
+- `cancel` and `destroy` cancel the call and the timer and pass the action
+  on.
+
+Callbacks run from process filters and timers, outside the minibuffer;
+consult's refresh step and the sink handle that.
+
+Completion styles cannot re-filter the results. `consult--async-split`
+hands the UI's styles only the filter part of the input (what follows the
+second separator, empty with the split style `none`), so with the
+default `perl` style `#query#filter` filters projdex's results locally
+with the user's styles, and a plain query is not filtered at all. This
+meets the requirement of ADR 0005 without setting `completion-styles`
+(ADR 0008). The step uses consult internals (`consult--` functions), so
+the consult tests run against the consult found through
+`PROJDEX_TEST_LOAD_PATH`.
 
 ## Lessons
 
@@ -287,3 +356,7 @@ on timeout or error.
   Generations keep queries on the previous index and replay recorded
   changes onto the fresh one, because a change during a walk may or may not
   be seen by the walker.
+- **`consult--read` wraps async tables by default.** Unless `:async-wrap`
+  is given, it passes the table through `consult--async-wrap`, which adds
+  split, indicator and refresh. A pipeline that already contains them
+  needs `:async-wrap #'identity`; otherwise the split initialises twice.

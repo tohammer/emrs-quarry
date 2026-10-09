@@ -210,7 +210,7 @@ Manual, in Doom with vertico and orderless (not covered by tests):
   skip. *Done when* every automated test listed under Testing passes with
   the installed consult 3.7 and compat, and the no-consult load and
   compile test passes.
-- [ ] 3. Docs: README (install, the command, the option, consult ≥ 2.0,
+- [x] 3. Docs: README (install, the command, the option, consult ≥ 2.0,
   `PROJDEX_TEST_LOAD_PATH`), architecture (component table, completion
   section), backlog (remove the consult item; keep nothing of its second
   paragraph that `projdex--prepare` resolves), next-steps. *Done when*
