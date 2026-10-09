@@ -373,5 +373,124 @@
           (should-not (eq (command-remapping 'project-find-file) 'projdex-find-file)))
       (projdex-mode (if was 1 -1)))))
 
+;;;; project-files
+
+(cl-defmethod project-root ((project (head projdex-test)))
+  (cdr project))
+
+(cl-defmethod project-files ((_project (head projdex-test)) &optional _dirs)
+  "The next method in the tests: a marker nothing else returns."
+  '("NEXT-METHOD"))
+
+(defmacro projdex-test--counting-streams (var &rest body)
+  "Run BODY with VAR counting the calls to `emrs-call-stream'."
+  (declare (indent 1))
+  `(let ((,var 0)
+         (orig (symbol-function 'emrs-call-stream)))
+     (cl-letf (((symbol-function 'emrs-call-stream)
+                (lambda (&rest args) (cl-incf ,var) (apply orig args))))
+       ,@body)))
+
+(defun projdex-test--files-tree ()
+  "Create a tree with ignore rules and hidden files; return its root."
+  (let ((dir (projdex-test--make-tree
+              '("a.txt" "src/main.rs" "src/deep/er/x.rs" "src/skip.log"
+                "build/out.o" ".hidden" "docs/.dot/note.md" "größe/ü.txt"))))
+    (write-region "build/\n*.log\n" nil (expand-file-name ".gitignore" dir) nil 'silent)
+    dir))
+
+(defconst projdex-test--files-expected
+  '(".gitignore" ".hidden" "a.txt" "docs/.dot/note.md" "größe/ü.txt"
+    "src/deep/er/x.rs" "src/main.rs"))
+
+(ert-deftest projdex-test-project-files-inactive ()
+  (let ((dir (projdex-test--files-tree)))
+    (unwind-protect
+        (let ((project (cons 'projdex-test dir)))
+          (projdex--ensure dir)
+          (emrs-call-sync (projdex--rec-instance (projdex--lookup dir)) '(:rescan) 10)
+          (projdex-test--counting-streams n
+            (let ((projdex-mode nil) (projdex-provide-project-files t))
+              (should (equal (project-files project) '("NEXT-METHOD"))))
+            (unwind-protect
+                (progn
+                  (projdex-mode 1)
+                  (let ((projdex-provide-project-files nil))
+                    (should (equal (project-files project) '("NEXT-METHOD")))))
+              (projdex-mode -1))
+            (should (= n 0))))
+      (projdex-stop-all)
+      (projdex-test--wait (lambda () (zerop (hash-table-count projdex--instances))) 3)
+      (delete-directory dir t))))
+
+(ert-deftest projdex-test-project-files-active ()
+  (let ((dir (projdex-test--files-tree)))
+    (unwind-protect
+        (let ((project (cons 'projdex-test dir))
+              (projdex-provide-project-files t))
+          (emrs-call-sync (projdex--rec-instance (projdex--ensure dir)) '(:rescan) 10)
+          (unwind-protect
+              (progn
+                (projdex-mode 1)
+                (let ((expected (sort (mapcar (lambda (f) (concat dir f))
+                                              projdex-test--files-expected)
+                                      #'string<)))
+                  (should (equal (sort (project-files project) #'string<) expected))
+                  ;; DIRS naming the root, in another spelling, is served too.
+                  (should (equal (sort (project-files project (list (directory-file-name dir)))
+                                       #'string<)
+                                 expected))
+                  (projdex-test--counting-streams n
+                    ;; Other directories and extra DIRS go to the next method.
+                    (should (equal (project-files project (list (concat dir "src/")))
+                                   '("NEXT-METHOD")))
+                    (should (equal (project-files project (list dir (concat dir "src/")))
+                                   '("NEXT-METHOD")))
+                    (should (= n 0)))))
+            (projdex-mode -1)))
+      (projdex-stop-all)
+      (projdex-test--wait (lambda () (zerop (hash-table-count projdex--instances))) 3)
+      (delete-directory dir t))))
+
+(ert-deftest projdex-test-project-files-no-instance ()
+  (let ((dir (projdex-test--files-tree)))
+    (unwind-protect
+        (let ((projdex-provide-project-files t))
+          (unwind-protect
+              (progn
+                (projdex-mode 1)
+                (projdex-test--counting-streams n
+                  (should (equal (project-files (cons 'projdex-test dir))
+                                 '("NEXT-METHOD")))
+                  (should (= n 0))
+                  (should-not (projdex--lookup dir))
+                  (should (zerop (hash-table-count projdex--instances)))))
+            (projdex-mode -1)))
+      (delete-directory dir t))))
+
+(ert-deftest projdex-test-project-files-timeout ()
+  (let ((dir (projdex-test--files-tree))
+        (cancelled nil))
+    (unwind-protect
+        (let ((projdex-provide-project-files t)
+              (projdex-files-timeout 0.2)
+              (started (float-time)))
+          (projdex--ensure dir)
+          (unwind-protect
+              (progn
+                (projdex-mode 1)
+                (cl-letf (((symbol-function 'emrs-call-stream)
+                           (lambda (&rest _) 'dummy-call))
+                          ((symbol-function 'emrs-cancel)
+                           (lambda (call) (push call cancelled))))
+                  (should (equal (project-files (cons 'projdex-test dir))
+                                 '("NEXT-METHOD")))
+                  (should (equal cancelled '(dummy-call)))
+                  (should (>= (- (float-time) started) 0.2))))
+            (projdex-mode -1)))
+      (projdex-stop-all)
+      (projdex-test--wait (lambda () (zerop (hash-table-count projdex--instances))) 3)
+      (delete-directory dir t))))
+
 (provide 'projdex-tests)
 ;;; projdex-tests.el ends here

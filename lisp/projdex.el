@@ -356,6 +356,59 @@ with INCLUDE-ALL."
                                     'projdex-file-history)))
         (find-file (expand-file-name path root))))))
 
+;;;; project-files
+
+(defun projdex--files-applicable-p (project dirs)
+  "Return the root record when `project-files' of PROJECT in DIRS is served.
+That needs `projdex-mode', `projdex-provide-project-files', DIRS nil or
+the project root alone, a local root and an existing instance."
+  (and (bound-and-true-p projdex-mode)
+       projdex-provide-project-files
+       (let ((root (projdex--root (project-root project))))
+         (and (not (file-remote-p root))
+              (or (null dirs)
+                  (and (null (cdr dirs))
+                       (equal (projdex--root (car dirs)) root)))
+              (projdex--lookup root)))))
+
+(defun projdex--collect-files (rec)
+  "Return the absolute file names the index of REC holds, or `fail'.
+Wait up to `projdex-files-timeout' seconds for the stream to end."
+  (let* ((root (projdex--rec-root rec))
+         (batches nil)
+         (end nil)
+         (call nil))
+    (unwind-protect
+        (progn
+          (setq call (emrs-call-stream
+                      (projdex--rec-instance rec) '(:files)
+                      :on-batch (lambda (items) (push items batches))
+                      :on-end (lambda (status _err) (setq end status))))
+          (let ((deadline (+ (float-time) projdex-files-timeout)))
+            (while (and (not end) (< (float-time) deadline))
+              (accept-process-output nil 0.05)))
+          (if (eq end 'done)
+              (let ((files nil))
+                ;; BATCHES is newest first; keep the order of the index.
+                (dolist (batch batches)
+                  (dolist (path (nreverse (copy-sequence batch)))
+                    (push (concat root path) files)))
+                files)
+            'fail))
+      ;; Cancels on timeout and on a quit; does nothing for a call that
+      ;; has already ended.
+      (when (and call (not end)) (emrs-cancel call)))))
+
+(cl-defmethod project-files :around (project &optional dirs)
+  "Serve the files of PROJECT from the projdex index when enabled.
+See `projdex-provide-project-files'.  Fall back to the next method
+when the index is not applicable, times out or fails."
+  (let* ((rec (projdex--files-applicable-p project dirs))
+         (files (and rec (projdex--collect-files rec))))
+    (if (or (null rec) (eq files 'fail))
+        (cl-call-next-method)
+      files)))
+
 ;;;; Mode
 
 (defvar-keymap projdex-mode-map
