@@ -432,6 +432,44 @@ Without FACE, any face of `projdex-match-faces'."
       (should (equal (projdex-test--find-file-with-keys dir "rs$ RET RET")
                      (concat dir "rs$")))))))
 
+;; A style like orderless: asks the table for all candidates of the
+;; empty prefix and relies on `completion-regexp-list' to filter them.
+(defun projdex-test--greedy-all (_string table pred _point)
+  (let ((all (all-completions "" table pred)))
+    (and all (nconc all 0))))
+
+(defun projdex-test--greedy-try (_string _table _pred _point) nil)
+
+(ert-deftest projdex-test-ui-no-match-shows-nothing ()
+  "No match gives no candidates, whatever the user's `completion-styles'."
+  (projdex-test--with-index dir
+    (let* ((completion-styles-alist
+            (cons '(projdex-test-greedy projdex-test--greedy-try
+                                        projdex-test--greedy-all "")
+                  completion-styles-alist))
+           (completion-styles '(projdex-test-greedy))
+           (seen nil)
+           (map (define-keymap
+                  "C-c t" (lambda ()
+                            (interactive)
+                            (let ((s (minibuffer-contents)))
+                              (push (list s completion-styles
+                                          (completion-all-completions
+                                           s minibuffer-completion-table
+                                           minibuffer-completion-predicate
+                                           (length s)))
+                                    seen)))))
+           (minibuffer-setup-hook minibuffer-setup-hook))
+      (add-hook 'minibuffer-setup-hook
+                (lambda () (use-local-map (make-composed-keymap map (current-local-map))))
+                90)
+      (projdex-test--find-file-with-keys dir "zzzqqq C-c t DEL DEL DEL DEL DEL DEL main C-c t RET")
+      (should (equal (nth 1 seen) '("zzzqqq" (projdex) nil)))
+      (should (equal (car (nth 0 seen)) "main"))
+      (should (equal (car (nth 2 (nth 0 seen))) "src/main.rs"))
+      ;; Other prompts keep the user's styles.
+      (should (equal completion-styles '(projdex-test-greedy))))))
+
 (ert-deftest projdex-test-ui-multiple-matches-keep-input ()
   (projdex-test--with-index dir
     (let ((table (projdex--table dir)))

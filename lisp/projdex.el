@@ -440,9 +440,18 @@ with INCLUDE-ALL."
       (let* ((completion-category-overrides
               (cons '(project-file (styles projdex)) completion-category-overrides))
              (table (projdex--table root))
-             (path (completing-read (format "Find file in %s: " (project-name project))
-                                    table nil 'confirm nil
-                                    'projdex-file-history))
+             (path (minibuffer-with-setup-hook
+                       (lambda ()
+                         ;; The override only puts `projdex' first: Emacs
+                         ;; appends `completion-styles', which would run
+                         ;; when projdex finds nothing and, since the table
+                         ;; ignores `completion-regexp-list', list every
+                         ;; file.  Buffer-local, so other minibuffers keep
+                         ;; the user's styles.
+                         (setq-local completion-styles '(projdex)))
+                     (completing-read (format "Find file in %s: " (project-name project))
+                                      table nil 'confirm nil
+                                      'projdex-file-history)))
              ;; With `confirm', RET accepts the input as typed.  When it
              ;; is not a file of the index but completes to exactly one,
              ;; visit that one rather than a new file.

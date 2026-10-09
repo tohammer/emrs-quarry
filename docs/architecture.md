@@ -158,8 +158,9 @@ of term N, face N of `projdex-match-faces` (modulo their number).
 
 The `projdex` completion style hands the input to the table unchanged and
 returns its result as is. `projdex-find-file` binds
-`completion-category-overrides` so only that style applies to the
-`project-file` category during its prompt. Remote projects and a prefix
+`completion-category-overrides` for the `project-file` category and sets
+`completion-styles` to `(projdex)` buffer-locally in its minibuffer, so
+only that style applies during its prompt (ADR 0005). Remote projects and a prefix
 argument defer to `project-find-file`.
 
 `project-files` is overridden by an `:around` method that applies only with
@@ -194,6 +195,12 @@ on timeout or error.
   user's global git excludes, also outside git repositories, so the number
   of indexed files can be lower than the number of files on disk, for
   example in a generated benchmark tree.
+- **A category override does not replace `completion-styles`.** Emacs
+  appends the user's styles behind the override's, and tries them when the
+  first returns nothing. orderless then asked the table for the empty
+  prefix and, since the table ignores `completion-regexp-list`, a query
+  without matches listed every file. The prompt now sets
+  `completion-styles` buffer-locally (ADR 0005).
 - **Batch-mode `completing-read` reads stdin.** The ERT tests drive the
   minibuffer with `execute-kbd-macro` instead.
 - **`project-read-file-name-function` cannot speed up `project-find-file`.**

@@ -1,7 +1,7 @@
 # 0002 — Rust ranks; a pass-through completion style keeps that ranking
 
 Date: 2026-10-09
-Status: accepted
+Status: accepted; the way the style is enforced is superseded by 0005
 
 ## Context
 
