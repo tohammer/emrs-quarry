@@ -5,13 +5,10 @@ architecture.md or an ADR.
 
 ## Next
 
-1. projdex as the file chooser after `projectile-switch-project`
-   (backlog). Small; the developer's Doom config already has the
-   Projectile-rooted wrapper.
-2. Install from GitHub with one `package!` declaration, with emrs as its
+1. Install from GitHub with one `package!` declaration, with emrs as its
    own package (backlog, together with "Distribution"). Needed before
    anyone else uses projdex.
-3. consult async source (backlog), built on `projdex-query-async`. It
+2. consult async source (backlog), built on `projdex-query-async`. It
    must restrict completion styles like `projdex-find-file` does
    (ADR 0005).
 

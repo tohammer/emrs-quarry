@@ -141,6 +141,14 @@ that call `project-find-file` by name, such as the `project-switch-project`
 menu (`project-switch-commands`), are not remapped; add
 `projdex-find-file` to `project-switch-commands` if you want it there.
 
+projdex takes the project root from project.el. With Projectile, remap
+`projectile-find-file` to `projdex-find-file`, and set
+`projectile-switch-project-action` to it for the file prompt after
+switching projects (with Doom's workspaces module:
+`+workspaces-switch-project-function`, which receives the project
+directory). To use Projectile's root, wrap `projdex-find-file` in a
+command that binds `project-find-functions` to return that root.
+
 ## Options
 
 Customize group `projdex`. `projdex-include-hidden` and `projdex-ignores`

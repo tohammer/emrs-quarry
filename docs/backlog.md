@@ -137,20 +137,3 @@ spellings gets two instances and two sets of watches. Using
 `project-files` must keep returning paths under the project's own
 spelling. Origin: v1 review (Elisp), 2026-10-09; deferred as rare.
 Revisit on a report.
-
-## projdex as the file chooser after `projectile-switch-project`
-
-After switching projects, Doom prompts for a file with
-`+workspaces-switch-project-function` (default `doom-project-find-file`,
-which calls `projectile-find-file` by name, so a `[remap
-projectile-find-file]` does not apply). Without the workspaces module it is
-`projectile-switch-project-action`. Possible: set that variable to a
-function of the project directory that runs projdex there, e.g. with
-`default-directory` bound to it and the user's Projectile-rooted wrapper
-(`my/projdex-projectile-find-file` in the developer's Doom config).
-Either do it in the user config, or ship a `projdex-projectile` helper
-(find-file in Projectile's root, usable as both remap target and
-switch-project action) with projdex.
-
-Origin: the user's request while setting projdex up in Doom (2026-10-09).
-Revisit after v1 is merged.
