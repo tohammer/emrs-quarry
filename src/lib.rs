@@ -11,5 +11,6 @@ mod index;
 mod matcher;
 mod service;
 mod walk;
+mod watch;
 
 emrs::module!("projdex", [service::Projdex]);

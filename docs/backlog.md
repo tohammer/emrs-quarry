@@ -38,3 +38,21 @@ the only match; vertico and similar UIs select candidates instead and are
 unaffected. Origin: task 6 of the v1 spec, 2026-10-09. Revisit after the
 manual UI checks: returning the sole match when `:total` is 1 is a likely
 fix.
+
+## `.git/info/exclude` created after the first walk
+
+The watcher watches each repository's `.git/info` only if it existed when
+its directory was walked. After `git init` in an indexed tree, edits to
+`.git/info/exclude` go unnoticed until the next full rescan
+(`projdex-rescan`, a `.gitignore` change, or lost events). Origin: task 4
+of the v1 spec, 2026-10-09. Revisit if users report it.
+
+## Watcher on macOS and Windows
+
+The recursive-watch path for non-Linux platforms is type-checked for
+Windows and exercised on Linux through a test hook, but never run against
+FSEvents or Windows. Suspected issues: FSEvents' sticky flags causing extra
+directory walks; Windows buffer overflows, which notify does not report as
+lost events. Also, when creating the backend watcher fails,
+notify-debouncer-full leaves its own thread running (upstream). Origin:
+task 4, 2026-10-09. Revisit before claiming macOS or Windows support.

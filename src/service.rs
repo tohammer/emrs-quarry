@@ -11,7 +11,7 @@
 //!
 //! `:limit` defaults to 200 and `:positions` to nil. Start arguments are
 //! `(:root "/abs/dir/" :include-hidden t :ignores ("*.min.js"))`; `:include-hidden` defaults to t, `:ignores` to
-//! nil. The only event so far is `(:indexed :files N :millis T)`.
+//! nil. Events: `(:indexed :files N :millis T)`, `(:changed :added A :removed R)`, `(:watch-failed :message S)`.
 //!
 //! **Generations.** Every walk has a generation number and builds a fresh [`Index`] from its batches
 //! (self-messages [`Request::WalkBatch`]); the fresh index becomes current at the walk's [`Request::WalkDone`].
@@ -19,6 +19,18 @@
 //! the partial fresh index. Starting a walk cancels the running one (its per-walk flag); batches and `WalkDone`
 //! of any generation other than the running walk's are discarded. Pending `(:rescan)` and `(:files)` replies are
 //! answered only at the `WalkDone` of the running (newest) walk.
+//!
+//! **Watching** (`src/watch.rs`). `start` sets up the [`Watcher`]; if that fails the instance runs without it and
+//! emits `(:watch-failed ...)`. The watcher thread sends [`Request::FsChanges`], [`Request::FsRescan`] and
+//! [`Request::WatchFailed`] as self-messages. File-system changes are applied to the index queries use (the
+//! current index, or during the first walk the partial fresh one) and `(:changed ...)` reports how many paths
+//! that added and removed, when any. While a walk runs, the changes are also recorded in it and replayed on its
+//! fresh index at its `WalkDone`, before that index becomes current, so a change the walk did or did not see is
+//! never lost (adds and removes are idempotent). A rescan requested by the watcher starts a walk like
+//! `(:rescan)` without a reply. Every full walk reports the directories it visits to the watcher, which watches
+//! them; when the walk's index becomes current, the watcher drops the directories that walk did not see. After
+//! the watcher fails (watch limit, backend error) it is dropped, `(:watch-failed ...)` is emitted once,
+//! `:watching` is false and the index stays as it is.
 //!
 //! **Walk errors.** A walk that fails (`walk` returns an error) or reports itself cancelled although it is the
 //! newest walk does not replace the index: the error is logged, no `:indexed` event is emitted, `:walks` and
@@ -29,6 +41,7 @@
 use crate::index::Index;
 use crate::matcher::Matcher;
 use crate::walk::{self, WalkConfig};
+use crate::watch::{Change, Output, Watcher};
 use emrs::{Context, Error, Level, Reply, Service};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -83,6 +96,15 @@ pub enum Request {
     /// The walk of `generation` has ended.
     #[serde(skip_deserializing)]
     WalkDone { generation: u64, skipped: usize, millis: u64, cancelled: bool, error: Option<String> },
+    /// Index changes from the watcher.
+    #[serde(skip_deserializing)]
+    FsChanges(Vec<Change>),
+    /// The watcher asks for a full walk (ignore file changed, events lost).
+    #[serde(skip_deserializing)]
+    FsRescan,
+    /// The watcher stopped working.
+    #[serde(skip_deserializing)]
+    WatchFailed(String),
 }
 
 /// Reply to `(:query)`: `(:paths (P ...) :positions (POS ...) :total M :indexing BOOL)`.
@@ -101,7 +123,7 @@ pub struct Status {
     pub root: String,
     pub files: usize,
     pub indexing: bool,
-    /// Always false until the watcher exists (task 4).
+    /// Whether the file watcher is working.
     pub watching: bool,
     /// Finished walks whose index became current.
     pub walks: u64,
@@ -109,11 +131,15 @@ pub struct Status {
     pub skipped: usize,
 }
 
-/// Events for `on-event`. The watcher (task 4) adds `Changed` and `WatchFailed`.
+/// Events for `on-event`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Event {
     /// `(:indexed :files N :millis T)`: a walk finished and its index became current.
     Indexed { files: usize, millis: u64 },
+    /// `(:changed :added A :removed R)`: file-system changes changed the index (`A + R > 0`).
+    Changed { added: usize, removed: usize },
+    /// `(:watch-failed :message S)`: the watcher could not be set up or stopped working.
+    WatchFailed { message: String },
 }
 
 /// The running walk.
@@ -123,6 +149,10 @@ struct Walk {
     cancel: Arc<AtomicBool>,
     /// The fresh index its batches build.
     index: Index,
+    /// File-system changes that arrived during the walk, replayed on `index` at `WalkDone`.
+    changes: Vec<Change>,
+    /// The watcher's clock value when the walk began (see [`Watcher::begin_walk`]).
+    watch_stamp: Option<u64>,
 }
 
 pub struct Projdex {
@@ -140,6 +170,17 @@ pub struct Projdex {
     pending_rescans: Vec<Reply>,
     walks: u64,
     skipped: usize,
+    /// The file watcher; `None` when set-up failed, after it failed, and after `stop`.
+    watch: Option<Watcher>,
+}
+
+/// Applies `change` to `index`; returns the number of paths added and removed.
+fn apply(index: &mut Index, change: &Change) -> (usize, usize) {
+    match change {
+        Change::Add(path) => (usize::from(index.add(path)), 0),
+        Change::Remove(path) => (0, usize::from(index.remove(path))),
+        Change::RemoveDir(dir) => (0, index.remove_dir(dir)),
+    }
 }
 
 /// The index queries use: the current one, or during the first walk the partial fresh one.
@@ -163,7 +204,15 @@ impl Projdex {
         self.generation += 1;
         let generation = self.generation;
         let cancel = Arc::new(AtomicBool::new(false));
-        self.walk = Some(Walk { generation, cancel: cancel.clone(), index: Index::new() });
+        let (on_dir, watch_stamp) = match &self.watch {
+            Some(watch) => {
+                let (tracker, stamp) = watch.begin_walk();
+                (Some(tracker.on_dir()), Some(stamp))
+            }
+            None => (None, None),
+        };
+        self.walk =
+            Some(Walk { generation, cancel: cancel.clone(), index: Index::new(), changes: Vec::new(), watch_stamp });
         let config = self.config.clone();
         // `Address` is `Send` but not necessarily `Sync`; the walker calls `on_batch` from several threads.
         let address = Mutex::new(ctx.address());
@@ -171,7 +220,7 @@ impl Projdex {
             let send = |request| address.lock().unwrap_or_else(|e| e.into_inner()).send(request);
             let is_cancelled = || cancel.load(Ordering::Relaxed) || token.is_cancelled();
             let on_batch = |paths| send(Request::WalkBatch { generation, paths });
-            let done = match walk::walk(&config, None, &is_cancelled, &on_batch) {
+            let done = match walk::walk_dirs(&config, None, &is_cancelled, &on_batch, on_dir) {
                 Ok(stats) => Request::WalkDone {
                     generation,
                     skipped: stats.skipped,
@@ -201,8 +250,15 @@ impl Projdex {
                 }
             }
             None => {
-                self.current = walk.index;
+                let mut index = walk.index;
+                for change in &walk.changes {
+                    apply(&mut index, change);
+                }
+                self.current = index;
                 self.has_index = true;
+                if let (Some(watch), Some(stamp)) = (&self.watch, walk.watch_stamp) {
+                    watch.walk_done(stamp);
+                }
                 self.walks += 1;
                 self.skipped = skipped;
                 if skipped > 0 {
@@ -218,6 +274,33 @@ impl Projdex {
         for reply in std::mem::take(&mut self.pending_files) {
             self.stream_files(reply, ctx);
         }
+    }
+
+    /// Applies file-system changes to the index queries use, records them in the running walk, and emits
+    /// `:changed` when the index changed.
+    fn fs_changes(&mut self, changes: Vec<Change>, ctx: &Context<Self>) {
+        let index = match &mut self.walk {
+            Some(walk) if !self.has_index => &mut walk.index,
+            _ => &mut self.current,
+        };
+        let (mut added, mut removed) = (0, 0);
+        for change in &changes {
+            let (a, r) = apply(index, change);
+            added += a;
+            removed += r;
+        }
+        if let Some(walk) = &mut self.walk {
+            walk.changes.extend(changes);
+        }
+        if added + removed > 0 {
+            ctx.emit(Event::Changed { added, removed });
+        }
+    }
+
+    /// Logs and emits a watcher failure (the caller has dropped the watcher).
+    fn watch_failed(&mut self, message: String, ctx: &Context<Self>) {
+        ctx.log(Level::Warn, format!("not watching {}: {message}", self.root));
+        ctx.emit(Event::WatchFailed { message });
     }
 
     /// Streams a snapshot of the index from a spawned task.
@@ -265,9 +348,28 @@ impl Service for Projdex {
         }
         let config = WalkConfig { root, include_hidden: args.include_hidden, ignores: args.ignores };
         walk::check_ignores(&config).map_err(Error::new)?;
+        let config = Arc::new(config);
+        // `Address` is `Send` but not necessarily `Sync`; the watcher sends from several threads.
+        let address = Mutex::new(ctx.address());
+        let sink = Arc::new(move |output| {
+            let request = match output {
+                Output::Changes(changes) => Request::FsChanges(changes),
+                Output::Rescan => Request::FsRescan,
+                Output::Failed(message) => Request::WatchFailed(message),
+            };
+            address.lock().unwrap_or_else(|e| e.into_inner()).send(request);
+        });
+        let watch = match Watcher::start(config.clone(), sink) {
+            Ok(watch) => Some(watch),
+            Err(message) => {
+                ctx.log(Level::Warn, format!("not watching {}: {message}", args.root));
+                ctx.emit(Event::WatchFailed { message });
+                None
+            }
+        };
         let mut projdex = Projdex {
             root: args.root,
-            config: Arc::new(config),
+            config,
             current: Index::new(),
             has_index: false,
             walk: None,
@@ -277,6 +379,7 @@ impl Service for Projdex {
             pending_rescans: Vec::new(),
             walks: 0,
             skipped: 0,
+            watch,
         };
         projdex.start_walk(ctx);
         Ok(projdex)
@@ -309,7 +412,7 @@ impl Service for Projdex {
                 root: self.root.clone(),
                 files: self.view().len(),
                 indexing: self.walk.is_some(),
-                watching: false,
+                watching: self.watch.as_ref().is_some_and(Watcher::is_active),
                 walks: self.walks,
                 skipped: self.skipped,
             }),
@@ -326,6 +429,13 @@ impl Service for Projdex {
                     self.walk_done(failure, skipped, millis, ctx);
                 }
             }
+            Request::FsChanges(changes) => self.fs_changes(changes, ctx),
+            Request::FsRescan => self.start_walk(ctx),
+            Request::WatchFailed(message) => {
+                if self.watch.take().is_some() {
+                    self.watch_failed(message, ctx);
+                }
+            }
         }
     }
 
@@ -333,6 +443,7 @@ impl Service for Projdex {
         if let Some(walk) = &self.walk {
             walk.cancel.store(true, Ordering::Relaxed);
         }
+        self.watch = None;
     }
 }
 
@@ -475,10 +586,14 @@ mod tests {
         items.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Waits for the next `:indexed` event, skipping other events.
     fn indexed_files(host: &mut Host<Projdex>) -> usize {
-        match host.next_event() {
-            Some(Event::Indexed { files, .. }) => files,
-            None => panic!("no :indexed event"),
+        loop {
+            match host.next_event() {
+                Some(Event::Indexed { files, .. }) => return files,
+                Some(_) => {}
+                None => panic!("no :indexed event"),
+            }
         }
     }
 
@@ -583,7 +698,7 @@ mod tests {
                 root: t.path().to_str().unwrap().to_string(),
                 files: 2,
                 indexing: false,
-                watching: false,
+                watching: true,
                 walks: 1,
                 skipped: 0,
             }
@@ -684,6 +799,8 @@ mod tests {
     #[test]
     fn walk_error_fails_rescans_and_streams_current_index() {
         let t = tree(&["a", "b"]);
+        // Without a watcher, so that writing "c" does not change the current index.
+        crate::watch::hook::fail_setup(t.path());
         let probe = hook::install(t.path());
         let mut host = started(t.path());
         probe.hold();
@@ -737,5 +854,350 @@ mod tests {
         assert_eq!(host.stop(), InstanceState::Stopped);
         probe.release();
         assert_eq!(host.finish_stream::<String>(files).status, StreamEnd::Failed);
+    }
+
+    // ---- Watcher through Host, with real file-system changes ----
+
+    use crate::watch::hook as watch_hook;
+    use std::time::{Duration, Instant};
+
+    /// How long a test waits for the watcher at most.
+    const WAIT: Duration = Duration::from_secs(10);
+
+    /// Polls `check` until it holds; panics after [`WAIT`].
+    fn eventually(what: &str, mut check: impl FnMut() -> bool) {
+        let deadline = Instant::now() + WAIT;
+        while !check() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The paths queries see now (does not wait for a running walk).
+    fn view_paths(host: &mut Host<Projdex>) -> BTreeSet<String> {
+        host.call::<QueryReply>(query("", 10_000, false)).unwrap().paths.into_iter().collect()
+    }
+
+    /// Polls queries until the paths are exactly `want`.
+    fn wait_paths(host: &mut Host<Projdex>, want: &[&str]) {
+        let want = set(want);
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let got = view_paths(host);
+            if got == want {
+                return;
+            }
+            assert!(Instant::now() < deadline, "paths: got {got:?}, want {want:?}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Collects `:changed` events until they add up to (`added`, `removed`); skips other events.
+    fn wait_changed(host: &mut Host<Projdex>, added: usize, removed: usize) {
+        let (mut a, mut r) = (0, 0);
+        while (a, r) != (added, removed) {
+            match host.next_event() {
+                Some(Event::Changed { added, removed }) => {
+                    assert!(added + removed > 0, "empty :changed event");
+                    a += added;
+                    r += removed;
+                }
+                Some(_) => {}
+                None => panic!(":changed events add up to ({a}, {r}), want ({added}, {removed})"),
+            }
+            assert!(a <= added && r <= removed, ":changed events add up to ({a}, {r}), want ({added}, {removed})");
+        }
+    }
+
+    fn watched(root: &Path) -> BTreeSet<String> {
+        watch_hook::watched(root).expect("a live watcher")
+    }
+
+    fn rename(root: &Path, from: &str, to: &str) {
+        std::fs::rename(root.join(from), root.join(to)).unwrap();
+    }
+
+    #[test]
+    fn watch_files_created_deleted_renamed() {
+        let t = tree(&["a.txt", "src/main.rs"]);
+        let r = t.path();
+        let mut host = started(r);
+        assert!(status(&mut host).watching);
+        write(r, "src/new.rs");
+        wait_changed(&mut host, 1, 0);
+        wait_paths(&mut host, &["a.txt", "src/main.rs", "src/new.rs"]);
+        std::fs::remove_file(r.join("a.txt")).unwrap();
+        wait_changed(&mut host, 0, 1);
+        wait_paths(&mut host, &["src/main.rs", "src/new.rs"]);
+        rename(r, "src/new.rs", "renamed.rs");
+        wait_changed(&mut host, 1, 1);
+        wait_paths(&mut host, &["src/main.rs", "renamed.rs"]);
+        // A modification changes nothing; a later creation's event is the next one.
+        std::fs::write(r.join("renamed.rs"), "content").unwrap();
+        write(r, "last");
+        wait_changed(&mut host, 1, 0);
+        wait_paths(&mut host, &["src/main.rs", "renamed.rs", "last"]);
+        let st = status(&mut host);
+        assert_eq!((st.files, st.walks, st.watching), (3, 1, true));
+    }
+
+    #[test]
+    fn watch_directories() {
+        let t = tree(&["keep", "x/f1", "x/deep/f2"]);
+        let r = t.path();
+        let outside = tree(&["moved/one", "moved/sub/two", "moved/sub/deeper/three"]);
+        let mut host = started(r);
+        assert_eq!(watched(r), set(&["", "x", "x/deep"]));
+
+        // Moved in from outside the tree, with nested files.
+        std::fs::rename(outside.path().join("moved"), r.join("moved")).unwrap();
+        wait_paths(&mut host, &["keep", "x/f1", "x/deep/f2", "moved/one", "moved/sub/two", "moved/sub/deeper/three"]);
+        assert_eq!(watched(r), set(&["", "x", "x/deep", "moved", "moved/sub", "moved/sub/deeper"]));
+        // Its directories are watched.
+        write(r, "moved/sub/deeper/four");
+        wait_paths(
+            &mut host,
+            &[
+                "keep",
+                "x/f1",
+                "x/deep/f2",
+                "moved/one",
+                "moved/sub/two",
+                "moved/sub/deeper/three",
+                "moved/sub/deeper/four",
+            ],
+        );
+
+        // Renamed within the tree.
+        rename(r, "x", "y");
+        wait_paths(
+            &mut host,
+            &[
+                "keep",
+                "y/f1",
+                "y/deep/f2",
+                "moved/one",
+                "moved/sub/two",
+                "moved/sub/deeper/three",
+                "moved/sub/deeper/four",
+            ],
+        );
+        eventually("watches follow the rename", || {
+            watched(r) == set(&["", "y", "y/deep", "moved", "moved/sub", "moved/sub/deeper"])
+        });
+        write(r, "y/deep/new");
+
+        // Moved out of the tree.
+        std::fs::rename(r.join("moved"), outside.path().join("back")).unwrap();
+        wait_paths(&mut host, &["keep", "y/f1", "y/deep/f2", "y/deep/new"]);
+        eventually("watches of the moved-out directory are dropped", || watched(r) == set(&["", "y", "y/deep"]));
+
+        // Deleted.
+        std::fs::remove_dir_all(r.join("y")).unwrap();
+        wait_paths(&mut host, &["keep"]);
+        eventually("watches of the deleted directory are dropped", || watched(r) == set(&[""]));
+    }
+
+    #[test]
+    fn watch_directory_created_after_start() {
+        let t = tree(&["a"]);
+        let r = t.path();
+        let mut host = started(r);
+        std::fs::create_dir(r.join("later")).unwrap();
+        eventually("the new directory is watched", || watched(r).contains("later"));
+        write(r, "later/file");
+        wait_paths(&mut host, &["a", "later/file"]);
+        // Nested directories created at once, with a file at the bottom.
+        write(r, "p/q/s/file");
+        wait_paths(&mut host, &["a", "later/file", "p/q/s/file"]);
+        eventually("nested directories are watched", || watched(r) == set(&["", "later", "p", "p/q", "p/q/s"]));
+        write(r, "p/q/other");
+        wait_paths(&mut host, &["a", "later/file", "p/q/s/file", "p/q/other"]);
+    }
+
+    #[test]
+    fn watch_ignored_directories() {
+        let t = tree(&["src/main.rs", "build/out.o", ".hidden/h", ".git/HEAD", "x.skip", "lib/.git/HEAD"]);
+        let r = t.path();
+        std::fs::write(r.join(".gitignore"), "build/\n*.skip\n").unwrap();
+        std::fs::create_dir_all(r.join(".git/info")).unwrap();
+        let mut narrow = args(r);
+        narrow.include_hidden = false;
+        let mut host = started_with(narrow);
+        assert_eq!(view_paths(&mut host), set(&["src/main.rs"]));
+        // Ignored, hidden and VCS directories are not watched; `.git/info` is (for `exclude`).
+        assert_eq!(watched(r), set(&["", ".git/info", "lib", "src"]));
+
+        write(r, "build/new.o");
+        write(r, "src/y.skip");
+        write(r, ".hidden/new");
+        std::fs::create_dir(r.join("dir.skip")).unwrap();
+        write(r, "dir.skip/inner");
+        std::fs::create_dir(r.join(".newhidden")).unwrap();
+        // Events are handled in order: once the marker is in, the ignored paths have been handled.
+        write(r, "src/marker");
+        wait_paths(&mut host, &["src/main.rs", "src/marker"]);
+        assert_eq!(watched(r), set(&["", ".git/info", "lib", "src"]));
+    }
+
+    #[test]
+    fn watch_ignore_file_change_rescans() {
+        let t = tree(&["a.zz", "b.txt", "c.txt"]);
+        let r = t.path();
+        std::fs::write(r.join(".gitignore"), "").unwrap();
+        std::fs::create_dir_all(r.join(".git/info")).unwrap();
+        std::fs::write(r.join(".git/info/exclude"), "").unwrap();
+        let mut host = started(r);
+        assert_eq!(view_paths(&mut host), set(&[".gitignore", "a.zz", "b.txt", "c.txt"]));
+
+        std::fs::write(r.join(".gitignore"), "*.zz\n").unwrap();
+        assert_eq!(indexed_files(&mut host), 3);
+        assert_eq!(view_paths(&mut host), set(&[".gitignore", "b.txt", "c.txt"]));
+        assert_eq!(status(&mut host).walks, 2);
+        // Incremental changes follow the new rules.
+        write(r, "new.zz");
+        write(r, "new.txt");
+        wait_paths(&mut host, &[".gitignore", "b.txt", "c.txt", "new.txt"]);
+
+        std::fs::write(r.join(".git/info/exclude"), "b.txt\n").unwrap();
+        assert_eq!(indexed_files(&mut host), 3);
+        assert_eq!(view_paths(&mut host), set(&[".gitignore", "c.txt", "new.txt"]));
+
+        // Removing the rule brings the files back.
+        std::fs::remove_file(r.join(".gitignore")).unwrap();
+        assert_eq!(indexed_files(&mut host), 4);
+        assert_eq!(view_paths(&mut host), set(&["a.zz", "new.zz", "c.txt", "new.txt"]));
+        assert_eq!(status(&mut host).walks, 4);
+
+        // A directory that a new rule ignores loses its watch when the rescan's index becomes current.
+        write(r, "gen/out");
+        wait_paths(&mut host, &["a.zz", "new.zz", "c.txt", "new.txt", "gen/out"]);
+        assert!(watched(r).contains("gen"));
+        std::fs::write(r.join(".gitignore"), "gen/\n").unwrap();
+        assert_eq!(indexed_files(&mut host), 5);
+        eventually("the ignored directory's watch is dropped", || watched(r) == set(&["", ".git/info"]));
+    }
+
+    #[test]
+    fn watch_changes_during_walk_are_kept() {
+        let t = tree(&["a", "b", "d/x"]);
+        let r = t.path();
+        let probe = hook::install(r);
+        let mut host = started(r);
+        probe.hold();
+        let rescan = host.begin_stream(Request::Rescan).unwrap();
+        // The new walk has listed everything; it sees none of the changes below.
+        assert!(probe.wait_reached(2));
+        write(r, "c");
+        std::fs::remove_file(r.join("a")).unwrap();
+        std::fs::remove_dir_all(r.join("d")).unwrap();
+        // Applied to the current index while the walk is open.
+        wait_paths(&mut host, &["b", "c"]);
+        assert!(status(&mut host).indexing);
+        probe.release();
+        let result = host.finish_stream::<usize>(rescan);
+        assert_eq!(result.items, vec![2]);
+        assert_eq!(indexed_files(&mut host), 2);
+        assert_eq!(all_paths(&mut host), set(&["b", "c"]));
+    }
+
+    #[test]
+    fn watch_changes_during_first_walk_are_kept() {
+        let t = tree(&["a", "b"]);
+        let r = t.path();
+        let probe = hook::install(r);
+        probe.hold();
+        let mut host = Host::<Projdex>::start(args(r));
+        assert!(probe.wait_reached(1));
+        write(r, "c");
+        std::fs::remove_file(r.join("a")).unwrap();
+        // Queries see the partial fresh index, and the changes reach it.
+        wait_paths(&mut host, &["b", "c"]);
+        probe.release();
+        assert_eq!(indexed_files(&mut host), 2);
+        assert_eq!(all_paths(&mut host), set(&["b", "c"]));
+    }
+
+    #[test]
+    fn watch_setup_failure() {
+        let t = tree(&["a", "b"]);
+        let r = t.path();
+        watch_hook::fail_setup(r);
+        let mut host = Host::<Projdex>::start(args(r));
+        match host.next_event() {
+            Some(Event::WatchFailed { message }) => assert!(message.contains("simulated"), "{message}"),
+            other => panic!("expected :watch-failed, got {other:?}"),
+        }
+        assert_eq!(indexed_files(&mut host), 2);
+        let st = status(&mut host);
+        assert_eq!((st.files, st.watching), (2, false));
+        assert_eq!(host.call::<QueryReply>(query("a", 10, false)).unwrap().paths, vec!["a"]);
+        assert!(host.logs().iter().any(|l| l.starts_with("[warn]") && l.contains("simulated")));
+        // Rescans still work.
+        write(r, "c");
+        assert_eq!(host.call::<usize>(Request::Rescan).unwrap(), 3);
+    }
+
+    #[test]
+    fn watch_later_failure() {
+        let t = tree(&["a", "d/b"]);
+        let r = t.path();
+        let mut host = started(r);
+        assert!(status(&mut host).watching);
+        watch_hook::fail_now(r, "backend broke");
+        match host.next_event() {
+            Some(Event::WatchFailed { message }) => assert_eq!(message, "backend broke"),
+            other => panic!("expected :watch-failed, got {other:?}"),
+        }
+        let st = status(&mut host);
+        assert_eq!((st.files, st.watching), (2, false));
+        // A second report does not produce a second event.
+        host.send(Request::WatchFailed("again".into()));
+        assert_eq!(host.call::<QueryReply>(query("b", 10, false)).unwrap().paths, vec!["d/b"]);
+        // The watcher and its watches are gone.
+        eventually("the watcher is dropped", || watch_hook::watched(r).is_none());
+        write(r, "c");
+        assert_eq!(host.call::<usize>(Request::Rescan).unwrap(), 3);
+        // Events arrive in order: a second `:watch-failed` would come before this walk's `:indexed`.
+        loop {
+            match host.next_event() {
+                Some(Event::Indexed { files, .. }) => break assert_eq!(files, 3),
+                Some(Event::WatchFailed { message }) => panic!("second :watch-failed: {message}"),
+                Some(_) => {}
+                None => panic!("no :indexed event"),
+            }
+        }
+        assert!(!status(&mut host).watching);
+    }
+
+    /// The recursive mode used on macOS and Windows, exercised with inotify.
+    #[test]
+    fn watch_recursive_mode() {
+        let t = tree(&["a", "src/main.rs", "build/out.o"]);
+        let r = t.path();
+        std::fs::write(r.join(".gitignore"), "build/\n").unwrap();
+        watch_hook::recursive(r);
+        let outside = tree(&["moved/one", "moved/sub/two"]);
+        let mut host = started(r);
+        assert!(status(&mut host).watching);
+        write(r, "src/new.rs");
+        write(r, "build/ignored.o");
+        write(r, "build/deep/ignored");
+        std::fs::remove_file(r.join("a")).unwrap();
+        wait_paths(&mut host, &[".gitignore", "src/main.rs", "src/new.rs"]);
+        std::fs::rename(outside.path().join("moved"), r.join("moved")).unwrap();
+        wait_paths(&mut host, &[".gitignore", "src/main.rs", "src/new.rs", "moved/one", "moved/sub/two"]);
+        write(r, "moved/sub/three");
+        rename(r, "src", "lib");
+        wait_paths(
+            &mut host,
+            &[".gitignore", "lib/main.rs", "lib/new.rs", "moved/one", "moved/sub/two", "moved/sub/three"],
+        );
+        std::fs::remove_dir_all(r.join("moved")).unwrap();
+        wait_paths(&mut host, &[".gitignore", "lib/main.rs", "lib/new.rs"]);
+        eventually("known directories follow", || watched(r) == set(&["", "lib"]));
+        std::fs::write(r.join(".gitignore"), "build/\n*.rs\n").unwrap();
+        wait_paths(&mut host, &[".gitignore"]);
+        assert!(status(&mut host).walks >= 2);
     }
 }

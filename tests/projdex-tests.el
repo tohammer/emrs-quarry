@@ -38,7 +38,7 @@
             (should (equal (plist-get status :root) dir))
             (should (equal (plist-get status :files) 3))
             (should-not (plist-get status :indexing))
-            (should-not (plist-get status :watching))
+            (should (plist-get status :watching))
             (should (>= (plist-get status :walks) 1))
             (should (equal (plist-get status :skipped) 0))
             (should (equal (length status) 12)))

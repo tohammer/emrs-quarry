@@ -21,6 +21,7 @@
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use ignore::{WalkBuilder, WalkState};
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -31,6 +32,9 @@ pub const VCS_DIRS: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
 
 /// Maximum number of paths per batch passed to the callback.
 pub const BATCH_SIZE: usize = 1000;
+
+/// Called with the root-relative path of every directory a walk descends into (see [`walk_dirs`]).
+pub type OnDir = Arc<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub struct WalkConfig {
@@ -85,7 +89,7 @@ fn rel_string(root: &Path, path: &Path) -> Option<String> {
 }
 
 /// The configured walk builder (shared by the parallel walk and the test reference walk).
-fn make_builder(config: &WalkConfig, start: &Path, extra: Gitignore) -> WalkBuilder {
+fn make_builder(config: &WalkConfig, start: &Path, extra: Gitignore, on_dir: Option<OnDir>) -> WalkBuilder {
     let mut b = WalkBuilder::new(start);
     b.hidden(!config.include_hidden)
         .parents(true)
@@ -97,6 +101,9 @@ fn make_builder(config: &WalkConfig, start: &Path, extra: Gitignore) -> WalkBuil
         .follow_links(false)
         .threads(std::thread::available_parallelism().map_or(1, |n| n.get()));
     let extra = Arc::new(extra);
+    let root = config.root.clone();
+    // `filter_entry` runs after the `ignore` crate's own rules (hidden, ignore files) and before a directory's
+    // contents are read, so `on_dir` sees exactly the directories the walk descends into, before it lists them.
     b.filter_entry(move |entry| {
         if entry.depth() == 0 {
             return true;
@@ -105,7 +112,15 @@ fn make_builder(config: &WalkConfig, start: &Path, extra: Gitignore) -> WalkBuil
         if is_dir && entry.file_name().to_str().is_some_and(|n| VCS_DIRS.contains(&n)) {
             return false;
         }
-        !extra.matched(entry.path(), is_dir).is_ignore()
+        let keep = !extra.matched(entry.path(), is_dir).is_ignore();
+        if keep
+            && is_dir
+            && let Some(on_dir) = &on_dir
+            && let Some(rel) = rel_string(&root, entry.path())
+        {
+            on_dir(&rel);
+        }
+        keep
     });
     b
 }
@@ -150,11 +165,26 @@ impl Drop for Batcher<'_> {
 /// root) with the same rules and the same root-relative output; it yields nothing if that directory is itself
 /// ignored. When `is_cancelled` returns true the walk stops promptly, pending batches are dropped and
 /// `cancelled` is set in the stats.
+#[allow(dead_code)] // the service and the watcher call `walk_dirs`; the tests use this form
 pub fn walk(
     config: &WalkConfig,
     dir: Option<&Path>,
     is_cancelled: &(dyn Fn() -> bool + Sync),
     on_batch: &(dyn Fn(Vec<String>) + Sync),
+) -> Result<WalkStats, String> {
+    walk_dirs(config, dir, is_cancelled, on_batch, None)
+}
+
+/// [`walk`], also calling `on_dir` (from several threads) with the root-relative path of every directory below
+/// the start directory that the walk descends into: not ignored, not a VCS directory, not hidden when
+/// `include_hidden` is false, not a symbolic link, valid UTF-8. It is called before the directory's contents
+/// are listed. The start directory itself is not reported.
+pub fn walk_dirs(
+    config: &WalkConfig,
+    dir: Option<&Path>,
+    is_cancelled: &(dyn Fn() -> bool + Sync),
+    on_batch: &(dyn Fn(Vec<String>) + Sync),
+    on_dir: Option<OnDir>,
 ) -> Result<WalkStats, String> {
     let started = Instant::now();
     let extra = build_extra(config)?;
@@ -175,7 +205,7 @@ pub fn walk(
     let cancelled = AtomicBool::new(false);
     let root = config.root.as_path();
 
-    make_builder(config, &start, extra).build_parallel().run(|| {
+    make_builder(config, &start, extra, on_dir).build_parallel().run(|| {
         let mut batcher = Batcher { buf: Vec::new(), on_batch, cancelled: &cancelled };
         let (files, skipped, cancelled) = (&files, &skipped, &cancelled);
         Box::new(move |res| {
@@ -250,54 +280,94 @@ fn load_dir_rules(dir: &Path) -> DirRules {
 /// during the process); rules are read at call time, so a file changed between the walk and the call is seen
 /// differently; invalid extra `ignores` are treated as absent (`walk` rejects them). Symlinks and file types are
 /// not considered, only the name and `is_dir`.
+///
+/// [`IgnoreRules`] answers the same question with the rule sets cached across calls.
 pub fn is_ignored(config: &WalkConfig, rel_path: &str, is_dir: bool) -> bool {
-    let comps: Vec<&str> = rel_path.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
-    if comps.is_empty() {
-        return false;
-    }
-    let extra = build_extra(config).unwrap_or_else(|_| Gitignore::empty());
-    let (global, _) = Gitignore::global();
+    IgnoreRules::new(config).is_ignored(rel_path, is_dir)
+}
 
-    // Rule sets of all directories from the filesystem root down to the deepest directory of the path.
-    let deepest_dir = config.root.join(comps[..comps.len() - 1].join("/"));
-    let mut dirs: Vec<PathBuf> = deepest_dir.ancestors().map(Path::to_path_buf).collect();
-    dirs.reverse(); // shallow -> deep
-    let rules: Vec<(PathBuf, DirRules)> = dirs
-        .into_iter()
-        .map(|d| {
-            let r = load_dir_rules(&d);
-            (d, r)
-        })
-        .collect();
+/// [`is_ignored`] with the ignore files of each directory (and the global excludes) read once and cached until
+/// [`IgnoreRules::clear`] or [`IgnoreRules::forget_below`]. The watcher keeps one of these, so a burst of
+/// file-system events does not read every ancestor's ignore files once per event.
+pub struct IgnoreRules {
+    root: PathBuf,
+    include_hidden: bool,
+    extra: Gitignore,
+    global: Option<Gitignore>,
+    /// Rule sets by absolute directory path.
+    dirs: HashMap<PathBuf, DirRules>,
+}
 
-    let mut current = config.root.clone();
-    for (i, comp) in comps.iter().enumerate() {
-        current.push(comp);
-        let last = i + 1 == comps.len();
-        let dir = !last || is_dir;
-        if (!config.include_hidden && comp.starts_with('.'))
-            || (dir && VCS_DIRS.contains(comp))
-            || extra.matched(&current, dir).is_ignore()
-        {
-            return true;
-        }
-        // Only directories that are ancestors of `current` apply to it.
-        let applicable = || rules.iter().rev().filter(|(d, _)| current.starts_with(d) && *d != current);
-        let first = |pick: fn(&DirRules) -> &Option<Gitignore>| {
-            applicable()
-                .map(|(_, r)| pick(r).as_ref().map_or(ignore::Match::None, |g| g.matched(&current, dir)))
-                .find(|m| !m.is_none())
-                .unwrap_or(ignore::Match::None)
-        };
-        let m = first(|r| &r.ignore)
-            .or(first(|r| &r.gitignore))
-            .or(first(|r| &r.exclude))
-            .or(global.matched(&current, dir));
-        if m.is_ignore() {
-            return true;
+impl IgnoreRules {
+    pub fn new(config: &WalkConfig) -> Self {
+        IgnoreRules {
+            root: config.root.clone(),
+            include_hidden: config.include_hidden,
+            extra: build_extra(config).unwrap_or_else(|_| Gitignore::empty()),
+            global: None,
+            dirs: HashMap::new(),
         }
     }
-    false
+
+    /// Forgets every cached rule set.
+    pub fn clear(&mut self) {
+        self.dirs.clear();
+        self.global = None;
+    }
+
+    /// Forgets the cached rule sets of `dir` (absolute) and of the directories below it.
+    pub fn forget_below(&mut self, dir: &Path) {
+        self.dirs.retain(|d, _| !d.starts_with(dir));
+    }
+
+    /// Whether `rel_path` is excluded; see [`is_ignored`].
+    pub fn is_ignored(&mut self, rel_path: &str, is_dir: bool) -> bool {
+        let comps: Vec<&str> = rel_path.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
+        if comps.is_empty() {
+            return false;
+        }
+        let global = self.global.get_or_insert_with(|| Gitignore::global().0);
+
+        // Rule sets of all directories from the filesystem root down to the deepest directory of the path.
+        let deepest_dir = self.root.join(comps[..comps.len() - 1].join("/"));
+        let mut dirs: Vec<&Path> = deepest_dir.ancestors().collect();
+        dirs.reverse(); // shallow -> deep
+        for d in &dirs {
+            if !self.dirs.contains_key(*d) {
+                self.dirs.insert(d.to_path_buf(), load_dir_rules(d));
+            }
+        }
+        let rules: Vec<(&Path, &DirRules)> = dirs.iter().map(|d| (*d, &self.dirs[*d])).collect();
+
+        let mut current = self.root.clone();
+        for (i, comp) in comps.iter().enumerate() {
+            current.push(comp);
+            let last = i + 1 == comps.len();
+            let dir = !last || is_dir;
+            if (!self.include_hidden && comp.starts_with('.'))
+                || (dir && VCS_DIRS.contains(comp))
+                || self.extra.matched(&current, dir).is_ignore()
+            {
+                return true;
+            }
+            // Only directories that are ancestors of `current` apply to it.
+            let applicable = || rules.iter().rev().filter(|(d, _)| current.starts_with(d) && *d != current);
+            let first = |pick: fn(&DirRules) -> &Option<Gitignore>| {
+                applicable()
+                    .map(|(_, r)| pick(r).as_ref().map_or(ignore::Match::None, |g| g.matched(&current, dir)))
+                    .find(|m| !m.is_none())
+                    .unwrap_or(ignore::Match::None)
+            };
+            let m = first(|r| &r.ignore)
+                .or(first(|r| &r.gitignore))
+                .or(first(|r| &r.exclude))
+                .or(global.matched(&current, dir));
+            if m.is_ignore() {
+                return true;
+            }
+        }
+        false
+    }
 }
 
 #[cfg(test)]
@@ -344,7 +414,7 @@ mod tests {
     /// Single-threaded reference walk with the same builder.
     fn reference(config: &WalkConfig) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
-        for res in make_builder(config, &config.root, build_extra(config).unwrap()).build() {
+        for res in make_builder(config, &config.root, build_extra(config).unwrap(), None).build() {
             let e = res.unwrap();
             if e.depth() > 0 && is_file_entry(&e) {
                 out.insert(rel_string(&config.root, e.path()).unwrap());
@@ -650,6 +720,55 @@ mod tests {
             assert!(!is_ignored(&c, "a", true));
             assert!(!is_ignored(&c, "", true));
         }
+    }
+
+    #[test]
+    fn ignore_rules_cache() {
+        let t = TempDir::new().unwrap();
+        let r = t.path();
+        write(r, ".gitignore", "*.zz1\n");
+        write(r, "a/.gitignore", "gen\n");
+        let c = cfg(r, true, &["*.tmp"]);
+        let mut rules = IgnoreRules::new(&c);
+        for (p, d) in [("x.zz1", false), ("a/gen", false), ("a/b/gen", true), ("a/x.tmp", false), ("a/ok", false)] {
+            assert_eq!(rules.is_ignored(p, d), is_ignored(&c, p, d), "{p}");
+        }
+        // Cached: a changed ignore file is not seen until the cache is cleared.
+        write(r, ".gitignore", "*.zz2\n");
+        assert!(rules.is_ignored("x.zz1", false));
+        assert!(!rules.is_ignored("x.zz2", false));
+        rules.clear();
+        assert!(!rules.is_ignored("x.zz1", false));
+        assert!(rules.is_ignored("x.zz2", false));
+        // Forgetting a directory reloads it and the directories below it only.
+        write(r, "a/.gitignore", "other\n");
+        write(r, ".gitignore", "*.zz3\n");
+        rules.forget_below(&r.join("a"));
+        assert!(!rules.is_ignored("a/gen", false));
+        assert!(rules.is_ignored("a/other", false));
+        assert!(rules.is_ignored("a/y.zz2", false)); // the root's rules are still the cached ones
+    }
+
+    #[test]
+    fn walk_dirs_reports_descended_directories() {
+        let t = TempDir::new().unwrap();
+        let r = t.path();
+        write(r, ".gitignore", "build/\n");
+        for f in ["a/b/f", "a/c/f", "build/x/f", ".hid/f", ".git/f", "skip/f", "top"] {
+            write(r, f, "");
+        }
+        let run_dirs = |c: &WalkConfig, dir: Option<&Path>| {
+            let dirs = Arc::new(Mutex::new(BTreeSet::new()));
+            let sink = dirs.clone();
+            let on_dir: OnDir = Arc::new(move |d: &str| {
+                sink.lock().unwrap().insert(d.to_string());
+            });
+            walk_dirs(c, dir, &|| false, &|_| {}, Some(on_dir)).unwrap();
+            dirs.lock().unwrap().clone()
+        };
+        assert_eq!(run_dirs(&cfg(r, true, &["skip/"]), None), set(&["a", "a/b", "a/c", ".hid"]));
+        assert_eq!(run_dirs(&cfg(r, false, &[]), None), set(&["a", "a/b", "a/c", "skip"]));
+        assert_eq!(run_dirs(&cfg(r, true, &[]), Some(Path::new("a"))), set(&["a/b", "a/c"]));
     }
 
     #[test]
