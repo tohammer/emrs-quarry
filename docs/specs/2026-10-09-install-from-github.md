@@ -231,7 +231,7 @@ only), macOS and Windows.
   from GitHub", adjust "Distribution" to prebuilt binaries and archives.
   *Done when* every command and recipe in the README matches the code of
   task 1 and the doc-checker finds nothing stale.
-- [ ] 3. Developer's Doom config and manual checks. Switch
+- [x] 3. Developer's Doom config and manual checks. Switch
   `~/.doom.d/packages.el` to the recipes with the dev switch (emrs too),
   remove the `:load-path` to `target/emacs` from `config.el` and the
   `target/emacs` symlink, and run the manual checks under Testing with the
