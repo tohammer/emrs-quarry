@@ -67,14 +67,18 @@ There is no package recipe or prebuilt binary yet; install by hand.
    ```
 
 If the module is not found, the first command signals an error that says
-where it must be installed.
+where it must be installed. An invalid pattern in `projdex-ignores` also
+makes the first command fail, with the pattern in the message.
+
+For other front ends, `projdex-query` and `projdex-query-async` return the
+ranked paths of a project directly (see their docstrings).
 
 ## Usage
 
 | Command | What it does |
 |---|---|
 | `projdex-find-file` | Visit a file of the current project, chosen from the index. Starts the project's instance on first use. |
-| `projdex-mode` | Global minor mode. Remaps `project-find-file` to `projdex-find-file`, and enables `projdex-provide-project-files` if that is set. |
+| `projdex-mode` | Global minor mode. Remaps `project-find-file` to `projdex-find-file`; with `projdex-provide-project-files` set, it also serves `project-files` from the index. |
 | `projdex-rescan` | Walk the current project again and report the file count when done. |
 | `projdex-stop` | Stop the current project's instance. The next command starts a new one with the current options. |
 | `projdex-stop-all` | Stop all instances. |
@@ -139,8 +143,9 @@ menu (`project-switch-commands`), are not remapped; add
 
 ## Options
 
-Customize group `projdex`. Options apply to instances started afterwards;
-run `projdex-stop` to restart a project's instance.
+Customize group `projdex`. `projdex-include-hidden` and `projdex-ignores`
+apply to instances started afterwards; run `projdex-stop` to restart a
+project's instance. The other options apply at once.
 
 | Option | Default | Meaning |
 |---|---|---|

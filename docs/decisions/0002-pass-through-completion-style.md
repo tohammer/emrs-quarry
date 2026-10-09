@@ -18,7 +18,8 @@ so registering a default for a category alone is not reliable.
 projdex registers a completion style `projdex` that passes the input to the
 table unchanged and returns the table's result as is. `projdex-find-file`
 let-binds `completion-category-overrides` so that its category
-(`project-file`) uses only that style for the duration of the prompt. The
+(`project-file`) uses only that style for the duration of the prompt
+(that alone does not restrict the styles; see 0005). The
 metadata sets `display-sort-function` and `cycle-sort-function` to
 `identity`. The query syntax is nucleo's pattern syntax.
 

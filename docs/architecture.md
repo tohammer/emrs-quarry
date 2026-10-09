@@ -52,7 +52,8 @@ and benchmark scripts use the `emrs.el` from that checkout.
 ### Instances
 
 `projdex--instances` maps the project root to a record (instance, file
-count, `indexing`, `watching`, epoch). `projdex--ensure` returns the
+count, `indexing`, `watching`, epoch, a unique `id` for cache keys, and
+whether the watch-failure warning was shown). `projdex--ensure` returns the
 running record or starts an instance with `emrs-start` and the start
 arguments (`:root`, `:include-hidden`, `:ignores`). Events update the
 record: `:indexed` sets the file count, `:changed` adjusts it by the
@@ -141,8 +142,13 @@ Events are translated by comparing each affected path with the disk, which
 makes paired and unpaired rename halves behave the same: a file that exists
 and is not ignored is added, a missing path is removed (a missing known
 directory removes everything below it), a new directory is walked and its
-directories watched. A changed ignore file or lost events produce a full
-rescan instead. When the inotify limit is reached or the backend fails,
+directories watched. `notify-debouncer-full` drops a create and remove
+within its window, so raw remove and rename-away events also go straight
+to the translating thread. A changed ignore file in a non-ignored
+directory, a new `.git` that already has `info/exclude`, or lost events
+produce a full rescan instead; after lost events, full walks re-add every
+directory watch until a walk that began after the loss has become
+current. When the inotify limit is reached or the backend fails,
 the watcher is dropped and `WatchFailed` is sent once; the instance keeps
 answering from the index it has, and `projdex-find-file` sends `:rescan`
 before each prompt.
@@ -163,6 +169,20 @@ returns its result as is. `projdex-find-file` binds
 `completion-styles` to `(projdex)` buffer-locally in its minibuffer, so
 only that style applies during its prompt (ADR 0005). Remote projects and a prefix
 argument defer to `project-find-file`.
+
+The table's try-completion returns nil without results, the input for
+several, `t` for a sole exact match and the sole match otherwise, so TAB
+completes a unique match; the style's try function wraps that as
+`(STRING . POINT)` or `(CANDIDATE . LENGTH)`. Replies with `:indexing` true
+are not cached. After a failure the table reports once and has no
+candidates for the rest of the prompt; a timeout gives no candidates and
+one message.
+
+`projdex-find-file` sends `(:rescan)` first when the instance is not
+watching, then a `(:status)` probe, so a failed or unstartable instance is
+a `user-error` before the prompt. It reads with require-match `confirm`
+and history `projdex-file-history`; input that is not an indexed path but
+completes to exactly one is visited as that file.
 
 `project-files` is overridden by an `:around` method that applies only with
 `projdex-mode` and `projdex-provide-project-files`, for the whole root of a

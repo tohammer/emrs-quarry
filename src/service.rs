@@ -9,7 +9,7 @@
 //! | `(:rescan)` | number of files, once a walk that started after the request has finished |
 //! | `(:status)` | `(:root R :files N :indexing BOOL :watching BOOL :walks K :skipped S)` |
 //!
-//! `:limit` defaults to 200, `:positions` and `:substring` to nil. `:substring` selects [`Style::Substring`].
+//! `:limit` defaults to 200 and is clamped to 1..=10000; `:positions` and `:substring` default to nil. `:substring` selects [`Style::Substring`].
 //! `:groups` is parallel to `:positions`: for each path the term number of each matched character. Start arguments are
 //! `(:root "/abs/dir/" :include-hidden t :ignores ("*.min.js"))`; `:include-hidden` defaults to t, `:ignores` to
 //! nil. Events: `(:indexed :files N :millis T)`, `(:changed :added A :removed R)`, `(:watch-failed :message S)`.
