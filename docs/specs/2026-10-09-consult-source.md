@@ -1,6 +1,6 @@
 # consult front end
 
-Status: approved
+Status: implemented
 Date: 2026-10-09
 
 ## Purpose
@@ -163,9 +163,10 @@ documents it (`:paths :positions :groups :total :indexing`).
 
 `tests/projdex-consult-tests.el`, loaded by `tests/run-ert.sh` after the
 main suite. The script adds the directories in `PROJDEX_TEST_LOAD_PATH`
-(colon-separated, for consult and compat) to `load-path`; every consult
-test is skipped (`skip-unless`) when consult 2.0 or later cannot be
-loaded, and the script says so.
+(colon-separated, for consult and compat) to `load-path`; every test that
+needs consult is skipped (`skip-unless`) when consult 2.0 or later cannot
+be loaded, and the script says so. (Implemented: only the command and
+end-to-end tests need consult; the step tests run without it.)
 
 Automated:
 
@@ -207,6 +208,21 @@ Manual, in Doom with vertico and orderless (not covered by tests):
   locally with orderless.
 - `projdex-find-file-command` set to `projdex-consult-find-file`:
   `C-x p f` opens the consult prompt.
+
+## Deviations from the approved version
+
+Changed during implementation and review; the sections above describe
+the result.
+
+- `consult--read` gets `:async-wrap #'identity`; without it consult wraps
+  the pipeline a second time and the split step fails.
+- The remap is a plain binding that a variable watcher keeps in step with
+  `projdex-find-file-command` (ADR 0009), not a filtered `menu-item`,
+  which `where-is` cannot see.
+- The consult command calls `projdex--prepare` with NO-WAIT: one probe,
+  no wait for a first page (user decision in the review).
+- `cancel` and `destroy` also forget the current input, so the same input
+  queries again after consult's throttle cancelled its call.
 
 ## Tasks
 

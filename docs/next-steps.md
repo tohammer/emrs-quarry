@@ -5,9 +5,7 @@ architecture.md or an ADR.
 
 ## Next
 
-Check the consult front end by hand in Doom with vertico and orderless
-(spec 2026-10-09-consult-source, section "Testing"), then pick from the
-backlog.
+Pick from the backlog.
 
 ## Watch out for
 
@@ -30,4 +28,5 @@ backlog.
 - The consult front end uses consult internals (`consult--async-pipeline`
   and its steps, ADR 0008). After a consult upgrade, rerun
   `tests/run-ert.sh` with `PROJDEX_TEST_LOAD_PATH` pointing at it (and at
-  compat); without it the consult tests are skipped.
+  compat); without it the command and end-to-end tests
+  are skipped.

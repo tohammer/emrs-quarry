@@ -33,8 +33,10 @@ results into it were compared:
 ## Consequences
 
 - projdex depends on consult internals. A consult release that changes
-  the pipeline protocol breaks the adapter; the ERT tests for it run
-  against the consult found by `tests/run-ert.sh` and catch that.
+  the pipeline protocol breaks the adapter; the end-to-end ERT tests
+  catch that when `tests/run-ert.sh` finds consult through
+  `PROJDEX_TEST_LOAD_PATH`, and are skipped otherwise. (Corrected
+  2026-10-09: the step tests do not load consult.)
 - `consult--async-split` hands the user's completion styles only the
   filter part of the input (after the second separator, empty with split
   style `none`), so they never re-filter projdex's ranking. This meets

@@ -471,7 +471,7 @@ so run the first two before merging.
 
 ## Documentation
 
-- `docs/architecture.md`: how the system is built now.
+- `docs/architecture.md` and `docs/architecture/`: how the system is built now.
 - `docs/specs/`: specifications; `docs/decisions/`: decision records.
 - `docs/backlog.md` and `docs/next-steps.md`: open points and what comes next.
 
