@@ -82,6 +82,8 @@ Options (group `projdex`):
 4. `consult--read` with the pipeline below, `:prompt` like
    `projdex-find-file`'s, `:category 'project-file`, `:sort nil`,
    `:require-match t`, `:history '(:input projdex-consult-history)`,
+   `:async-wrap #'identity` (the pipeline is complete; consult's default
+   wrapper would add split, indicator and refresh a second time),
    `default-directory` bound to the root.
 5. `find-file` of root plus the chosen path (concatenated, not
    `expand-file-name`, as in `projdex-find-file`).
@@ -202,7 +204,7 @@ Manual, in Doom with vertico and orderless (not covered by tests):
   `projdex.el`, with the remap as a filtered `menu-item`. *Done when*
   `projdex-find-file` uses `projdex--prepare`, all existing ERT tests
   pass, and a new test shows the remap following a `setq` of the option.
-- [ ] 2. `lisp/projdex-consult.el`: options, the step, the command, loads
+- [x] 2. `lisp/projdex-consult.el`: options, the step, the command, loads
   and compiles without consult; `run-ert.sh` loads
   `tests/projdex-consult-tests.el` with `PROJDEX_TEST_LOAD_PATH` and the
   skip. *Done when* every automated test listed under Testing passes with

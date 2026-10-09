@@ -120,3 +120,13 @@ spellings gets two instances and two sets of watches. Using
 `project-files` must keep returning paths under the project's own
 spelling. Origin: v1 review (Elisp), 2026-10-09; deferred as rare.
 Revisit on a report.
+
+## Order-dependent ERT test
+
+`projdex-test-build-async-installs` passes only while no projdex module is
+loaded: with one loaded, the message gains "; restart Emacs to use it".
+ERT runs tests alphabetically, so a test that loads the module and sorts
+before it breaks it; the consult tests are named `projdex-test-consult-*`
+to sort after it. Origin: task 2 of the consult spec (2026-10-09).
+Revisit when the next test that loads the module is added, or fix the
+test to accept both messages.
