@@ -183,7 +183,9 @@ further.  With INCLUDE-ALL, or in a remote project, defer to
          (root (projdex--root (project-root project))))
     (if (or include-all (file-remote-p root))
         (project-find-file include-all)
-      (projdex--prepare root)
+      ;; No wait for a first page: the step re-queries while the
+      ;; instance indexes, so the candidates fill in the open prompt.
+      (projdex--prepare root t)
       (let ((path (let ((default-directory root))
                     (consult--read
                      (consult--async-pipeline

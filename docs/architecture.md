@@ -223,27 +223,35 @@ are not cached. After a failure the table reports once and has no
 candidates for the rest of the prompt; a timeout gives no candidates and
 one message.
 
-`projdex--prepare (root)` makes the instance ready for a prompt and is
-the first step of both commands, so no table or async step starts an
-instance, or asks whether to build the module (`projdex--offer-build`),
-from inside the minibuffer. It ensures the instance, sends `(:rescan)`
-when the instance is not watching, then probes with `(:status)`
-(`projdex--await-first-page`), so a failed or unstartable instance is a
-`user-error` before the prompt. While a walk runs and the index holds
+`projdex--prepare (root &optional no-wait)` makes the instance ready
+for a prompt and is the first step of both commands, so no table or
+async step starts an instance, or asks whether to build the module
+(`projdex--offer-build`), from inside the minibuffer. It ensures the
+instance, sends `(:rescan)` when the instance is not watching, then
+probes with `(:status)`, so a failed or unstartable instance is a
+`user-error` before the prompt. For `projdex-find-file`
+(`projdex--await-first-page`), while a walk runs and the index holds
 fewer than `projdex-limit` files, it keeps probing, for at most 1 s
 (`projdex--first-page-wait`): completion UIs ask for the empty input once
 and do not refresh while indexing runs, so a prompt opened on a new
-instance would stay empty until the user types. Results for typed input
+instance would stay empty until the user types. The consult command
+passes NO-WAIT and gets a single probe: its async step re-queries while
+indexing runs, so its prompt opens at once and fills. Results for typed input
 during a long first walk still reflect the paths seen so far.
 
 `projdex-find-file` reads with require-match `confirm` and history
 `projdex-file-history`; input that is not an indexed path but completes to
 exactly one is visited as that file.
 
-`projdex-mode-map` remaps `project-find-file` through a `menu-item` whose
-`:filter` returns the value of `projdex-find-file-command`, read on each
-lookup. The option is `projdex-find-file` or `projdex-consult-find-file`,
-and changing it with `setq` takes effect at once, with the mode on or off.
+`projdex-mode-map` binds the remap of `project-find-file` directly to the
+value of `projdex-find-file-command` (`projdex-find-file` or
+`projdex-consult-find-file`) when `projdex.el` is loaded, so a value set
+before loading applies. A variable watcher on the option
+(`projdex--find-file-command-watcher`) rebinds it with `keymap-set` on
+`set`, `let` and `unlet` of the global value, so a `setq` takes effect at
+once, with the mode on or off. A plain binding, unlike a filtered
+`menu-item`, is seen by `where-is-internal`, so `C-h w`, `M-x` key hints
+and menus show the key of the command it remaps to.
 
 `project-files` is overridden by an `:around` method that applies only with
 `projdex-mode` and `projdex-provide-project-files`, for the whole root of a
@@ -259,7 +267,8 @@ from `consult--read` with an async pipeline of consult 2.0 or later
 functions it calls, so it loads and compiles without it; the command
 signals a `user-error` when `consult--async-pipeline` is not fbound.
 After the same remote and prefix-argument fallback and
-`projdex--prepare`, it reads with category `project-file`, no sorting,
+`projdex--prepare` with NO-WAIT (one probe, no wait for a first page), it
+reads with category `project-file`, no sorting,
 require-match `t` (a candidate must be chosen, a new file cannot be
 visited) and history `projdex-consult-history`, and visits the root plus
 the chosen path.

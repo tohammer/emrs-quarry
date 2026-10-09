@@ -117,3 +117,14 @@ before it breaks it; the consult tests are named `projdex-test-consult-*`
 to sort after it. Origin: task 2 of the consult spec (2026-10-09).
 Revisit when the next test that loads the module is added, or fix the
 test to accept both messages.
+
+## Generic message when an instance dies during a consult prompt
+
+When the instance exits while `projdex-consult-find-file` waits for a
+reply, the step reports "projdex: The instance terminated" instead of the
+reason: emrs fails open calls before it runs `on-exit`, where
+`projdex--on-exit` records the reason in `projdex--failures`. The
+`display-warning` from `on-exit` still shows the reason. Fix: report from
+a `run-at-time 0` timer, after `on-exit` ran. Origin: review of the
+consult spec (2026-10-09); deferred because the warning already carries
+the reason. Revisit if users find the message confusing.

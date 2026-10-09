@@ -40,8 +40,10 @@ Out:
 ### Shared preparation (`projdex.el`)
 
 The steps `projdex-find-file` runs before its prompt become
-`projdex--prepare (root)`: ensure the instance, send `(:rescan)` when it
-is not watching, and `projdex--await-first-page`. It signals a
+`projdex--prepare (root &optional no-wait)`: ensure the instance, send
+`(:rescan)` when it is not watching, and `projdex--await-first-page`;
+with NO-WAIT, a single `(:status)` probe instead of the wait, for a
+prompt that refreshes while the index fills. It signals a
 `user-error` when the instance cannot be started or failed, which
 includes the question whether to build a missing module
 (`projdex--offer-build`). Both commands call it before their prompt, so
@@ -53,9 +55,12 @@ inside the minibuffer is then resolved for both front ends.
 
 `projdex-find-file-command`, a user option with the values
 `projdex-find-file` (default) and `projdex-consult-find-file`. The remap
-in `projdex-mode-map` is a `menu-item` whose `:filter` returns the
-option's current value, so a plain `setq` takes effect at once, before or
-after the mode is enabled. `projdex-consult-find-file` is autoloaded.
+in `projdex-mode-map` is bound to the option's value at load time, and a
+variable watcher on the option rebinds it with `keymap-set` on `set`,
+`let` and `unlet`, so a plain `setq` takes effect at once, before or
+after the mode is enabled. A plain binding, unlike a filtered
+`menu-item`, is found by `where-is-internal`, so `C-h w` and `M-x` show
+the key. `projdex-consult-find-file` is autoloaded.
 
 ### `lisp/projdex-consult.el`
 
@@ -78,7 +83,9 @@ Options (group `projdex`):
    `user-error` that says so.
 2. With INCLUDE-ALL or a remote project: `project-find-file`, as in
    `projdex-find-file`.
-3. `projdex--prepare root`.
+3. `projdex--prepare root` with NO-WAIT: a single `(:status)` probe that
+   reports a failed instance before the prompt, but no wait for a first
+   page; the step re-queries while indexing runs.
 4. `consult--read` with the pipeline below, `:prompt` like
    `projdex-find-file`'s, `:category 'project-file`, `:sort nil`,
    `:require-match t`, `:history '(:input projdex-consult-history)`,
@@ -173,16 +180,19 @@ Automated:
   no candidates.
 - End to end through `consult--read` in batch (driven with a timer that
   waits for candidates, since keyboard macros do not let timers run):
-  the chosen file is visited; with a style that behaves like orderless
+  the chosen file is visited and the history keeps the typed input
+  (`#main` with the perl style), not the candidate; with a style that behaves like orderless
   (`projdex-test--greedy-*`) and split style `none`, a query without
   matches shows no candidates and one with matches shows projdex's
   results unchanged.
 - `projdex--prepare`: the existing `projdex-find-file` tests keep
   passing; the consult command signals the `user-error` for a failed
-  root before any prompt.
+  root before any prompt, and with `:status` faked to say indexing with
+  no files it reaches `consult--read` at once, after exactly one probe.
 - Remap: `command-remapping` of `project-find-file` follows
   `projdex-find-file-command` when it is changed with `setq` while the
-  mode is on.
+  mode is on or off, and `where-is-internal` finds a key for the command
+  it remaps to.
 - Without consult: in a batch Emacs with only projdex and emrs on
   `load-path`, `projdex-consult.el` loads and byte-compiles without
   error, and the command signals the consult `user-error`.
@@ -201,7 +211,8 @@ Manual, in Doom with vertico and orderless (not covered by tests):
 ## Tasks
 
 - [x] 1. `projdex--prepare` and `projdex-find-file-command` in
-  `projdex.el`, with the remap as a filtered `menu-item`. *Done when*
+  `projdex.el`, with the remap kept in step with the option by a
+  variable watcher. *Done when*
   `projdex-find-file` uses `projdex--prepare`, all existing ERT tests
   pass, and a new test shows the remap following a `setq` of the option.
 - [x] 2. `lisp/projdex-consult.el`: options, the step, the command, loads

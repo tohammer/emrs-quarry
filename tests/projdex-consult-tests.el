@@ -16,6 +16,7 @@
 (require 'projdex-consult)
 
 (defvar consult-async-split-style)
+(defvar consult-async-split-styles-alist)
 
 (defun projdex-test-consult--consult-p ()
   "Return non-nil when consult 2.0 or later is loaded."
@@ -239,11 +240,18 @@ the path \"fN\" and `:indexing' as (funcall INDEXING N) says."
 (defvar projdex-test-consult--done nil
   "Numbers of the queries whose reply the step has handled.")
 
+(defvar projdex-test-consult--last-text nil
+  "Text of the newest query sent through `projdex-test-consult--track'.")
+
+(defvar projdex-test-consult--failure nil
+  "Why `projdex-test-consult--settle' gave up, or nil.")
+
 (defun projdex-test-consult--track (orig root text limit positions callback)
   "Call ORIG with ROOT, TEXT, LIMIT, POSITIONS and a wrapped CALLBACK.
 The wrapper records replies, not cancellations, in
 `projdex-test-consult--answered' and `projdex-test-consult--done'."
   (let ((n (cl-incf projdex-test-consult--queries)))
+    (setq projdex-test-consult--last-text text)
     (funcall orig root text limit positions
              (lambda (reply err)
                (funcall callback reply err)
@@ -251,17 +259,35 @@ The wrapper records replies, not cancellations, in
                  (push text projdex-test-consult--answered)
                  (push n projdex-test-consult--done))))))
 
+(defun projdex-test-consult--async-input ()
+  "Return the part of the minibuffer input consult sends to the step."
+  (let ((style (alist-get (or consult-async-split-style 'none)
+                          consult-async-split-styles-alist)))
+    (substring-no-properties
+     (car (funcall (plist-get style :function)
+                   (minibuffer-contents-no-properties) style)))))
+
 (defun projdex-test-consult--settle ()
   "Wait until the step has handled the reply for the minibuffer input.
 Keyboard macros do not let timers or process output run; this command
 does, so consult's input timers fire and the reply comes in.  It waits
-for the input timers first, then for the reply to the last query."
+until the newest query is for the current async input and its reply
+was handled.  On a timeout it records why in
+`projdex-test-consult--failure' and aborts the prompt."
   (interactive)
-  (projdex-test--wait #'ignore
-                      (* 3 (+ projdex-consult-input-debounce
-                              projdex-consult-input-throttle)))
-  (projdex-test--wait (lambda () (memq projdex-test-consult--queries
-                                       projdex-test-consult--done))))
+  (let ((expected (projdex-test-consult--async-input)))
+    (unless (projdex-test--wait
+             (lambda () (and (equal projdex-test-consult--last-text expected)
+                             (memq projdex-test-consult--queries
+                                   projdex-test-consult--done))))
+      (setq projdex-test-consult--failure
+            (format "No reply for the async input %S; newest query %S, %s"
+                    expected projdex-test-consult--last-text
+                    (if (memq projdex-test-consult--queries
+                              projdex-test-consult--done)
+                        "answered"
+                      "unanswered")))
+      (abort-recursive-edit))))
 
 (defun projdex-test-consult--select-first ()
   "Replace the minibuffer input with the first candidate, as a UI's RET."
@@ -269,6 +295,14 @@ for the input timers first, then for the reply to the last query."
   (let ((first (car (all-completions "" minibuffer-completion-table))))
     (delete-minibuffer-contents)
     (when first (insert (substring-no-properties first)))))
+
+(defun projdex-test-consult--choose-first ()
+  "Insert the first candidate and exit, in one command, as vertico's RET.
+consult saves the input to the `:input' history after each command, so
+the input typed before this command is saved, not the candidate."
+  (interactive)
+  (projdex-test-consult--select-first)
+  (exit-minibuffer))
 
 (defvar projdex-test-consult--seen nil
   "Inputs and their candidates recorded by `projdex-test-consult--record'.")
@@ -286,12 +320,13 @@ for the input timers first, then for the reply to the last query."
 (defun projdex-test-consult--find-file-with-keys (dir keys)
   "Run `projdex-consult-find-file' in project DIR typing KEYS.
 In the prompt, C-c w waits for the reply to the input, C-c s selects the
-first candidate and C-c t records the candidates.  Return the visited
-file."
+first candidate, C-c x selects it and exits and C-c t records the
+candidates.  Return the visited file."
   (let* ((project-find-functions (list (lambda (_) (list 'transient dir))))
          (map (define-keymap
                 "C-c w" #'projdex-test-consult--settle
                 "C-c s" #'projdex-test-consult--select-first
+                "C-c x" #'projdex-test-consult--choose-first
                 "C-c t" #'projdex-test-consult--record))
          (minibuffer-setup-hook minibuffer-setup-hook)
          (buf nil))
@@ -301,32 +336,42 @@ file."
     (setq projdex-test-consult--answered nil
           projdex-test-consult--queries 0
           projdex-test-consult--done nil
+          projdex-test-consult--last-text nil
+          projdex-test-consult--failure nil
           projdex-test-consult--seen nil)
     (advice-add 'projdex-query-async :around #'projdex-test-consult--track)
     (cl-letf (((symbol-function 'project-root) (lambda (p) (cadr p))))
       (unwind-protect
           (progn
-            (execute-kbd-macro (kbd (concat "M-x projdex-consult-find-file RET " keys)))
+            (condition-case err
+                (execute-kbd-macro
+                 (kbd (concat "M-x projdex-consult-find-file RET " keys)))
+              (quit (if projdex-test-consult--failure
+                        (ert-fail projdex-test-consult--failure)
+                      (signal (car err) (cdr err)))))
             (setq buf (current-buffer))
             (buffer-file-name buf))
         (advice-remove 'projdex-query-async #'projdex-test-consult--track)
         (when buf (kill-buffer buf))))))
 
 (ert-deftest projdex-test-consult-find-file-visits ()
-  "The chosen candidate is visited."
+  "The chosen candidate is visited; the history keeps the typed input."
   (skip-unless (projdex-test-consult--consult-p))
   (projdex-test--with-index dir
     (let ((prompts nil)
-          (minibuffer-setup-hook minibuffer-setup-hook))
+          (minibuffer-setup-hook minibuffer-setup-hook)
+          (consult-async-split-style 'perl)
+          (projdex-consult-history nil))
       (add-hook 'minibuffer-setup-hook (lambda () (push (minibuffer-prompt) prompts)))
+      ;; The perl style puts the initial "#" in the minibuffer.
       (should (equal (projdex-test-consult--find-file-with-keys
-                      dir "main C-c w C-c s RET")
+                      dir "main C-c w C-c x")
                      (concat dir "src/main.rs")))
       (should (equal (car prompts)
                      (format "Find file in %s: "
                              (file-name-nondirectory (directory-file-name dir)))))
       (should (member "main" projdex-test-consult--answered))
-      (should (equal (car projdex-consult-history) "src/main.rs")))))
+      (should (equal projdex-consult-history '("#main"))))))
 
 (ert-deftest projdex-test-consult-find-file-keeps-projdex-results ()
   "With an orderless-like style, the candidates are exactly projdex's."
@@ -367,6 +412,31 @@ file."
           (should (= prompts 0)))
       (projdex-stop-all)
       (delete-directory dir t))))
+
+(ert-deftest projdex-test-consult-find-file-does-not-wait ()
+  "The prompt opens after one `:status' probe, though the index is empty.
+The step re-queries while indexing, so no first page is waited for."
+  (skip-unless (projdex-test-consult--consult-p))
+  (projdex-test--with-roots ((dir '("a.txt")))
+    (let ((project-find-functions (list (lambda (_) (list 'transient dir))))
+          (projdex--first-page-wait 5)
+          (call-sync (symbol-function 'projdex--call-sync))
+          (probes 0)
+          (prompted nil)
+          (start (float-time)))
+      (cl-letf (((symbol-function 'project-root) (lambda (p) (cadr p)))
+                ((symbol-function 'projdex--call-sync)
+                 (lambda (root request)
+                   (if (equal request '(:status))
+                       (progn (cl-incf probes) '(:files 0 :indexing t))
+                     (funcall call-sync root request))))
+                ((symbol-function 'consult--read)
+                 (lambda (&rest _) (setq prompted (- (float-time) start)) nil))
+                ((symbol-function 'find-file) #'ignore))
+        (projdex-consult-find-file)
+        (should prompted)
+        (should (< prompted 1))
+        (should (= probes 1))))))
 
 (ert-deftest projdex-test-consult-find-file-fallbacks ()
   (skip-unless (projdex-test-consult--consult-p))

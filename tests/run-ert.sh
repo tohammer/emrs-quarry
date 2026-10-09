@@ -44,7 +44,7 @@ fi
 if ! "${EMACS:-emacs}" --batch "$@" --eval \
      "(kill-emacs (if (and (require 'consult nil t) (fboundp 'consult--async-pipeline)) 0 1))" \
      >/dev/null 2>&1; then
-    echo "run-ert.sh: consult 2.0 or later not found; the consult tests are skipped (see PROJDEX_TEST_LOAD_PATH)"
+    echo "run-ert.sh: consult 2.0 or later not found; the tests that need consult are skipped (see PROJDEX_TEST_LOAD_PATH)"
 fi
 exec "${EMACS:-emacs}" --batch --module-assertions \
     -L "$out" -L "$emrs_el" "$@" \

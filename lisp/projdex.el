@@ -470,13 +470,16 @@ instance would otherwise stay empty until the user types.  Signal a
                   (< (float-time) deadline)))
       (sleep-for 0.02))))
 
-(defun projdex--prepare (root)
+(defun projdex--prepare (root &optional no-wait)
   "Make the instance for ROOT ready for a prompt.
 Ensure the instance, rescan when it is not watching, and wait for a
-first page of files.  Signal a `user-error' when the instance cannot be
-started or failed, including the offer to build a missing module.
-Callers run this before their prompt, so that nothing starts an instance
-from inside the minibuffer."
+first page of files.  With NO-WAIT, do not wait: probe the instance
+once instead.  That suits a prompt that refreshes its candidates while
+the index fills, as `projdex-consult-find-file' does; the wait is for
+completion UIs that ask for the empty input once.  Signal a
+`user-error' when the instance cannot be started or failed, including
+the offer to build a missing module.  Callers run this before their
+prompt, so that nothing starts an instance from inside the minibuffer."
   (let ((rec (projdex--ensure root)))
     (unless (projdex--rec-watching rec)
       (emrs-send (projdex--rec-instance rec) '(:rescan))))
@@ -484,7 +487,10 @@ from inside the minibuffer."
   ;; failed is reported here, before the prompt, as a `user-error',
   ;; and a new instance has files to show.  `:status' does not score
   ;; the index, unlike an empty query.
-  (projdex--await-first-page root))
+  (if no-wait
+      (projdex--call-sync root '(:status))
+    (projdex--await-first-page root))
+  nil)
 
 ;;;###autoload
 (defun projdex-find-file (&optional include-all)
@@ -586,11 +592,24 @@ when the index is not applicable, times out or fails."
 
 (defvar-keymap projdex-mode-map
   :doc "Keymap of `projdex-mode'."
-  ;; The filter reads the option on each lookup, so changing it needs no
-  ;; mode restart.
-  "<remap> <project-find-file>"
-  '(menu-item "" projdex-find-file
-              :filter (lambda (_) projdex-find-file-command)))
+  ;; A plain binding, not a filtered menu item: `where-is-internal'
+  ;; ignores filters, so the command's key would not be shown.  The
+  ;; watcher below keeps it in step with the option.
+  "<remap> <project-find-file>" projdex-find-file-command)
+
+(defun projdex--find-file-command-watcher (_symbol newval operation where)
+  "Rebind the remap of `projdex-mode-map' to NEWVAL.
+A variable watcher of `projdex-find-file-command', so that a plain
+`setq' takes effect at once, with or without the mode enabled.
+OPERATION `let' and `unlet' rebind too, the latter to the restored
+value, so the binding always follows the current value.  Buffer-local
+values (WHERE non-nil) are ignored, since the keymap is global, and so
+are `makunbound' and `defvaralias'."
+  (when (and (memq operation '(set let unlet)) (null where))
+    (keymap-set projdex-mode-map "<remap> <project-find-file>" newval)))
+
+(add-variable-watcher 'projdex-find-file-command
+                      #'projdex--find-file-command-watcher)
 
 ;;;###autoload
 (define-minor-mode projdex-mode

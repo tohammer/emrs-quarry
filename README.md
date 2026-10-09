@@ -269,7 +269,8 @@ index asynchronously, so typing never waits for the module; a query that a
 newer input supersedes is cancelled. While the first walk of a project
 still runs, the candidates are queried again every
 `projdex-consult-refresh-interval` seconds, so the list fills without
-typing. The indicator shows whether a query is running.
+typing; the prompt opens at once, without waiting for a first page of
+files as `projdex-find-file` does. The indicator shows whether a query is running.
 
 It needs consult 2.0 or later, which is not a dependency of projdex:
 `lisp/projdex-consult.el` loads without consult, and the command then
@@ -456,7 +457,9 @@ The consult front end tests (`tests/projdex-consult-tests.el`) need consult
 is a colon-separated list of directories that the script adds to
 `load-path`; put the directories of consult and compat there. Without it,
 or when consult cannot be loaded from it, the script says so and skips
-those tests, and the rest of the suite runs as usual. Rerun them after
+the tests that need consult (the command and end-to-end tests); the
+tests of the async step, the test of loading without consult and the
+rest of the suite run as usual. Rerun them after
 upgrading consult.
 
 Set `EMACS` to use another Emacs binary. There is no CI (`docs/backlog.md`),
