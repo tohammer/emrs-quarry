@@ -198,7 +198,7 @@ Manual, in Doom with vertico and orderless (not covered by tests):
 
 ## Tasks
 
-- [ ] 1. `projdex--prepare` and `projdex-find-file-command` in
+- [x] 1. `projdex--prepare` and `projdex-find-file-command` in
   `projdex.el`, with the remap as a filtered `menu-item`. *Done when*
   `projdex-find-file` uses `projdex--prepare`, all existing ERT tests
   pass, and a new test shows the remap following a `setq` of the option.

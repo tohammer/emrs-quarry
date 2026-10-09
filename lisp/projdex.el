@@ -114,6 +114,12 @@ This is a safety net against a stuck instance, not a latency budget."
   "Seconds `project-files' waits for the index before falling back."
   :type 'number)
 
+(defcustom projdex-find-file-command 'projdex-find-file
+  "Command `projdex-mode' runs in place of `project-find-file'.
+`projdex-consult-find-file' needs the consult package."
+  :type '(choice (const projdex-find-file)
+                 (const projdex-consult-find-file)))
+
 ;;;; Instances
 
 (defvar projdex--next-id 0
@@ -464,6 +470,22 @@ instance would otherwise stay empty until the user types.  Signal a
                   (< (float-time) deadline)))
       (sleep-for 0.02))))
 
+(defun projdex--prepare (root)
+  "Make the instance for ROOT ready for a prompt.
+Ensure the instance, rescan when it is not watching, and wait for a
+first page of files.  Signal a `user-error' when the instance cannot be
+started or failed, including the offer to build a missing module.
+Callers run this before their prompt, so that nothing starts an instance
+from inside the minibuffer."
+  (let ((rec (projdex--ensure root)))
+    (unless (projdex--rec-watching rec)
+      (emrs-send (projdex--rec-instance rec) '(:rescan))))
+  ;; `:status' probes, so that an instance that cannot be started or
+  ;; failed is reported here, before the prompt, as a `user-error',
+  ;; and a new instance has files to show.  `:status' does not score
+  ;; the index, unlike an empty query.
+  (projdex--await-first-page root))
+
 ;;;###autoload
 (defun projdex-find-file (&optional include-all)
   "Visit a file of the current project, chosen from projdex's index.
@@ -474,14 +496,7 @@ with INCLUDE-ALL."
          (root (projdex--root (project-root project))))
     (if (or include-all (file-remote-p root))
         (project-find-file include-all)
-      (let ((rec (projdex--ensure root)))
-        (unless (projdex--rec-watching rec)
-          (emrs-send (projdex--rec-instance rec) '(:rescan))))
-      ;; `:status' probes, so that an instance that cannot be started or
-      ;; failed is reported here, before the prompt, as a `user-error',
-      ;; and a new instance has files to show.  `:status' does not score
-      ;; the index, unlike an empty query.
-      (projdex--await-first-page root)
+      (projdex--prepare root)
       (let* ((completion-category-overrides
               (cons '(project-file (styles projdex)) completion-category-overrides))
              (table (projdex--table root))
@@ -571,11 +586,16 @@ when the index is not applicable, times out or fails."
 
 (defvar-keymap projdex-mode-map
   :doc "Keymap of `projdex-mode'."
-  "<remap> <project-find-file>" #'projdex-find-file)
+  ;; The filter reads the option on each lookup, so changing it needs no
+  ;; mode restart.
+  "<remap> <project-find-file>"
+  '(menu-item "" projdex-find-file
+              :filter (lambda (_) projdex-find-file-command)))
 
 ;;;###autoload
 (define-minor-mode projdex-mode
-  "Use projdex's index for `project-find-file'."
+  "Use projdex's index for `project-find-file'.
+The command run instead is `projdex-find-file-command'."
   :global t
   :keymap projdex-mode-map)
 

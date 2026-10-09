@@ -1001,6 +1001,21 @@ Wait for WAIT seconds at most (default 10)."
           (should-not (eq (command-remapping 'project-find-file) 'projdex-find-file)))
       (projdex-mode (if was 1 -1)))))
 
+(ert-deftest projdex-test-mode-remap-option ()
+  "The remap follows `projdex-find-file-command' without a mode restart."
+  (let ((was projdex-mode)
+        (projdex-find-file-command 'projdex-find-file))
+    (unwind-protect
+        (progn
+          (projdex-mode 1)
+          (should (eq (command-remapping 'project-find-file) 'projdex-find-file))
+          (setq projdex-find-file-command 'projdex-consult-find-file)
+          (should (eq (command-remapping 'project-find-file)
+                      'projdex-consult-find-file))
+          (setq projdex-find-file-command 'projdex-find-file)
+          (should (eq (command-remapping 'project-find-file) 'projdex-find-file)))
+      (projdex-mode (if was 1 -1)))))
+
 ;;;; project-files
 
 (cl-defmethod project-root ((project (head projdex-test)))
