@@ -107,8 +107,11 @@ each update, then restart Emacs. Untested.
 Then run `M-x projdex-build-module` and restart Emacs; repeat the command
 after updates. Untested.
 
-For elpaca and package-vc, enable the mode with `(projdex-mode 1)` or a
-`use-package` form with `:config (projdex-mode 1)`.
+For package-vc, enable the mode with `(projdex-mode 1)` or a `use-package`
+form with `:config (projdex-mode 1)`. elpaca installs asynchronously, so
+enable it once the package is there: `(use-package projdex :ensure (...)
+:config (projdex-mode 1))` with the recipe as `:ensure` value, or
+`(projdex-mode 1)` in `elpaca-after-init-hook`.
 
 ### Where projdex looks for the module
 

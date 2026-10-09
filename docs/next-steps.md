@@ -26,5 +26,4 @@ architecture.md or an ADR.
   "Development"): Elisp edits need no `doom sync`, only `eval-buffer` or a
   restart; Rust changes need `M-x projdex-build-module` and a restart; a
   new file in `lisp/` needs `doom sync` once. The module is loaded from
-  `lisp/projdex-module.so` in the checkout; the old `target/emacs` symlink
-  is gone (task 3 of the install-from-GitHub spec removes it).
+  `lisp/projdex-module.so` in the checkout.

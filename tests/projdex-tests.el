@@ -586,18 +586,24 @@ Cargo.toml is created unless CARGO-TOML is the symbol `none'."
    (append '("lisp/projdex.el")
            (unless (eq cargo-toml 'none) '("Cargo.toml")))))
 
-(defun projdex-test--fake-cargo (dir exit-code)
+(defun projdex-test--fake-cargo (dir exit-code &optional args-file sleep)
   "Write a fake cargo script into DIR and return its name.
-It creates the release library in the current directory and exits with
-EXIT-CODE (without creating anything when that is not 0)."
+It creates the release library in the --target-dir it is given and exits
+with EXIT-CODE (without creating anything when that is not 0).  With
+ARGS-FILE it records its arguments there; with SLEEP it first sleeps that
+many seconds."
   (let ((script (expand-file-name "fake-cargo" dir))
-        (library (file-relative-name (projdex-build--library "/") "/")))
+        (library (file-name-nondirectory (projdex-build--library "/"))))
     (with-temp-file script
       (insert "#!/bin/sh\n"
+              (if args-file (format "echo \"$@\" > '%s'\n" args-file) "")
+              (if sleep (format "sleep %s\n" sleep) "")
+              "td=target\n"
+              "while [ $# -gt 0 ]; do [ \"$1\" = --target-dir ] && td=$2; shift; done\n"
               (if (zerop exit-code)
-                  (format "mkdir -p %s && echo built > %s\n"
-                          (file-name-directory library) library)
-                "echo 'error: build failed'\n")
+                  (format "mkdir -p \"$td/release\" && echo built > \"$td/release/%s\"\n"
+                          library)
+                "echo 'error: distinctive failure line'\n")
               (format "exit %d\n" exit-code)))
     (set-file-modes script #o755)
     script))
@@ -606,18 +612,25 @@ EXIT-CODE (without creating anything when that is not 0)."
   "Run BODY with `load-path' reaching a symlinked projdex.el of a temp repo.
 VARS is (REPO CARGO-DIR [CARGO-TOML]): REPO is bound to the repository
 root and CARGO-DIR to a directory for fake programs.  The symlink lives
-in a separate build directory, as with straight."
+in a separate build directory, as with straight.  `projdex-build--file'
+is nil, so the repository is found through `load-path'."
   (declare (indent 1))
   (let ((repo (nth 0 vars)) (cdir (nth 1 vars)) (build (make-symbol "build")))
     `(let* ((,repo (projdex-test--make-repo ,(nth 2 vars)))
             (,cdir (projdex-test--make-tree nil))
             (,build (projdex-test--make-tree nil))
+            (projdex-build--file nil)
             (load-path (cons (directory-file-name ,build) load-path)))
-       (make-symbolic-link (expand-file-name "lisp/projdex.el" ,repo)
-                           (expand-file-name "projdex.el" ,build))
-       (unwind-protect (progn ,@body)
+       (unwind-protect
+           (progn
+             (make-symbolic-link (expand-file-name "lisp/projdex.el" ,repo)
+                                 (expand-file-name "projdex.el" ,build))
+             ,@body)
+         (when (get-process projdex-build--buffer)
+           (delete-process projdex-build--buffer))
          (when (get-buffer projdex-build--buffer)
-           (kill-buffer projdex-build--buffer))
+           (let ((kill-buffer-query-functions nil))
+             (kill-buffer projdex-build--buffer)))
          (delete-directory ,repo t)
          (delete-directory ,cdir t)
          (delete-directory ,build t)))))
@@ -688,6 +701,144 @@ in a separate build directory, as with straight."
         (should (equal (with-temp-buffer (insert-file-contents module)
                                          (string-trim (buffer-string)))
                        "built"))))))
+
+(ert-deftest projdex-test-build-own-location-wins ()
+  "The repository of projdex-build.el wins over another projdex.el on `load-path'."
+  (projdex-test--with-build (repo cdir)
+    (let* ((stale (projdex-test--make-tree '("lisp/projdex.el")))
+           (load-path (cons (expand-file-name "lisp" stale) load-path))
+           (own (expand-file-name "lisp/projdex-build.el" repo)))
+      (unwind-protect
+          (progn
+            (write-region "" nil own nil 'silent)
+            (let ((projdex-build--file nil))
+              (should (equal (projdex-build--find-repo) (file-truename stale))))
+            (let ((projdex-build--file own))
+              (should (equal (projdex-build--find-repo) (file-truename repo)))
+              (should (equal (file-truename (projdex-build--repo))
+                             (file-truename repo)))))
+        (delete-directory stale t)))))
+
+(ert-deftest projdex-test-build-elc-sibling ()
+  "A .elc in a build directory resolves to the repository of its .el symlink."
+  (projdex-test--with-build (repo cdir)
+    (let* ((other (projdex-test--make-tree nil))
+           (stale (projdex-test--make-tree '("lisp/projdex.el")))
+           (load-path (cons (expand-file-name "lisp" stale) load-path))
+           (own (expand-file-name "lisp/projdex-build.el" repo))
+           (projdex-build--file (expand-file-name "projdex-build.elc" other)))
+      (unwind-protect
+          (progn
+            (write-region "" nil own nil 'silent)
+            (write-region "" nil projdex-build--file nil 'silent)
+            (make-symbolic-link own (expand-file-name "projdex-build.el" other))
+            (should (equal (projdex-build--find-repo) (file-truename repo)))
+            ;; Without the .el sibling, projdex.el on `load-path' is used.
+            (delete-file (expand-file-name "projdex-build.el" other))
+            (should (equal (projdex-build--find-repo) (file-truename stale))))
+        (delete-directory other t)
+        (delete-directory stale t)))))
+
+(ert-deftest projdex-test-build-passes-target-dir ()
+  "Both entry points pass an absolute --target-dir inside the repository."
+  (projdex-test--with-build (repo cdir)
+    (let* ((args (expand-file-name "args" cdir))
+           (projdex-build-cargo-program (projdex-test--fake-cargo cdir 0 args))
+           (target (expand-file-name "target" repo))
+           (module (projdex-build--module-file repo)))
+      (should (projdex-build-module-sync))
+      (let ((recorded (with-temp-buffer (insert-file-contents args) (buffer-string))))
+        (should (string-match-p "--target-dir" recorded))
+        (should (string-match-p (regexp-quote target) recorded)))
+      (delete-file module)
+      (delete-file args)
+      (projdex-test--run-async)
+      (let ((recorded (with-temp-buffer (insert-file-contents args) (buffer-string))))
+        (should (string-match-p (regexp-quote (concat "--target-dir " target)) recorded)))
+      (should (file-exists-p module)))))
+
+(ert-deftest projdex-test-build-sync-batch-failure-shows-output ()
+  "In batch mode the warning carries the cargo output."
+  (projdex-test--with-build (repo cdir)
+    (let ((projdex-build-cargo-program (projdex-test--fake-cargo cdir 1))
+          (noninteractive t)
+          (warnings nil))
+      (cl-letf (((symbol-function 'display-warning)
+                 (lambda (_type msg &rest _) (push msg warnings))))
+        (should-not (projdex-build-module-sync)))
+      (should (string-match-p "distinctive failure line" (car warnings))))))
+
+(ert-deftest projdex-test-build-recompile-installs ()
+  "The finish hook installs for a rebuild in the build buffer."
+  (projdex-test--with-build (repo cdir)
+    (let ((projdex-build-cargo-program (projdex-test--fake-cargo cdir 0))
+          (module (projdex-build--module-file repo)))
+      (projdex-test--run-async)
+      (should (file-exists-p module))
+      (delete-file module)
+      (cl-letf (((symbol-function 'message) #'ignore))
+        ;; What `recompile' ends up doing when the new process exits.
+        (run-hook-with-args 'compilation-finish-functions
+                            (get-buffer projdex-build--buffer) "finished\n"))
+      (should (file-exists-p module))
+      ;; Other buffers and failures do not install.
+      (delete-file module)
+      (cl-letf (((symbol-function 'message) #'ignore))
+        (run-hook-with-args 'compilation-finish-functions
+                            (get-buffer projdex-build--buffer)
+                            "exited abnormally with code 1\n")
+        (with-temp-buffer
+          (run-hook-with-args 'compilation-finish-functions
+                              (current-buffer) "finished\n")))
+      (should-not (file-exists-p module)))))
+
+(ert-deftest projdex-test-build-recompile-command ()
+  "`recompile' in the build buffer runs the build again and installs."
+  (projdex-test--with-build (repo cdir)
+    (let ((projdex-build-cargo-program (projdex-test--fake-cargo cdir 0))
+          (module (projdex-build--module-file repo)))
+      (projdex-test--run-async)
+      (delete-file module)
+      (cl-letf (((symbol-function 'message) #'ignore))
+        (with-current-buffer projdex-build--buffer
+          (recompile))
+        (should (projdex-test--wait (lambda () (file-exists-p module)) 10))))))
+
+(ert-deftest projdex-test-build-concurrent-signals ()
+  "A second build while one runs signals a user-error."
+  (projdex-test--with-build (repo cdir)
+    (let ((projdex-build-cargo-program (projdex-test--fake-cargo cdir 0 nil 1))
+          (proc nil))
+      (cl-letf (((symbol-function 'message) #'ignore))
+        (setq proc (projdex-build-module))
+        (should (process-live-p proc))
+        (let ((err (should-error (projdex-build-module) :type 'user-error)))
+          (should (string-match-p "being built" (cadr err))))
+        (should (projdex-test--wait (lambda () (not (process-live-p proc))) 10))))))
+
+(ert-deftest projdex-test-offer-build-skips-prompt-while-building ()
+  "No prompt is shown while a build runs."
+  (projdex-test--with-build (repo cdir)
+    (let ((projdex-build-cargo-program (projdex-test--fake-cargo cdir 0 nil 1))
+          (noninteractive nil)
+          (proc nil))
+      (cl-letf (((symbol-function 'message) #'ignore)
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (ert-fail "y-or-n-p called during a build"))))
+        (setq proc (projdex-build-module))
+        (let ((err (should-error (projdex--offer-build) :type 'user-error)))
+          (should (string-match-p "is being built" (cadr err))))
+        (should (projdex-test--wait (lambda () (not (process-live-p proc))) 10))))))
+
+(ert-deftest projdex-test-start-module-load-failure-message ()
+  "A module file that exists but fails to load is reported as such."
+  (projdex-test--with-build (repo cdir)
+    (write-region "" nil (projdex-build--module-file repo) nil 'silent)
+    (cl-letf (((symbol-function 'emrs-load-module)
+               (lambda (&rest _) (signal 'error '("bad module")))))
+      (let ((err (should-error (projdex--start repo) :type 'user-error)))
+        (should (string-match-p "Loading .*projdex-module.* failed: bad module" (cadr err)))
+        (should (string-match-p "M-x projdex-build-module" (cadr err)))))))
 
 (defun projdex-test--run-async (&optional wait)
   "Run `projdex-build-module', wait for the process; return the messages.

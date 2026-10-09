@@ -17,6 +17,7 @@ mkdir -p "$out"
 # projdex prefers a module built next to its own projdex.el (lisp/, by
 # projdex-build-module).  Test copies of the Lisp files, so the debug
 # module below is the one under test.
+rm -f "$out"/*.el "$out"/*.elc
 cp lisp/*.el "$out/"
 for ext in so dylib dll; do
     for built in "target/debug/libprojdex.$ext" "target/debug/projdex.$ext"; do

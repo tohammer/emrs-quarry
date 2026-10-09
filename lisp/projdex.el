@@ -184,6 +184,8 @@ Nil when the repository cannot be found or the file does not exist."
 (defun projdex--offer-build ()
   "Offer to build the missing module; signal a `user-error' either way."
   (let ((repo (ignore-errors (projdex-build--find-repo))))
+    (when (get-buffer-process projdex-build--buffer)
+      (user-error "The projdex module is being built; run the command again when it is done"))
     (if (and repo
              (file-exists-p (expand-file-name "Cargo.toml" repo))
              (not noninteractive)
@@ -201,8 +203,12 @@ Nil when the repository cannot be found or the file does not exist."
     (file-missing
      (projdex--offer-build))
     (error
-     (user-error "Cannot load the projdex module (install it as projdex-module%s on `load-path'): %s"
-                 module-file-suffix (error-message-string err))))
+     (let ((file (projdex--module-file)))
+       (if file
+           (user-error "Loading %s failed: %s; rebuild it with M-x projdex-build-module"
+                       file (error-message-string err))
+         (user-error "Cannot load the projdex module (install it as projdex-module%s on `load-path'): %s"
+                     module-file-suffix (error-message-string err))))))
   (remhash root projdex--failures)
   (let ((rec (projdex--make-rec :root root :indexing t :watching t)))
     (setf (projdex--rec-instance rec)

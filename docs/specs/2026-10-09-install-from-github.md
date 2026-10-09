@@ -63,13 +63,17 @@ from a `:pre-build` form before projdex is built, and by `projdex.el`.
 
 - `projdex-build-cargo-program` (defcustom, default `"cargo"`).
 - `projdex-build--repo`: the repository root, the parent of the directory
-  of `(file-truename (locate-library "projdex.el" t))`; when that fails
-  (not on `load-path`), the parent of the directory of this file's own
-  true name. The root must contain `Cargo.toml`, otherwise a `user-error`:
+  of this file's own true name (for a `.elc`, of its `.el` sibling); when
+  that fails, of `(file-truename (locate-library "projdex.el" t))`. Own
+  location first, so another `projdex.el` on `load-path` (a stale manual
+  install, or straight's old build directory after switching
+  `:local-repo`) cannot redirect the build (v1 review of this spec). The root must contain `Cargo.toml`, otherwise a `user-error`:
   "projdex source not found (installed without its repository?); install
   the module by hand, see the README".
 - `projdex-build--module-file`: `<repo>/lisp/projdex-module` plus
   `module-file-suffix`.
+- cargo runs with `--target-dir <repo>/target`, so `CARGO_TARGET_DIR`
+  or a user's cargo config cannot move the output.
 - Library produced by cargo, per `system-type`: `libprojdex.so`
   (gnu/linux and other Unix), `libprojdex.dylib` (darwin), `projdex.dll`
   (windows-nt), under `<repo>/target/release/`.

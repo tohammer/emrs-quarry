@@ -46,12 +46,18 @@
 
 (defun projdex-build--find-repo ()
   "Return the repository root as a directory name, or nil.
-It is the parent of the directory of the true name of projdex.el on
-`load-path', or of this file when projdex.el is not found.  The root
-need not contain Cargo.toml."
-  (let ((lib (or (let ((found (locate-library "projdex.el" t)))
-                   (and found (file-truename found)))
-                 (and projdex-build--file (file-truename projdex-build--file)))))
+It is the parent of the directory of the true name of this file (its .el
+sibling when loaded from a .elc), so the build tree is the one this file
+belongs to even when another projdex.el is on `load-path'.  When that is
+unknown, it is the parent of the directory of the true name of projdex.el
+on `load-path'.  The root need not contain Cargo.toml."
+  (let* ((own (and projdex-build--file
+                   (if (string-suffix-p ".elc" projdex-build--file)
+                       (substring projdex-build--file 0 -1)
+                     projdex-build--file)))
+         (lib (or (and own (file-exists-p own) (file-truename own))
+                  (let ((found (locate-library "projdex.el" t)))
+                    (and found (file-truename found))))))
     (and lib
          (file-name-directory
           (directory-file-name (file-name-directory lib))))))
@@ -77,6 +83,13 @@ Signal a `user-error' when there is none."
              ('windows-nt "projdex.dll")
              (_ "libprojdex.so")))
    repo))
+
+(defun projdex-build--arguments (repo)
+  "Return the arguments of the cargo command that builds REPO.
+The target directory is explicit, so neither CARGO_TARGET_DIR nor the
+cargo configuration can move the library from `projdex-build--library'."
+  (list "build" "--release" "--target-dir"
+        (expand-file-name "target" repo)))
 
 (defun projdex-build--install (repo)
   "Install the library built in REPO as its module file.
@@ -129,32 +142,45 @@ rename, so an Emacs that has the old module loaded keeps a valid file."
   "Build the projdex module with cargo, asynchronously.
 The output goes to the buffer `*projdex-build*'.  On success the module
 is installed next to projdex.el; a running Emacs needs a restart to use
-a rebuilt module.  Return the build process."
+a rebuilt module.  Recompiling in that buffer installs as well.  Return
+the build process."
   (interactive)
+  (when (get-buffer-process projdex-build--buffer)
+    (user-error "The projdex module is being built (see %s)" projdex-build--buffer))
   (let* ((repo (projdex-build--repo))
          (program (projdex-build--program))
          (default-directory repo)
          (buffer (compilation-start
                   (mapconcat #'shell-quote-argument
-                             (list program "build" "--release") " ")
+                             (cons program (projdex-build--arguments repo)) " ")
                   'compilation-mode
-                  (lambda (_mode) projdex-build--buffer)))
-         (process (get-buffer-process buffer))
-         (old (process-sentinel process)))
-    (set-process-sentinel
-     process
-     (lambda (proc event)
-       (funcall old proc event)
-       (when (memq (process-status proc) '(exit signal))
-         (projdex-build--finish
-          repo (and (eq (process-status proc) 'exit)
-                    (zerop (process-exit-status proc)))))))
-    process))
+                  (lambda (_mode) projdex-build--buffer))))
+    (get-buffer-process buffer)))
+
+(defun projdex-build--compilation-finished (buffer message)
+  "Install the module when the build in BUFFER ended with MESSAGE.
+Meant for `compilation-finish-functions'; it ignores other buffers."
+  (when (equal (buffer-name buffer) projdex-build--buffer)
+    (projdex-build--finish
+     (buffer-local-value 'default-directory buffer)
+     (equal message "finished\n"))))
+
+(add-hook 'compilation-finish-functions #'projdex-build--compilation-finished)
+
+(defun projdex-build--output-tail (&optional lines)
+  "Return the last LINES (default 30) lines of the build buffer."
+  (with-current-buffer projdex-build--buffer
+    (save-excursion
+      (goto-char (point-max))
+      (forward-line (- (or lines 30)))
+      (string-trim (buffer-substring-no-properties (point) (point-max))))))
 
 ;;;###autoload
 (defun projdex-build-module-sync ()
   "Build the projdex module with cargo, waiting for it to finish.
-Never signal: a failure becomes a warning.  Return non-nil on success."
+Never signal: a failure becomes a warning.  In batch mode the warning
+includes the end of the build output, which is lost with the process.
+Return non-nil on success."
   (condition-case err
       (let* ((repo (projdex-build--repo))
              (program (projdex-build--program))
@@ -164,9 +190,12 @@ Never signal: a failure becomes a warning.  Return non-nil on success."
         (with-current-buffer buffer
           (let ((inhibit-read-only t))
             (erase-buffer)))
-        (setq status (call-process program nil buffer nil "build" "--release"))
+        (setq status (apply #'call-process program nil buffer nil
+                            (projdex-build--arguments repo)))
         (unless (eql status 0)
-          (error "The build failed (see %s)" projdex-build--buffer))
+          (if noninteractive
+              (error "The build failed:\n%s" (projdex-build--output-tail))
+            (error "The build failed (see %s)" projdex-build--buffer)))
         (projdex-build--install repo)
         (message "projdex module built")
         t)

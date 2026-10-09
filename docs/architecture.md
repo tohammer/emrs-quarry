@@ -57,10 +57,11 @@ branch, so `Cargo.toml` pins only commits on that branch (ADR 0007).
 The module is built on the user's machine and lives next to `projdex.el`
 (ADR 0006). `projdex-build--find-repo` takes the repository root as the
 parent of the directory of the true name (symlinks resolved) of
-`projdex.el` on `load-path`, or of `projdex-build.el` itself when that is
-not found; `projdex-build--repo` additionally requires `Cargo.toml` there
+`projdex-build.el` itself (of its `.el` when loaded from a `.elc`), or of
+`projdex.el` on `load-path` when that fails. Its own location comes first,
+so another `projdex.el` on `load-path` cannot redirect a build; `projdex-build--repo` additionally requires `Cargo.toml` there
 and otherwise signals a `user-error` that points to the manual
-installation. Both entry points run `cargo build --release`
+installation. Both entry points run `cargo build --release --target-dir <repo>/target`
 (`projdex-build-cargo-program`) in the repository, with output in
 `*projdex-build*`, and install `target/release/libprojdex.so`
 (`.dylib` on macOS, `projdex.dll` on Windows) by copying it to a temporary
@@ -71,9 +72,14 @@ use the new one.
 
 - `projdex-build-module` is the interactive, asynchronous command (a
   `compilation-mode` buffer). It reports "projdex module built", with
-  "restart Emacs to use it" when a projdex module is already loaded.
+  "restart Emacs to use it" when a projdex module is already loaded. The
+  install runs from `compilation-finish-functions` for `*projdex-build*`,
+  so `recompile` (`g`) installs too; a second build while one runs is a
+  `user-error`.
 - `projdex-build-module-sync` waits and never signals; any failure becomes
-  a `display-warning` that names `M-x projdex-build-module`. A straight
+  a `display-warning` that names `M-x projdex-build-module`; in batch
+  (`doom sync`) the warning carries the tail of cargo's output, since the
+  buffer dies with the process. A straight
   `:pre-build` form loads `projdex-build.el` and calls it, so `doom sync`
   completes without a Rust toolchain.
 
