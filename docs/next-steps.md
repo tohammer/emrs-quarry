@@ -7,7 +7,7 @@ architecture.md or an ADR.
 
 1. consult async source (backlog), built on `projdex-query-async`. It
    must restrict completion styles like `projdex-find-file` does
-   (ADR 0005).
+   (ADR 0005), and start or probe the instance before its prompt (backlog).
 
 ## Watch out for
 

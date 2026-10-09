@@ -1,6 +1,6 @@
 # Install from GitHub with a package recipe
 
-Status: approved
+Status: implemented
 Date: 2026-10-09
 
 ## Purpose
@@ -174,7 +174,7 @@ when no Rust changed.
 |---|---|
 | No cargo during `doom sync` | Warning from `projdex-build-module-sync`; sync completes; first projdex command offers to build. |
 | Compile error during `doom sync` | Same, with the output in `*projdex-build*`. |
-| No cargo for the command | Message that cargo was not found (`projdex-build-cargo-program`). |
+| No cargo for the command | `user-error` that cargo was not found (`projdex-build-cargo-program`); a deviation from the planned message, since nothing has started yet. |
 | Installed without repository | `user-error` naming the manual installation. |
 | Module loaded, rebuilt | Built file replaces the old by rename; message to restart; emrs's stale warning as before. |
 | `emrs.el` older than the module's protocol | emrs's protocol error, "upgrade the emrs Elisp package" (ADR 0007). |
@@ -241,3 +241,16 @@ only), macOS and Windows.
   `target/emacs` symlink, and run the manual checks under Testing with the
   user. *Done when* each manual check is confirmed or its failure is
   recorded and fixed.
+
+## Deviations and review changes
+
+- Repository detection starts from `projdex-build.el`'s own location, not
+  from `projdex.el` on `load-path` (Design, updated).
+- cargo runs with `--target-dir`; the install runs from
+  `compilation-finish-functions`, so `recompile` installs; a second
+  concurrent build is a `user-error`; in batch the warning carries the
+  tail of cargo's output.
+- `tests/run-ert.sh` tests copies of the Lisp files in `target/elisp`, so
+  a module built in `lisp/` does not replace the debug module under test.
+- Deferred to the backlog: replacing a loaded module on Windows; the build
+  question from non-command callers (with the consult source).

@@ -9,6 +9,13 @@ An optional `projdex-consult.el` that adapts the asynchronous core to
 consult: debounced queries, one cancellable stream per query, results shown
 while indexing runs. Deferred by ADR 0001. Revisit after version 1 works.
 
+When the module is missing, `projdex--start` asks whether to build it, from
+whatever caller started the instance: also `projdex-query-async` or a
+completion table inside the minibuffer. `projdex-find-file` probes before
+its prompt and is not affected. A consult source must start or probe the
+instance before its prompt too, or the question should move to the
+commands. Origin: review of the install-from-GitHub spec (2026-10-09).
+
 ## Continuous integration
 
 No CI yet. The emrs repository had to disable GitHub Actions for lack of
@@ -41,6 +48,12 @@ directory walks; Windows buffer overflows, which notify does not report as
 lost events. Also, when creating the backend watcher fails,
 notify-debouncer-full leaves its own thread running (upstream). Origin:
 task 4, 2026-10-09. Revisit before claiming macOS or Windows support.
+
+On Windows, rebuilding the module while it is loaded fails at the install
+step: `rename-file` cannot replace a loaded DLL. Renaming the old file
+aside first would work. Origin: review of the install-from-GitHub spec
+(2026-10-09); deferred because Windows is untested anyway. Revisit with
+Windows support.
 
 ## Faster scoring for very large indexes
 
