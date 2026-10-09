@@ -56,7 +56,11 @@ In `config.el`:
 
 ```elisp
 (use-package! projdex
-  :hook (doom-first-input . projdex-mode))
+  :hook (doom-first-input . projdex-mode)
+  :custom
+  ;; Asynchronous, needs consult 2.0 or later (see "consult front end"):
+  ;; (projdex-find-file-command 'projdex-consult-find-file)
+  (projdex-find-file-command 'projdex-find-file))
 ```
 
 `doom sync` clones both repositories, and the `:pre-build` form runs
