@@ -14,7 +14,8 @@ compared:
   with ERT. But it is synchronous, needs a pass-through completion style so
   Emacs does not re-filter and re-sort the ranked results, needs caching per
   input because UIs call the table several times per keystroke, and uses
-  emrs streams only for the initial walk.
+  no emrs stream for queries (the only stream is `(:files)` for
+  `project-files`).
 - **A consult async source.** Debounced, cancelled per keystroke, results
   streamed incrementally; never blocks Emacs and is usable during indexing.
   But it depends on consult's internal async API (`consult--async-*`,

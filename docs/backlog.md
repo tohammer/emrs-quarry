@@ -19,6 +19,138 @@ when quota allows; then mirror emrs's matrix (Linux, macOS, Emacs 30.1 and
 ## Distribution
 
 No package recipe, no prebuilt binaries, and the module and `emrs.el` are
-installed by hand (README, "Building"). Depends on emrs's own distribution
-work (emrs backlog, "Prebuilt artifacts and distribution"). Revisit before
-announcing projdex to users.
+installed by hand (README, "Installation"). Depends on emrs's own
+distribution work (emrs backlog, "Prebuilt artifacts and distribution").
+Revisit before announcing projdex to users.
+
+## Install from GitHub with one `package!` declaration
+
+Goal: a Doom user (or straight/elpaca user) installs projdex with a
+recipe pointing at the GitHub repo, without a local checkout:
+
+```elisp
+(package! projdex
+  :recipe (:host github :repo "tohammer/emacs-projdex" :files ("lisp/*.el")))
+```
+
+Today this does not work: the Rust module must be built and placed on
+`load-path` as `projdex-module.so`, and `emrs.el` comes from a separate
+local checkout (the developer's config uses `:local-repo` for both, plus a
+`target/emacs` symlink to the module). Needed:
+
+- Getting the module: either build it during the package build (straight
+  `:pre-build` running `cargo build --release` and copying the library into
+  the build directory as `projdex-module` plus `module-file-suffix`), or a
+  command such as `projdex-install-module` that builds it, or downloads a
+  prebuilt release binary on first use (see Distribution).
+- `emrs.el` is installed as its own package, not copied into this repo:
+  for now from GitHub (`(package! emrs :recipe (:host github :repo
+  "tohammer/emrs" :files ("elisp/emrs.el")))`, pinned to the commit
+  `Cargo.toml` pins), later from MELPA as the ordinary dependency that
+  `Package-Requires` already declares (`(emrs "0.1.0")`). The emrs package
+  version then has to match the emrs crate version projdex is built
+  against; the protocol check in `emrs-load-module` reports a mismatch.
+- README: document the recipe for Doom, straight and elpaca.
+
+Origin: the user's request when setting projdex up in their Doom config
+(2026-10-09). Revisit together with Distribution, before announcing
+projdex.
+
+## nucleo-matcher back to a crates.io release
+
+projdex pins `nucleo-matcher` to an upstream git commit because 0.3.1 has
+the case-sensitive prefix bug (ADR 0003). Revisit when a release after
+0.3.1 appears on crates.io.
+
+## Watcher on macOS and Windows
+
+The recursive-watch path for non-Linux platforms is type-checked for
+Windows and exercised on Linux through a test hook, but never run against
+FSEvents or Windows. Suspected issues: FSEvents' sticky flags causing extra
+directory walks; Windows buffer overflows, which notify does not report as
+lost events. Also, when creating the backend watcher fails,
+notify-debouncer-full leaves its own thread running (upstream). Origin:
+task 4, 2026-10-09. Revisit before claiming macOS or Windows support.
+
+## Faster scoring for very large indexes
+
+On 1M files, short queries (2–4 characters) still match most paths and
+exact nucleo scoring costs ~180 ms p99 on a 4-core laptop at low clock
+(benchmark, 2026-10-09). Option: above ~200k candidates, preselect the top
+10×limit with nucleo's greedy scoring (4–7× faster) and rank those exactly;
+needs a greedy mode on `Pattern`/`Atom` (private fields in nucleo) or our
+own per-atom dispatch, and relaxes the "identical to exact scoring"
+guarantee for huge sets. Origin: task 8 of the v1 spec. Revisit if the 1M
+target is missed on a quiet machine or users report slow prompts.
+
+## Ranking of equal scores
+
+Equal nucleo scores fall back to the shorter path, so `activitymanager`
+ranks `external/mesa3d/.../ActivityManager.h` above
+`frameworks/base/.../ActivityManager.java`. A tie-break or bonus that
+prefers more prominent paths (recently visited, shallower in a well-known
+tree) may help. Origin: task 8 benchmark observation, 2026-10-09.
+Revisit with real use.
+
+## `remove_dir` scans the whole index
+
+`Index::remove_dir` is O(n). A batch with many sibling directory removals
+on a 1M-path index (`rm -rf` of a large non-ignored tree) costs k × n inside
+`handle`, twice during a walk (apply and replay), and can stall queries.
+Origin: v1 review (Rust correctness), 2026-10-09; deferred because large
+deletions usually happen in ignored build directories. Revisit with a
+prefix structure or one combined scan per `FsChanges` batch if prompts
+stall after big deletions.
+
+## Watches left on newly ignored directories
+
+A cancelled walk's worker threads finish the directory listings they have
+started and can mark directories that the new ignore rules exclude, so they
+keep their watches until the next walk. Only wasted watches; events there
+are still ignored. Origin: v1 review (Rust correctness), 2026-10-09;
+deferred as low impact (rarer still since rescans coalesce). Revisit if
+watch limits become tight.
+
+## Unbounded memory during walks and `(:files)`
+
+Changes recorded during a walk (`Walk.changes`) grow without a cap, and
+each `(:files)` call copies the whole index into a `Vec<String>`. Origin:
+v1 review (Rust correctness), 2026-10-09; deferred because walks are
+seconds long and `(:files)` is opt-in. Revisit if memory use is reported
+on huge trees (cap the change log and force a follow-up walk; snapshot
+shared strings).
+
+## Waiting for `(:files)` runs other process filters
+
+`projdex--collect-files` waits with `(accept-process-output nil 0.05)`,
+so other processes' filters and timers can run inside `project-files`.
+`emrs-call-sync` waits on the module pipe only, but that pipe is private
+to emrs. Origin: v1 review (Elisp), 2026-10-09; deferred because it needs
+a public helper in emrs (a synchronous stream collect, or access to the
+pipe). Revisit with the next emrs change.
+
+## Symlinked project roots get separate instances
+
+`projdex--root` does not resolve symlinks, so one directory reached by two
+spellings gets two instances and two sets of watches. Using
+`file-truename` only for the instance key would fix it, but
+`project-files` must keep returning paths under the project's own
+spelling. Origin: v1 review (Elisp), 2026-10-09; deferred as rare.
+Revisit on a report.
+
+## projdex as the file chooser after `projectile-switch-project`
+
+After switching projects, Doom prompts for a file with
+`+workspaces-switch-project-function` (default `doom-project-find-file`,
+which calls `projectile-find-file` by name, so a `[remap
+projectile-find-file]` does not apply). Without the workspaces module it is
+`projectile-switch-project-action`. Possible: set that variable to a
+function of the project directory that runs projdex there, e.g. with
+`default-directory` bound to it and the user's Projectile-rooted wrapper
+(`my/projdex-projectile-find-file` in the developer's Doom config).
+Either do it in the user config, or ship a `projdex-projectile` helper
+(find-file in Projectile's root, usable as both remap target and
+switch-project action) with projdex.
+
+Origin: the user's request while setting projdex up in Doom (2026-10-09).
+Revisit after v1 is merged.

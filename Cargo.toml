@@ -3,7 +3,7 @@ name = "projdex"
 version = "0.1.0"
 publish = false
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 
 [lib]
@@ -13,6 +13,13 @@ crate-type = ["cdylib"]
 # Pinned to a commit; bump deliberately (docs/next-steps.md).
 emrs = { git = "https://github.com/tohammer/emrs.git", rev = "9c47609f5c3273ed0cf1713824da6a5bc6e9d61e" }
 serde = { version = "1", features = ["derive"] }
+ignore = "0.4"
+nucleo-matcher = { git = "https://github.com/helix-editor/nucleo.git", rev = "8c16d47cdfa9607d3e44df5f81c635c6f43c65ee" }
+notify = "8"
+notify-debouncer-full = "0.7"
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.dev]
 panic = "unwind"

@@ -1,6 +1,16 @@
 //! projdex: a live file index of a project with fuzzy matching, as an Emacs
 //! module built on emrs.
 //!
-//! The service and the `emrs::module!` line are added by the v1 spec
-//! (docs/next-steps.md). Until then the library builds but Emacs cannot load
-//! it as a module.
+//! The module `projdex-module` provides one service, `projdex`
+//! ([`service::Projdex`]): one instance per project root, started from Elisp
+//! with `(emrs-start 'projdex "projdex" (list :root ROOT))`. Requests,
+//! replies and events are documented in `src/service.rs` and in the v1 spec
+//! (`docs/specs/2026-10-09-projdex-v1.md`).
+
+mod index;
+mod matcher;
+mod service;
+mod walk;
+mod watch;
+
+emrs::module!("projdex", [service::Projdex]);
