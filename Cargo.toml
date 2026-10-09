@@ -14,7 +14,7 @@ crate-type = ["cdylib"]
 emrs = { git = "https://github.com/tohammer/emrs.git", rev = "9c47609f5c3273ed0cf1713824da6a5bc6e9d61e" }
 serde = { version = "1", features = ["derive"] }
 ignore = "0.4"
-nucleo-matcher = "0.3"
+nucleo-matcher = { git = "https://github.com/helix-editor/nucleo.git", rev = "8c16d47cdfa9607d3e44df5f81c635c6f43c65ee" }
 notify = "8"
 notify-debouncer-full = "0.7"
 

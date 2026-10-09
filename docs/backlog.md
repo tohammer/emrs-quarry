@@ -22,3 +22,9 @@ No package recipe, no prebuilt binaries, and the module and `emrs.el` are
 installed by hand (README, "Building"). Depends on emrs's own distribution
 work (emrs backlog, "Prebuilt artifacts and distribution"). Revisit before
 announcing projdex to users.
+
+## nucleo-matcher back to a crates.io release
+
+projdex pins `nucleo-matcher` to an upstream git commit because 0.3.1 has
+the case-sensitive prefix bug (ADR 0003). Revisit when a release after
+0.3.1 appears on crates.io.
