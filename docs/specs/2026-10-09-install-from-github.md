@@ -1,6 +1,6 @@
 # Install from GitHub with a package recipe
 
-Status: draft
+Status: approved
 Date: 2026-10-09
 
 ## Purpose
