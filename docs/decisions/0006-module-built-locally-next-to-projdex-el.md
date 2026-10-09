@@ -38,9 +38,10 @@ the repository is not on `load-path` unless the recipe lists it.
   `:pre-build` entry never signals: a failed build becomes a warning, so a
   missing Rust toolchain does not stop `doom sync`; the module is then
   missing and the command offers to build it.
-- projdex finds the module first in the directory of the true file of
-  projdex.el (`file-truename` of `projdex.el` on `load-path`, which
-  resolves straight's and elpaca's symlinks into the repository), then as
+- projdex finds the module first in the repository of its own files: the
+  true name of `projdex-build.el` (of the `.el` next to a byte-compiled
+  file), which resolves straight's and elpaca's symlinks into the
+  repository, or else of `projdex.el` on `load-path`; then as
   `projdex-module` on `load-path`, so the manual installation keeps
   working.
 

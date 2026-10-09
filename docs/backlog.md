@@ -9,6 +9,13 @@ An optional `projdex-consult.el` that adapts the asynchronous core to
 consult: debounced queries, one cancellable stream per query, results shown
 while indexing runs. Deferred by ADR 0001. Revisit after version 1 works.
 
+When the module is missing, `projdex--start` asks whether to build it, from
+whatever caller started the instance: also `projdex-query-async` or a
+completion table inside the minibuffer. `projdex-find-file` probes before
+its prompt and is not affected. A consult source must start or probe the
+instance before its prompt too, or the question should move to the
+commands. Origin: review of the install-from-GitHub spec (2026-10-09).
+
 ## Continuous integration
 
 No CI yet. The emrs repository had to disable GitHub Actions for lack of
@@ -18,43 +25,13 @@ when quota allows; then mirror emrs's matrix (Linux, macOS, Emacs 30.1 and
 
 ## Distribution
 
-No package recipe, no prebuilt binaries, and the module and `emrs.el` are
-installed by hand (README, "Installation"). Depends on emrs's own
-distribution work (emrs backlog, "Prebuilt artifacts and distribution").
-Revisit before announcing projdex to users.
-
-## Install from GitHub with one `package!` declaration
-
-Goal: a Doom user (or straight/elpaca user) installs projdex with a
-recipe pointing at the GitHub repo, without a local checkout:
-
-```elisp
-(package! projdex
-  :recipe (:host github :repo "tohammer/emacs-projdex" :files ("lisp/*.el")))
-```
-
-Today this does not work: the Rust module must be built and placed on
-`load-path` as `projdex-module.so`, and `emrs.el` comes from a separate
-local checkout (the developer's config uses `:local-repo` for both, plus a
-`target/emacs` symlink to the module). Needed:
-
-- Getting the module: either build it during the package build (straight
-  `:pre-build` running `cargo build --release` and copying the library into
-  the build directory as `projdex-module` plus `module-file-suffix`), or a
-  command such as `projdex-install-module` that builds it, or downloads a
-  prebuilt release binary on first use (see Distribution).
-- `emrs.el` is installed as its own package, not copied into this repo:
-  for now from GitHub (`(package! emrs :recipe (:host github :repo
-  "tohammer/emrs" :files ("elisp/emrs.el")))`, pinned to the commit
-  `Cargo.toml` pins), later from MELPA as the ordinary dependency that
-  `Package-Requires` already declares (`(emrs "0.1.0")`). The emrs package
-  version then has to match the emrs crate version projdex is built
-  against; the protocol check in `emrs-load-module` reports a mismatch.
-- README: document the recipe for Doom, straight and elpaca.
-
-Origin: the user's request when setting projdex up in their Doom config
-(2026-10-09). Revisit together with Distribution, before announcing
-projdex.
+Installation from GitHub works through package recipes and a local cargo
+build (spec 2026-10-09-install-from-github, README "Installation"). Open:
+prebuilt binaries, which need CI (see above) and would replace the cargo
+build and its Rust requirement, and a package archive (MELPA) for projdex
+and emrs. Depends on emrs's own distribution work (emrs backlog, "Prebuilt
+artifacts and distribution"). Origin: the install-from-GitHub spec, which
+left both out of scope. Revisit before announcing projdex to users.
 
 ## nucleo-matcher back to a crates.io release
 
@@ -71,6 +48,12 @@ directory walks; Windows buffer overflows, which notify does not report as
 lost events. Also, when creating the backend watcher fails,
 notify-debouncer-full leaves its own thread running (upstream). Origin:
 task 4, 2026-10-09. Revisit before claiming macOS or Windows support.
+
+On Windows, rebuilding the module while it is loaded fails at the install
+step: `rename-file` cannot replace a loaded DLL. Renaming the old file
+aside first would work. Origin: review of the install-from-GitHub spec
+(2026-10-09); deferred because Windows is untested anyway. Revisit with
+Windows support.
 
 ## Faster scoring for very large indexes
 

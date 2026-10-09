@@ -36,8 +36,9 @@ as a self-message through `ctx.address()`, so all index access happens in
 | `src/matcher.rs` | Query text to ranked paths with match positions; parallel scoring; incremental narrowing | `index`, `nucleo-matcher` |
 | `src/walk.rs` | Walker configuration (`ignore` crate), parallel walk sending batches of at most 1000 paths, skipped count | `ignore` |
 | `src/watch.rs` | Watch set, debouncing, translation of file-system events into index changes, rescan triggers, failure reporting | `walk`, `notify`, `notify-debouncer-full` |
-| `lisp/projdex.el` | Options, instance table, event and exit handling, query entry points, completion table and `projdex` style, commands, `projdex-mode`, `project-files` method | `emrs.el`, `project` |
-| `tests/projdex-tests.el`, `tests/run-ert.sh` | ERT suite on generated trees. The script builds the module, installs it as `projdex-module`, takes `emrs.el` from the emrs checkout Cargo resolved and runs with `--module-assertions` | Cargo, Emacs |
+| `lisp/projdex.el` | Options, module lookup, instance table, event and exit handling, query entry points, completion table and `projdex` style, commands, `projdex-mode`, `project-files` method | `emrs.el`, `projdex-build.el`, `project` |
+| `lisp/projdex-build.el` | Builds the module with cargo and installs it as `lisp/projdex-module` plus `module-file-suffix` in the repository: repository detection, `projdex-build-module` (async), `projdex-build-module-sync` (for `:pre-build`), install by rename. Needs neither emrs nor the module | Cargo, Emacs |
+| `tests/projdex-tests.el`, `tests/run-ert.sh` | ERT suite on generated trees. The script builds the debug module, copies the Lisp files and the module as `projdex-module` to `target/elisp` (so a module built in `lisp/` is not the one under test), takes `emrs.el` from the emrs checkout Cargo resolved and runs with `--module-assertions` | Cargo, Emacs |
 | Rust tests (in each `src/*.rs`) | Unit tests per module; service and watcher tests through `emrs::testing::Host` on temporary trees | `tempfile` |
 | `bench/run-bench.sh`, `bench/projdex-bench.el` | Generates 100k and 1M file trees, measures indexing time, memory and per-call latency against a `project-files` + `flex` baseline | Cargo, Emacs, git |
 
@@ -46,8 +47,50 @@ as a self-message through `ctx.address()`, so all index access happens in
 `emrs.el` loads `projdex-module` and talks to its services; `projdex.el`
 uses the emrs API (`emrs-start`, `emrs-call`, `emrs-call-sync`,
 `emrs-call-stream`, ...) and never calls the module functions directly. The
-emrs version is fixed by the commit pinned in `Cargo.toml`, and the test
-and benchmark scripts use the `emrs.el` from that checkout.
+module's emrs version is fixed by the commit pinned in `Cargo.toml`, and the
+test and benchmark scripts use the `emrs.el` from that checkout. Installed
+from GitHub, `emrs.el` is its own package that follows emrs's default
+branch, so `Cargo.toml` pins only commits on that branch (ADR 0007).
+
+### Building and finding the module
+
+The module is built on the user's machine and lives next to `projdex.el`
+(ADR 0006). `projdex-build--find-repo` takes the repository root as the
+parent of the directory of the true name (symlinks resolved) of
+`projdex-build.el` itself (of its `.el` when loaded from a `.elc`), or of
+`projdex.el` on `load-path` when that fails. Its own location comes first,
+so another `projdex.el` on `load-path` cannot redirect a build; `projdex-build--repo` additionally requires `Cargo.toml` there
+and otherwise signals a `user-error` that points to the manual
+installation. Both entry points run `cargo build --release --target-dir <repo>/target`
+(`projdex-build-cargo-program`) in the repository, with output in
+`*projdex-build*`, and install `target/release/libprojdex.so`
+(`.dylib` on macOS, `projdex.dll` on Windows) by copying it to a temporary
+file in `lisp/` and renaming that over `lisp/projdex-module` plus
+`module-file-suffix`. The rename replaces the directory entry, so an Emacs
+that has the old module loaded keeps a valid mapping; it needs a restart to
+use the new one.
+
+- `projdex-build-module` is the interactive, asynchronous command (a
+  `compilation-mode` buffer). It reports "projdex module built", with
+  "restart Emacs to use it" when a projdex module is already loaded. The
+  install runs from `compilation-finish-functions` for `*projdex-build*`,
+  so `recompile` (`g`) installs too; a second build while one runs is a
+  `user-error`.
+- `projdex-build-module-sync` waits and never signals; any failure becomes
+  a `display-warning` that names `M-x projdex-build-module`; in batch
+  (`doom sync`) the warning carries the tail of cargo's output, since the
+  buffer dies with the process. A straight
+  `:pre-build` form loads `projdex-build.el` and calls it, so `doom sync`
+  completes without a Rust toolchain.
+
+`projdex--start` loads the module with `emrs-load-module` from
+`projdex--module-file` (the file in `lisp/` when it exists), and otherwise
+by name from `load-path`, which keeps manual installations working. When
+loading fails with `file-missing`, an interactive Emacs with a repository
+is asked whether to build now (`y-or-n-p`); yes starts
+`projdex-build-module` and signals a `user-error` to run the command again
+when it is done. Otherwise the `user-error` names the expected file and
+`M-x projdex-build-module`.
 
 ### Instances
 

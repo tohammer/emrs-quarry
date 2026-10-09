@@ -14,6 +14,11 @@ if [ ! -f "$emrs_el/emrs.el" ]; then
 fi
 out="$root/target/elisp"
 mkdir -p "$out"
+# projdex prefers a module built next to its own projdex.el (lisp/, by
+# projdex-build-module).  Test copies of the Lisp files, so the debug
+# module below is the one under test.
+rm -f "$out"/*.el "$out"/*.elc
+cp lisp/*.el "$out/"
 for ext in so dylib dll; do
     for built in "target/debug/libprojdex.$ext" "target/debug/projdex.$ext"; do
         if [ -f "$built" ]; then
@@ -22,6 +27,6 @@ for ext in so dylib dll; do
     done
 done
 exec "${EMACS:-emacs}" --batch --module-assertions \
-    -L "$root/lisp" -L "$emrs_el" -L "$out" \
+    -L "$out" -L "$emrs_el" \
     -l "$root/tests/projdex-tests.el" \
     --eval "(ert-run-tests-batch-and-exit (or (getenv \"ERT_SELECTOR\") t))"

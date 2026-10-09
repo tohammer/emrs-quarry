@@ -1,6 +1,6 @@
 # Install from GitHub with a package recipe
 
-Status: approved
+Status: implemented
 Date: 2026-10-09
 
 ## Purpose
@@ -63,13 +63,17 @@ from a `:pre-build` form before projdex is built, and by `projdex.el`.
 
 - `projdex-build-cargo-program` (defcustom, default `"cargo"`).
 - `projdex-build--repo`: the repository root, the parent of the directory
-  of `(file-truename (locate-library "projdex.el" t))`; when that fails
-  (not on `load-path`), the parent of the directory of this file's own
-  true name. The root must contain `Cargo.toml`, otherwise a `user-error`:
+  of this file's own true name (for a `.elc`, of its `.el` sibling); when
+  that fails, of `(file-truename (locate-library "projdex.el" t))`. Own
+  location first, so another `projdex.el` on `load-path` (a stale manual
+  install, or straight's old build directory after switching
+  `:local-repo`) cannot redirect the build (v1 review of this spec). The root must contain `Cargo.toml`, otherwise a `user-error`:
   "projdex source not found (installed without its repository?); install
   the module by hand, see the README".
 - `projdex-build--module-file`: `<repo>/lisp/projdex-module` plus
   `module-file-suffix`.
+- cargo runs with `--target-dir <repo>/target`, so `CARGO_TARGET_DIR`
+  or a user's cargo config cannot move the output.
 - Library produced by cargo, per `system-type`: `libprojdex.so`
   (gnu/linux and other Unix), `libprojdex.dylib` (darwin), `projdex.dll`
   (windows-nt), under `<repo>/target/release/`.
@@ -170,7 +174,7 @@ when no Rust changed.
 |---|---|
 | No cargo during `doom sync` | Warning from `projdex-build-module-sync`; sync completes; first projdex command offers to build. |
 | Compile error during `doom sync` | Same, with the output in `*projdex-build*`. |
-| No cargo for the command | Message that cargo was not found (`projdex-build-cargo-program`). |
+| No cargo for the command | `user-error` that cargo was not found (`projdex-build-cargo-program`); a deviation from the planned message, since nothing has started yet. |
 | Installed without repository | `user-error` naming the manual installation. |
 | Module loaded, rebuilt | Built file replaces the old by rename; message to restart; emrs's stale warning as before. |
 | `emrs.el` older than the module's protocol | emrs's protocol error, "upgrade the emrs Elisp package" (ADR 0007). |
@@ -214,14 +218,14 @@ only), macOS and Windows.
 
 ## Tasks
 
-- [ ] 1. Build logic and module lookup. `lisp/projdex-build.el`
+- [x] 1. Build logic and module lookup. `lisp/projdex-build.el`
   (repository detection, sync and async build, install by rename),
   module lookup and missing-module offer in `projdex.el`, `.gitignore`,
   and the ERT tests listed under Testing. *Done when* those tests and the
   whole suite pass with `tests/run-ert.sh`, and `M-x projdex-build-module`
   in the checkout produces `lisp/projdex-module.so` that a fresh Emacs
   loads.
-- [ ] 2. Documentation. README: Requirements (Rust toolchain, git
+- [x] 2. Documentation. README: Requirements (Rust toolchain, git
   credentials), Installation with the Doom recipe first, then straight,
   elpaca, package-vc, and the manual installation as fallback; a
   Development section with the dev-mode recipe and table; Status line.
@@ -231,9 +235,22 @@ only), macOS and Windows.
   from GitHub", adjust "Distribution" to prebuilt binaries and archives.
   *Done when* every command and recipe in the README matches the code of
   task 1 and the doc-checker finds nothing stale.
-- [ ] 3. Developer's Doom config and manual checks. Switch
+- [x] 3. Developer's Doom config and manual checks. Switch
   `~/.doom.d/packages.el` to the recipes with the dev switch (emrs too),
   remove the `:load-path` to `target/emacs` from `config.el` and the
   `target/emacs` symlink, and run the manual checks under Testing with the
   user. *Done when* each manual check is confirmed or its failure is
   recorded and fixed.
+
+## Deviations and review changes
+
+- Repository detection starts from `projdex-build.el`'s own location, not
+  from `projdex.el` on `load-path` (Design, updated).
+- cargo runs with `--target-dir`; the install runs from
+  `compilation-finish-functions`, so `recompile` installs; a second
+  concurrent build is a `user-error`; in batch the warning carries the
+  tail of cargo's output.
+- `tests/run-ert.sh` tests copies of the Lisp files in `target/elisp`, so
+  a module built in `lisp/` does not replace the debug module under test.
+- Deferred to the backlog: replacing a loaded module on Windows; the build
+  question from non-command callers (with the consult source).
