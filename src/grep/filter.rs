@@ -1,0 +1,651 @@
+//! Filters of the grep service: pure logic, no I/O (spec `2026-10-10-grep.md`, section "Filters").
+//!
+//! A filter has a target (line or path), a direction (include or exclude), a pattern and a syntax (literal or
+//! regexp). [`Filters::compile`] turns the enabled filters, in the buffer's order, into matchers. All of them are
+//! `grep_regex::RegexMatcher`s, so the first include line filter (the *primary* filter) can be handed to the
+//! searcher as it is ([`Filters::primary`]).
+//!
+//! Line filters:
+//! - They are matched against the text of one line without its terminator. The matchers are built with
+//!   `line_terminator(Some(b'\n'))`, as ripgrep does for the pattern it scans with: a pattern that names `\n`
+//!   is rejected as an invalid filter, and classes such as `\s` or `[^a]` never match `\n`, so a match cannot
+//!   run across lines.
+//! - `^` and `$` mean the start and the end of the line (the matchers are in multi-line mode, as in ripgrep).
+//! - The search's [`Case`] applies to each of them. `Smart` is decided per filter by the matcher builder: the
+//!   filter is case-insensitive unless its own pattern has an uppercase letter (for a regexp, escapes such as
+//!   `\W` or `\S` do not count).
+//!
+//! Path filters:
+//! - They are matched against `/` followed by the path relative to the search directory, `/`-separated. So
+//!   `/test/` matches `test/a.c` and `src/test/a.c` but not `contest/a.c`, and `.rs` matches by extension.
+//! - `^` is the start of that text, i.e. the added `/`; `$` is its end. For a directory test the text is
+//!   `/` + the relative directory + `/`, so `$` is after the trailing `/`.
+//! - They always use smart case, whatever the search's case rule.
+//!
+//! A file is kept when its path matches every include path filter and no exclude path filter; a line when it
+//! matches every include line filter and no exclude line filter. An exclude path filter also decides whether a
+//! directory is entered ([`Filters::skip_dir`]); include path filters never do, since files below a directory
+//! may match when the directory itself does not.
+//!
+//! Highlight positions are character offsets (Unicode scalar values), not bytes; ends are exclusive.
+
+use grep_matcher::Matcher;
+use grep_regex::{RegexMatcher, RegexMatcherBuilder};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// What a filter is matched against.
+///
+/// Decoded from the bare keywords `:line` and `:path`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[allow(dead_code)] // the grep service is the coming user
+pub enum Target {
+    Line,
+    Path,
+}
+
+/// The case rule for line filters.
+///
+/// Decoded from the bare keywords `:smart`, `:sensitive` and `:insensitive`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[allow(dead_code)] // the grep service is the coming user
+pub enum Case {
+    /// Case-insensitive unless the filter's pattern contains an uppercase letter.
+    #[default]
+    Smart,
+    Sensitive,
+    Insensitive,
+}
+
+/// One enabled filter as Emacs sends it: `(:target :line :exclude nil :pattern "foo" :regexp t)`.
+///
+/// `:exclude` and `:regexp` may be left out (nil). `:target` and `:pattern` are required.
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // the grep service is the coming user
+pub struct FilterSpec {
+    pub target: Target,
+    #[serde(default)]
+    pub exclude: bool,
+    pub pattern: String,
+    /// True for a regexp, false for a literal string.
+    #[serde(default)]
+    pub regexp: bool,
+}
+
+/// A filter list that cannot be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // the grep service is the coming user
+pub struct FilterError {
+    /// 0-based index in the list given to [`Filters::compile`]; `None` for the list as a whole (no include
+    /// line filter).
+    pub index: Option<usize>,
+    /// For a filter: ``invalid filter `PATTERN`: ENGINE MESSAGE`` (the engine's message may span lines). For the
+    /// list: a sentence.
+    pub message: String,
+}
+
+impl fmt::Display for FilterError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.index {
+            Some(index) => write!(f, "filter {index}: {}", self.message),
+            None => f.write_str(&self.message),
+        }
+    }
+}
+
+/// A highlighted range of a line: character offsets, `end` exclusive.
+///
+/// Serializes as the plist `(:start 3 :end 5 :secondary nil)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[allow(dead_code)] // the grep service is the coming user
+pub struct Span {
+    pub start: u32,
+    pub end: u32,
+    /// True when the match comes from an include line filter other than the primary one.
+    pub secondary: bool,
+}
+
+/// The compiled filters of one search. Cheap to clone, shared by the search threads.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // the grep service is the coming user
+pub struct Filters {
+    primary: RegexMatcher,
+    /// Include line filters other than the primary one, in list order.
+    other_includes: Vec<RegexMatcher>,
+    exclude_lines: Vec<RegexMatcher>,
+    include_paths: Vec<RegexMatcher>,
+    exclude_paths: Vec<RegexMatcher>,
+}
+
+fn build(spec: &FilterSpec, line: bool, case: Case) -> Result<RegexMatcher, String> {
+    let mut builder = RegexMatcherBuilder::new();
+    builder.fixed_strings(!spec.regexp);
+    if line {
+        match case {
+            Case::Smart => builder.case_smart(true),
+            Case::Insensitive => builder.case_insensitive(true),
+            Case::Sensitive => &mut builder,
+        };
+        builder.multi_line(true).line_terminator(Some(b'\n'));
+    } else {
+        builder.case_smart(true);
+    }
+    builder.build(&spec.pattern).map_err(|e| format!("invalid filter `{}`: {e}", spec.pattern))
+}
+
+/// Byte ranges of the non-empty matches of `matcher` in `haystack`.
+fn find_all(matcher: &RegexMatcher, haystack: &[u8]) -> Vec<(usize, usize)> {
+    let mut found = Vec::new();
+    // The error type is `NoError`: the regex matcher cannot fail while searching.
+    let _ = matcher.find_iter(haystack, |m| {
+        if m.start() < m.end() {
+            found.push((m.start(), m.end()));
+        }
+        true
+    });
+    found
+}
+
+fn is_match(matcher: &RegexMatcher, haystack: &[u8]) -> bool {
+    matcher.is_match(haystack).unwrap_or(false)
+}
+
+/// Sorts and merges overlapping ranges (touching ranges stay separate).
+fn merge(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some(last) if start < last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+/// Maps byte offsets of `text` to character offsets. An offset inside a character maps to the next character
+/// boundary (matchers on UTF-8 text do not produce such offsets).
+struct CharOffsets {
+    /// `None` for ASCII text, where the two are the same.
+    table: Option<Vec<u32>>,
+}
+
+impl CharOffsets {
+    fn new(text: &str) -> CharOffsets {
+        if text.is_ascii() {
+            return CharOffsets { table: None };
+        }
+        let mut table = Vec::with_capacity(text.len() + 1);
+        let mut chars = 0u32;
+        for c in text.chars() {
+            // The first byte of a character is its offset; the following bytes round up to the next one.
+            table.push(chars);
+            chars += 1;
+            for _ in 1..c.len_utf8() {
+                table.push(chars);
+            }
+        }
+        table.push(chars);
+        CharOffsets { table: Some(table) }
+    }
+
+    fn at(&self, byte: usize) -> u32 {
+        match &self.table {
+            None => byte as u32,
+            Some(table) => table[byte],
+        }
+    }
+}
+
+#[allow(dead_code)] // the grep service is the coming user
+impl Filters {
+    /// Compiles the enabled filters, in the buffer's order, for the case rule of the search.
+    ///
+    /// Errors: an empty pattern or an invalid pattern (`index` is its position in `specs`; the first one in the
+    /// list is reported); no include line filter (`index` is `None`).
+    pub fn compile(specs: &[FilterSpec], case: Case) -> Result<Filters, FilterError> {
+        let mut primary = None;
+        let mut other_includes = Vec::new();
+        let mut exclude_lines = Vec::new();
+        let mut include_paths = Vec::new();
+        let mut exclude_paths = Vec::new();
+        for (index, spec) in specs.iter().enumerate() {
+            let error = |message: String| FilterError { index: Some(index), message };
+            if spec.pattern.is_empty() {
+                return Err(error("invalid filter: the pattern is empty".to_string()));
+            }
+            let matcher = build(spec, spec.target == Target::Line, case).map_err(error)?;
+            match (spec.target, spec.exclude) {
+                (Target::Line, false) if primary.is_none() => primary = Some(matcher),
+                (Target::Line, false) => other_includes.push(matcher),
+                (Target::Line, true) => exclude_lines.push(matcher),
+                (Target::Path, false) => include_paths.push(matcher),
+                (Target::Path, true) => exclude_paths.push(matcher),
+            }
+        }
+        let Some(primary) = primary else {
+            return Err(FilterError { index: None, message: "a search needs an include line filter".to_string() });
+        };
+        Ok(Filters { primary, other_includes, exclude_lines, include_paths, exclude_paths })
+    }
+
+    /// The matcher the searcher scans files with: the first include line filter.
+    pub fn primary(&self) -> &RegexMatcher {
+        &self.primary
+    }
+
+    /// Whether a file is kept: its path matches every include path filter and no exclude path filter.
+    /// `rel` is relative to the search directory, `/`-separated, without a leading slash.
+    pub fn keep_file(&self, rel: &str) -> bool {
+        let haystack = format!("/{rel}");
+        let haystack = haystack.as_bytes();
+        self.include_paths.iter().all(|m| is_match(m, haystack))
+            && !self.exclude_paths.iter().any(|m| is_match(m, haystack))
+    }
+
+    /// Whether a directory is not entered: an exclude path filter matches `/` + `rel_dir` + `/`. Include path
+    /// filters never skip a directory. `rel_dir` is relative, `/`-separated, without slashes at either end.
+    pub fn skip_dir(&self, rel_dir: &str) -> bool {
+        if self.exclude_paths.is_empty() {
+            return false;
+        }
+        let haystack = format!("/{rel_dir}/");
+        self.exclude_paths.iter().any(|m| is_match(m, haystack.as_bytes()))
+    }
+
+    /// Character ranges of `rel` (without the added leading `/`) matched by include path filters: sorted,
+    /// non-overlapping, overlapping matches merged. A match that starts on the added `/` is clipped to start at
+    /// 0; one that covers only that `/` yields nothing.
+    pub fn path_spans(&self, rel: &str) -> Vec<(u32, u32)> {
+        if self.include_paths.is_empty() {
+            return Vec::new();
+        }
+        let haystack = format!("/{rel}");
+        let mut ranges = Vec::new();
+        for matcher in &self.include_paths {
+            for (start, end) in find_all(matcher, haystack.as_bytes()) {
+                if end > 1 {
+                    ranges.push((start.saturating_sub(1), end - 1));
+                }
+            }
+        }
+        let offsets = CharOffsets::new(rel);
+        merge(ranges).into_iter().map(|(s, e)| (offsets.at(s), offsets.at(e))).collect()
+    }
+
+    /// For a line the primary filter matched: whether the other include line filters match it and no exclude
+    /// line filter does. `line` is the line without its terminator; it need not be valid UTF-8.
+    pub fn keep_line(&self, line: &[u8]) -> bool {
+        self.other_includes.iter().all(|m| is_match(m, line)) && !self.exclude_lines.iter().any(|m| is_match(m, line))
+    }
+
+    /// Highlight positions in `text`, the line as it will be shown (without terminator): all non-empty matches
+    /// of the primary filter and of the other include line filters, as character ranges sorted by start and not
+    /// overlapping. Primary matches are reported as they are. Secondary matches are merged where they overlap
+    /// each other, then clipped to the parts outside primary matches; empty remainders are dropped.
+    pub fn line_spans(&self, text: &str) -> Vec<Span> {
+        let bytes = text.as_bytes();
+        let primary = find_all(&self.primary, bytes);
+        let mut secondary = Vec::new();
+        for matcher in &self.other_includes {
+            secondary.extend(find_all(matcher, bytes));
+        }
+        let mut pieces: Vec<(usize, usize, bool)> = primary.iter().map(|&(s, e)| (s, e, false)).collect();
+        for (start, end) in merge(secondary) {
+            let mut from = start;
+            // `primary` is sorted and non-overlapping.
+            for &(ps, pe) in primary.iter().filter(|&&(ps, pe)| ps < end && pe > start) {
+                if ps > from {
+                    pieces.push((from, ps, true));
+                }
+                from = from.max(pe);
+            }
+            if from < end {
+                pieces.push((from, end, true));
+            }
+        }
+        pieces.sort_unstable();
+        let offsets = CharOffsets::new(text);
+        pieces
+            .into_iter()
+            .map(|(s, e, secondary)| Span { start: offsets.at(s), end: offsets.at(e), secondary })
+            .filter(|span| span.start < span.end)
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(target: Target, exclude: bool, pattern: &str, regexp: bool) -> FilterSpec {
+        FilterSpec { target, exclude, pattern: pattern.to_string(), regexp }
+    }
+    fn line(pattern: &str, regexp: bool) -> FilterSpec {
+        spec(Target::Line, false, pattern, regexp)
+    }
+    fn not_line(pattern: &str, regexp: bool) -> FilterSpec {
+        spec(Target::Line, true, pattern, regexp)
+    }
+    fn path(pattern: &str, regexp: bool) -> FilterSpec {
+        spec(Target::Path, false, pattern, regexp)
+    }
+    fn not_path(pattern: &str, regexp: bool) -> FilterSpec {
+        spec(Target::Path, true, pattern, regexp)
+    }
+    fn compile(specs: &[FilterSpec]) -> Filters {
+        Filters::compile(specs, Case::Smart).unwrap()
+    }
+    fn primary_matches(f: &Filters, text: &str) -> bool {
+        is_match(f.primary(), text.as_bytes())
+    }
+    fn sp(start: u32, end: u32, secondary: bool) -> Span {
+        Span { start, end, secondary }
+    }
+
+    #[test]
+    fn filters_are_send_sync_clone() {
+        fn assert_traits<T: Send + Sync + Clone>() {}
+        assert_traits::<Filters>();
+    }
+
+    #[test]
+    fn literal_matches_metacharacters_literally() {
+        for pattern in [".", "(", "a*", "\\d", "[x]", "a.c"] {
+            let f = compile(&[line(pattern, false)]);
+            assert!(primary_matches(&f, &format!("x {pattern} y")), "{pattern}");
+        }
+        let f = compile(&[line("a.c", false)]);
+        assert!(!primary_matches(&f, "abc"));
+        let f = compile(&[line("a.c", true)]);
+        assert!(primary_matches(&f, "abc"));
+        let f = compile(&[line("fn \\w+\\(", true)]);
+        assert!(primary_matches(&f, "fn foo(x)"));
+        assert!(!primary_matches(&f, "fn (x)"));
+    }
+
+    #[test]
+    fn case_rules_for_line_filters() {
+        let check = |case, pattern: &str, regexp, text: &str| {
+            let f = Filters::compile(&[line(pattern, regexp)], case).unwrap();
+            primary_matches(&f, text)
+        };
+        for regexp in [false, true] {
+            assert!(check(Case::Smart, "foo", regexp, "a FOO b"));
+            assert!(!check(Case::Smart, "Foo", regexp, "a foo b"));
+            assert!(check(Case::Smart, "Foo", regexp, "a Foo b"));
+            assert!(!check(Case::Sensitive, "foo", regexp, "FOO"));
+            assert!(check(Case::Sensitive, "foo", regexp, "foo"));
+            assert!(check(Case::Insensitive, "Foo", regexp, "fOO"));
+        }
+        // `\W` and `\S` are not uppercase letters.
+        assert!(check(Case::Smart, "\\Wfoo", true, "-FOO"));
+        assert!(check(Case::Smart, "a\\Sb", true, "A-B"));
+        assert!(!check(Case::Smart, "A\\Sb", true, "a-b"));
+    }
+
+    #[test]
+    fn smart_case_is_decided_per_filter() {
+        let f = compile(&[line("foo", false), line("Bar", false), line("baz", true)]);
+        // `foo` is insensitive, `Bar` sensitive, `baz` insensitive.
+        assert!(primary_matches(&f, "FOO"));
+        assert!(f.keep_line(b"Bar BAZ"));
+        assert!(!f.keep_line(b"bar BAZ"));
+    }
+
+    #[test]
+    fn path_filters_are_always_smart() {
+        for case in [Case::Smart, Case::Sensitive, Case::Insensitive] {
+            let f = Filters::compile(&[line("x", false), path("readme", false)], case).unwrap();
+            assert!(f.keep_file("README.md"), "{case:?}");
+            let f = Filters::compile(&[line("x", false), path("README", false)], case).unwrap();
+            assert!(f.keep_file("README.md"), "{case:?}");
+            assert!(!f.keep_file("readme.md"), "{case:?}");
+        }
+    }
+
+    #[test]
+    fn leading_slash_rule() {
+        let f = compile(&[line("x", false), path("/test/", false)]);
+        assert!(f.keep_file("test/a.c"));
+        assert!(f.keep_file("src/test/a.c"));
+        assert!(!f.keep_file("contest/a.c"));
+        assert!(!f.keep_file("a.c"));
+        let f = compile(&[line("x", false), path("^/src/", true)]);
+        assert!(f.keep_file("src/a.c"));
+        assert!(!f.keep_file("lib/src/a.c"));
+    }
+
+    #[test]
+    fn extension_patterns() {
+        let f = compile(&[line("x", false), path(".rs", false)]);
+        assert!(f.keep_file("src/a.rs"));
+        assert!(!f.keep_file("src/a.c"));
+        // A literal `.rs` also matches inside a name; the regexp form with an anchor does not.
+        assert!(f.keep_file("src/a.rsx"));
+        let f = compile(&[line("x", false), path("\\.rs$", true)]);
+        assert!(f.keep_file("src/a.rs"));
+        assert!(!f.keep_file("src/a.rsx"));
+        assert!(!f.keep_file("src/ars"));
+    }
+
+    #[test]
+    fn include_and_exclude_paths() {
+        let f = compile(&[line("x", false), path("src/", false), path(".rs", false), not_path("/gen/", false)]);
+        assert!(f.keep_file("src/a.rs"));
+        assert!(!f.keep_file("src/a.c"));
+        assert!(!f.keep_file("lib/a.rs"));
+        assert!(!f.keep_file("src/gen/a.rs"));
+        // Only excludes keep everything else.
+        let f = compile(&[line("x", false), not_path("/test/", false)]);
+        assert!(f.keep_file("src/a.c"));
+        assert!(!f.keep_file("test/a.c"));
+        // No path filters keep every file.
+        assert!(compile(&[line("x", false)]).keep_file("anything"));
+    }
+
+    #[test]
+    fn include_and_exclude_lines() {
+        let f = compile(&[line("foo", false), line("bar", false), not_line("baz", false)]);
+        assert!(f.keep_line(b"foo bar"));
+        assert!(!f.keep_line(b"foo"));
+        assert!(!f.keep_line(b"foo bar baz"));
+        // Only an exclude besides the primary.
+        let f = compile(&[line("foo", false), not_line("^\\s*//", true)]);
+        assert!(f.keep_line(b"foo()"));
+        assert!(!f.keep_line(b"   // foo"));
+        // Mixed with path filters, which do not affect lines.
+        let f = compile(&[path("a", false), not_path("b", false), line("foo", false)]);
+        assert!(f.keep_line(b"foo"));
+    }
+
+    #[test]
+    fn anchors_are_line_anchors() {
+        let f = compile(&[line("^foo$", true)]);
+        assert!(primary_matches(&f, "foo"));
+        assert!(!primary_matches(&f, "foo bar"));
+        assert!(!primary_matches(&f, " foo"));
+        let f = compile(&[line("x", false), line("^bar", true)]);
+        assert!(f.keep_line(b"bar x"));
+        assert!(!f.keep_line(b"x bar"));
+    }
+
+    #[test]
+    fn line_matchers_do_not_cross_a_line_terminator() {
+        // A pattern that names the terminator is refused...
+        let err = Filters::compile(&[line("a\\nb", true)], Case::Smart).unwrap_err();
+        assert_eq!(err.index, Some(0));
+        // ...and `\s` does not match it.
+        let f = compile(&[line("a\\s+b", true)]);
+        assert!(!is_match(f.primary(), b"a\nb"));
+        assert!(primary_matches(&f, "a  b"));
+    }
+
+    #[test]
+    fn primary_is_the_first_include_line_filter() {
+        let f = compile(&[path("src", false), not_line("zzz", false), line("beta", false), line("alpha", false)]);
+        assert!(primary_matches(&f, "beta"));
+        assert!(!primary_matches(&f, "alpha"));
+        assert!(f.keep_line(b"alpha"));
+        assert!(!f.keep_line(b"beta"));
+        assert_eq!(f.line_spans("alpha beta"), vec![sp(0, 5, true), sp(6, 10, false)]);
+    }
+
+    #[test]
+    fn skip_dir_follows_exclude_path_filters_only() {
+        let f = compile(&[line("x", false), not_path("/test/", false), not_path("^/vendor/", true)]);
+        assert!(f.skip_dir("test"));
+        assert!(f.skip_dir("src/test"));
+        assert!(!f.skip_dir("contest"));
+        assert!(!f.skip_dir("src"));
+        assert!(f.skip_dir("vendor"));
+        assert!(!f.skip_dir("src/vendor"));
+        // Include path filters never skip a directory.
+        let f = compile(&[line("x", false), path(".rs", false), path("/test/", false)]);
+        assert!(!f.skip_dir("src"));
+        assert!(!f.skip_dir("other"));
+        // For a directory `$` is after the trailing slash.
+        let f = compile(&[line("x", false), not_path("/old/$", true)]);
+        assert!(f.skip_dir("a/old"));
+        assert!(!f.skip_dir("a/old/b"));
+    }
+
+    #[test]
+    fn errors() {
+        let err = Filters::compile(&[path("a", false), not_line("b", false)], Case::Smart).unwrap_err();
+        assert_eq!(err.index, None);
+        let err = Filters::compile(&[], Case::Smart).unwrap_err();
+        assert_eq!(err.index, None);
+
+        let err = Filters::compile(&[line("a", false), line("", false)], Case::Smart).unwrap_err();
+        assert_eq!(err.index, Some(1));
+        let err = Filters::compile(&[path("", true), line("a", false)], Case::Smart).unwrap_err();
+        assert_eq!(err.index, Some(0));
+
+        let err = Filters::compile(&[line("ok", false), line("foo(", true)], Case::Smart).unwrap_err();
+        assert_eq!(err.index, Some(1));
+        assert!(err.message.contains("`foo(`"), "{}", err.message);
+        assert!(err.message.contains("unclosed group"), "{}", err.message);
+        assert!(err.to_string().starts_with("filter 1: "));
+
+        let err = Filters::compile(&[line("ok", false), not_path("a)", true)], Case::Smart).unwrap_err();
+        assert_eq!(err.index, Some(1));
+        assert!(err.message.contains("`a)`"), "{}", err.message);
+
+        // The same text as a literal is fine.
+        assert!(Filters::compile(&[line("foo(", false)], Case::Smart).is_ok());
+    }
+
+    #[test]
+    fn line_spans_primary_and_secondary() {
+        let f = compile(&[line("foo", false), line("bar", false)]);
+        assert_eq!(f.line_spans("bar foo"), vec![sp(0, 3, true), sp(4, 7, false)]);
+        // Several matches of each.
+        assert_eq!(
+            f.line_spans("foo bar foo bar"),
+            vec![sp(0, 3, false), sp(4, 7, true), sp(8, 11, false), sp(12, 15, true)]
+        );
+        // Exclude filters and path filters add nothing.
+        let f = compile(&[line("foo", false), not_line("bar", false), path("foo", false)]);
+        assert_eq!(f.line_spans("foo bar"), vec![sp(0, 3, false)]);
+        assert!(f.line_spans("nothing").is_empty());
+    }
+
+    #[test]
+    fn line_spans_clip_secondary_to_outside_the_primary() {
+        // Secondary `abcdef` overlapped by primary `cd` in the middle: two remainders.
+        let f = compile(&[line("cd", false), line("abcdef", false)]);
+        assert_eq!(f.line_spans("abcdef"), vec![sp(0, 2, true), sp(2, 4, false), sp(4, 6, true)]);
+        // Secondary inside the primary vanishes.
+        let f = compile(&[line("abcdef", false), line("cd", false)]);
+        assert_eq!(f.line_spans("abcdef"), vec![sp(0, 6, false)]);
+        // Partial overlap on one side.
+        let f = compile(&[line("cdef", false), line("abcd", false)]);
+        assert_eq!(f.line_spans("abcdef"), vec![sp(0, 2, true), sp(2, 6, false)]);
+        // Identical matches: only the primary one.
+        let f = compile(&[line("foo", false), line("foo", true)]);
+        assert_eq!(f.line_spans("foo"), vec![sp(0, 3, false)]);
+    }
+
+    #[test]
+    fn line_spans_merge_overlapping_secondary() {
+        let f = compile(&[line("zz", false), line("abc", false), line("bcd", false)]);
+        assert_eq!(f.line_spans("abcd zz"), vec![sp(0, 4, true), sp(5, 7, false)]);
+        // A merged secondary range is clipped around a primary match inside it.
+        let f = compile(&[line("c", false), line("abc", false), line("bcd", false)]);
+        assert_eq!(f.line_spans("abcd"), vec![sp(0, 2, true), sp(2, 3, false), sp(3, 4, true)]);
+    }
+
+    #[test]
+    fn line_spans_empty_matches_are_dropped() {
+        let f = compile(&[line("a", false), line("x*", true)]);
+        assert_eq!(f.line_spans("bab"), vec![sp(1, 2, false)]);
+    }
+
+    #[test]
+    fn line_spans_use_character_offsets() {
+        let f = compile(&[line("foo", false)]);
+        assert_eq!(f.line_spans("ä foo"), vec![sp(2, 5, false)]);
+        assert_eq!(f.line_spans("→ä foo → foo"), vec![sp(3, 6, false), sp(9, 12, false)]);
+        let f = compile(&[line("ö", false), line("→", false)]);
+        assert_eq!(f.line_spans("ä→ö"), vec![sp(1, 2, true), sp(2, 3, false)]);
+        // A four-byte character.
+        let f = compile(&[line("x", false)]);
+        assert_eq!(f.line_spans("😀x"), vec![sp(1, 2, false)]);
+        // Case-insensitive match of a non-ASCII letter.
+        let f = compile(&[line("ÄB", false)]);
+        assert!(f.line_spans("xäb").is_empty());
+        let f = compile(&[line("äb", false)]);
+        assert_eq!(f.line_spans("xÄB"), vec![sp(1, 3, false)]);
+    }
+
+    #[test]
+    fn path_spans_are_relative_to_the_path() {
+        let f = compile(&[line("x", false), path(".rs", false)]);
+        assert_eq!(f.path_spans("src/a.rs"), vec![(5, 8)]);
+        let f = compile(&[line("x", false), path("src", false)]);
+        assert_eq!(f.path_spans("src/src.rs"), vec![(0, 3), (4, 7)]);
+        // Exclude path filters and an absent match give nothing.
+        let f = compile(&[line("x", false), not_path("src", false)]);
+        assert!(f.path_spans("src/a.rs").is_empty());
+        assert!(compile(&[line("x", false), path("zzz", false)]).path_spans("a.rs").is_empty());
+        assert!(compile(&[line("x", false)]).path_spans("a.rs").is_empty());
+    }
+
+    #[test]
+    fn path_spans_clip_the_added_slash() {
+        let f = compile(&[line("x", false), path("/src", false)]);
+        assert_eq!(f.path_spans("src/a.rs"), vec![(0, 3)]);
+        // A match that covers only the added slash yields nothing.
+        let f = compile(&[line("x", false), path("^/", true)]);
+        assert!(f.path_spans("src/a.rs").is_empty());
+        let f = compile(&[line("x", false), path("/", false)]);
+        assert_eq!(f.path_spans("a/b"), vec![(1, 2)]);
+    }
+
+    #[test]
+    fn path_spans_merge_and_count_characters() {
+        let f = compile(&[line("x", false), path("src/a", false), path("a.r", false)]);
+        assert_eq!(f.path_spans("src/a.rs"), vec![(0, 7)]);
+        let f = compile(&[line("x", false), path("ü", false), path("é/", false)]);
+        assert_eq!(f.path_spans("aü/é/b"), vec![(1, 2), (3, 5)]);
+        assert_eq!(f.path_spans("日本/ü.rs"), vec![(3, 4)]);
+    }
+
+    #[test]
+    fn keep_line_accepts_invalid_utf8() {
+        let f = compile(&[line("foo", false), line("bar", false), not_line("baz", false)]);
+        assert!(f.keep_line(b"foo \xff\xfe bar"));
+        assert!(!f.keep_line(b"foo \xff baz bar"));
+        assert!(!f.keep_line(b"\xff"));
+    }
+
+    #[test]
+    fn spec_and_span_shapes() {
+        // Decoding is covered by emrs; here only the derive defaults.
+        let s = spec(Target::Line, false, "a", false);
+        assert_eq!(s.target, Target::Line);
+        assert_eq!(Case::default(), Case::Smart);
+        assert_eq!(sp(1, 2, true), Span { start: 1, end: 2, secondary: true });
+    }
+}

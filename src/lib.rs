@@ -7,6 +7,7 @@
 //! replies and events are documented in `src/service.rs` and in the version 1
 //! spec in `docs/specs/`.
 
+mod grep;
 mod index;
 mod matcher;
 mod service;
