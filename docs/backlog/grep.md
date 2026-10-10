@@ -44,7 +44,7 @@ at all. Origin: grep spec, Testing section, and its review
 (2026-10-10). Do these once quarry-grep is in daily use; turn what
 fails into backlog items or fixes.
 
-## Wgrep on other line ends and encodings, and on huge results
+## wgrep on other line ends and encodings, and on huge results
 
 Editing through wgrep was tested on UTF-8 files with `\n` line ends.
 Not tested: files with `\r\n` line ends (quarry shows the line without
