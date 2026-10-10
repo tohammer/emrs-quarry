@@ -8,7 +8,8 @@
 //! and the output.
 //!
 //! **What is searched.** The walker of `src/walk.rs` with an entry filter built from the path filters: a
-//! directory is entered unless [`Filters::skip_dir`], a file is kept when [`Filters::keep_file`]. Only regular
+//! directory is entered unless [`Filters::skip_dir`] (literal exclude path filters only), a file is kept when
+//! [`Filters::keep_file`]. Only regular
 //! files are opened. Symbolic links are left out altogether, also those to files, as `rg` does (the index lists
 //! links to files): a file reached through a link would be found twice, and an edit of the results would
 //! reach it by two paths. A link is not counted as searched or skipped. A file in which the searcher meets a NUL byte is binary and
@@ -19,8 +20,9 @@
 //!
 //! **Lines.** For every line the primary filter matches, the terminator (`\n` and a `\r` before it) is removed
 //! and [`Filters::keep_line`] decides on the whole line. The text that is sent is the line as UTF-8, converted
-//! lossily when it is not valid, and cut after `max_columns` characters; either sets `inexact`. The match
-//! positions are computed on the text that is sent, so a match beyond the cut is not reported.
+//! lossily when it is not valid, and cut after `max_columns` characters; either sets `inexact`. The matches are
+//! found on the whole line ([`Filters::line_spans`]) and reported as positions in the text that is sent: a
+//! match that crosses the cut ends at the cut, one beyond it is not reported.
 //!
 //! **Cap.** A counter shared by all threads holds the lines of the finished files. A thread collects the lines of
 //! its file privately and stops reading the file when they and the counter together reach `max_lines`. When
@@ -169,6 +171,10 @@ pub trait Output: Sync {
     fn send(&self, item: Item) -> bool;
     /// The search is no longer wanted.
     fn is_cancelled(&self) -> bool;
+    /// The clock the sort budget is measured with. Tests replace it to decide when the budget is used up.
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
 }
 
 /// A search that is ready to run: everything that can be wrong with the request has been checked.
@@ -204,7 +210,7 @@ impl Search {
             out,
             max_lines: config.max_lines,
             max_columns: config.max_columns,
-            deadline: config.started + config.sort_budget,
+            deadline: config.started.checked_add(config.sort_budget),
             lines: AtomicUsize::new(0),
             files_searched: AtomicUsize::new(0),
             files_matched: AtomicUsize::new(0),
@@ -262,7 +268,8 @@ struct Shared<'a> {
     max_lines: usize,
     max_columns: usize,
     /// Until then file items are collected in `pending`.
-    deadline: Instant,
+    /// `None`: never (the budget is beyond what the clock can express).
+    deadline: Option<Instant>,
     /// Lines of the finished files; never more than `max_lines`.
     lines: AtomicUsize,
     files_searched: AtomicUsize,
@@ -337,9 +344,14 @@ impl Shared<'_> {
         true
     }
 
+    /// Whether the sort budget is used up.
+    fn due(&self) -> bool {
+        self.deadline.is_some_and(|deadline| self.out.now() >= deadline)
+    }
+
     /// Called at every walk entry: sends the collected items once the sort budget is used up.
     fn flush_if_due(&self) {
-        if !self.streaming.load(Ordering::Relaxed) && Instant::now() >= self.deadline {
+        if !self.streaming.load(Ordering::Relaxed) && self.due() {
             self.flush(&mut self.pending());
         }
     }
@@ -350,7 +362,7 @@ impl Shared<'_> {
         match pending.as_mut() {
             Some(items) => {
                 items.push(item);
-                if Instant::now() >= self.deadline {
+                if self.due() {
                     self.flush(&mut pending);
                 }
             }
@@ -460,11 +472,13 @@ impl Sink for LineSink<'_> {
             self.full = true;
             return Ok(false);
         }
-        let (text, inexact) = line_text(bytes, shared.max_columns);
+        let (whole, shown, inexact) = line_text(bytes, shared.max_columns);
         let (mut spans, mut secondary) = (Vec::new(), Vec::new());
-        for Span { start, end, secondary: other } in self.filters.line_spans(&text) {
+        // On the whole line, so that a pattern sees what follows the cut; reported for the part that is sent.
+        for Span { start, end, secondary: other } in self.filters.line_spans(&whole, shown) {
             if other { &mut secondary } else { &mut spans }.push((start, end));
         }
+        let text = whole[..shown].to_string();
         self.lines.push(Line { n: found.line_number().unwrap_or(0), text, spans, secondary, inexact });
         Ok(shared.has_room(self.lines.len()))
     }
@@ -480,28 +494,26 @@ impl Sink for LineSink<'_> {
     }
 }
 
-/// `line` without a final `\n` and a `\r` before it.
+/// `line` without its terminator: a final `\n`, and a `\r` before that `\n`. A `\r` at the end of a file's last
+/// line, with no `\n` after it, is part of the line.
 fn strip_terminator(line: &[u8]) -> &[u8] {
-    let line = line.strip_suffix(b"\n").unwrap_or(line);
-    line.strip_suffix(b"\r").unwrap_or(line)
+    match line.strip_suffix(b"\n") {
+        Some(line) => line.strip_suffix(b"\r").unwrap_or(line),
+        None => line,
+    }
 }
 
-/// The text to send for a line, and whether it differs from the line: invalid UTF-8 is replaced, and the text is
-/// cut after `max_columns` characters.
-fn line_text(line: &[u8], max_columns: usize) -> (String, bool) {
-    let (text, mut inexact) = match std::str::from_utf8(line) {
+/// The text of a line: the whole line as UTF-8 (invalid bytes replaced), how many bytes of it are sent (the
+/// first `max_columns` characters), and whether what is sent differs from the file's line.
+fn line_text(line: &[u8], max_columns: usize) -> (Cow<'_, str>, usize, bool) {
+    let (whole, replaced) = match std::str::from_utf8(line) {
         Ok(text) => (Cow::Borrowed(text), false),
         Err(_) => (String::from_utf8_lossy(line), true),
     };
     // A text of at most `max_columns` bytes has at most that many characters.
-    let cut = if text.len() > max_columns { text.char_indices().nth(max_columns).map(|(at, _)| at) } else { None };
-    match cut {
-        Some(at) => {
-            inexact = true;
-            (text[..at].to_string(), inexact)
-        }
-        None => (text.into_owned(), inexact),
-    }
+    let cut = if whole.len() > max_columns { whole.char_indices().nth(max_columns).map(|(at, _)| at) } else { None };
+    let shown = cut.unwrap_or(whole.len());
+    (whole, shown, replaced || cut.is_some())
 }
 
 /// Milliseconds since the Unix epoch, rounded down (also for times before it).
@@ -570,17 +582,27 @@ mod tests {
         assert_eq!(strip_terminator(b"abc"), b"abc", "the last line of a file may have none");
         assert_eq!(strip_terminator(b"a\rb\r\r\n"), b"a\rb\r", "only one");
         assert_eq!(strip_terminator(b"\n"), b"");
+        assert_eq!(strip_terminator(b"abc\r"), b"abc\r", "a carriage return alone ends no line");
+        assert_eq!(strip_terminator(b"\r"), b"\r");
+        assert_eq!(strip_terminator(b""), b"");
     }
 
     #[test]
     fn line_text_cuts_by_characters() {
-        assert_eq!(line_text(b"abc", 3), ("abc".to_string(), false));
-        assert_eq!(line_text(b"abcd", 3), ("abc".to_string(), true));
-        assert_eq!(line_text("äöü".as_bytes(), 3), ("äöü".to_string(), false), "six bytes, three characters");
-        assert_eq!(line_text("äöüß".as_bytes(), 3), ("äöü".to_string(), true));
-        assert_eq!(line_text(b"a\xffb", 10), ("a\u{fffd}b".to_string(), true));
-        assert_eq!(line_text(b"abc", 0), (String::new(), true));
-        assert_eq!(line_text(b"", 0), (String::new(), false));
+        /// `(whole line, part that is sent, inexact)`.
+        fn text(line: &[u8], max_columns: usize) -> (String, String, bool) {
+            let (whole, shown, inexact) = line_text(line, max_columns);
+            (whole.to_string(), whole[..shown].to_string(), inexact)
+        }
+        let s = String::from;
+        assert_eq!(text(b"abc", 3), (s("abc"), s("abc"), false));
+        assert_eq!(text(b"abcd", 3), (s("abcd"), s("abc"), true));
+        assert_eq!(text("äöü".as_bytes(), 3), (s("äöü"), s("äöü"), false), "six bytes, three characters");
+        assert_eq!(text("äöüß".as_bytes(), 3), (s("äöüß"), s("äöü"), true));
+        assert_eq!(text(b"a\xffb", 10), (s("a\u{fffd}b"), s("a\u{fffd}b"), true));
+        assert_eq!(text(b"a\xffb", 1), (s("a\u{fffd}b"), s("a"), true));
+        assert_eq!(text(b"abc", 0), (s("abc"), s(""), true));
+        assert_eq!(text(b"", 0), (s(""), s(""), false));
     }
 
     #[test]
@@ -914,11 +936,15 @@ mod tests {
         assert_eq!((lines[2].text.chars().count(), lines[2].inexact), (20, false));
         assert_eq!(lines[2].spans, [(14, 20)]);
 
-        // The cut goes through the match: the line is still a result, without a position.
+        // The cut goes through the match: the position ends at the cut.
         let found = search(12);
         let lines = found.lines("a");
         assert_eq!(lines[0].text, format!("{}ne", "ä".repeat(10)));
-        assert!(lines[0].spans.is_empty() && lines[0].inexact);
+        assert_eq!((lines[0].spans.as_slice(), lines[0].inexact), (&[(10, 12)][..], true));
+        // The match lies beyond the cut: the line is still a result, without a position.
+        let found = search(10);
+        assert_eq!(found.lines("a")[0].text, "ä".repeat(10));
+        assert!(found.lines("a")[0].spans.is_empty() && found.lines("a")[0].inexact);
         assert_eq!((lines[1].text.as_str(), lines[1].inexact), ("short needle", false));
 
         assert!(search(500).lines("a").iter().all(|l| !l.inexact));
@@ -1032,6 +1058,222 @@ mod tests {
         // The UTF-8 mark is not part of the text.
         assert_eq!(found.texts("bom8.txt"), [(1, "needle first")]);
         assert_eq!(found.lines("bom8.txt")[0].spans, [(0, 6)]);
+    }
+
+    #[test]
+    fn positions_of_a_cut_line_come_from_the_whole_line() {
+        let t = tree(&[("a", "xxfoo yy foo\nab cd ef\nab cdef\näö foo ü foo\n")]);
+        let search = |pattern: &str, max_columns: usize| {
+            let mut q = Query::new(t.path(), vec![line_re(pattern)]);
+            q.max_columns = max_columns;
+            run(q)
+        };
+        // `$` is the end of the line, not of the text that is sent: the real match is at column 9.
+        let found = search("foo$", 5);
+        let l = &found.lines("a")[0];
+        assert_eq!((l.n, l.text.as_str(), l.spans.is_empty(), l.inexact), (1, "xxfoo", true, true));
+        // Non-ASCII text before the cut; the second match crosses it.
+        let l = &found.lines("a")[1];
+        assert_eq!((l.n, l.text.as_str(), l.inexact), (4, "äö fo", true));
+        assert!(l.spans.is_empty(), "`foo$` is the second foo, beyond the cut");
+        let found = search("foo", 9);
+        let l = &found.lines("a")[1];
+        assert_eq!((l.text.as_str(), l.spans.as_slice()), ("äö foo ü ", &[(3, 6)][..]));
+        let found = search("foo", 11);
+        let l = &found.lines("a")[1];
+        assert_eq!((l.text.as_str(), l.spans.as_slice()), ("äö foo ü fo", &[(3, 6), (9, 11)][..]));
+        // A greedy match up to the end of the line.
+        let found = search(r"\w+$", 5);
+        assert_eq!(found.texts("a"), [(1, "xxfoo"), (2, "ab cd"), (3, "ab cd"), (4, "äö fo")]);
+        let spans: Vec<&[(u32, u32)]> = found.lines("a").iter().map(|l| l.spans.as_slice()).collect();
+        assert_eq!(spans, [&[][..], &[][..], &[(3, 5)][..], &[][..]], "only the match that crosses the cut");
+    }
+
+    #[test]
+    fn a_carriage_return_at_the_end_of_the_file_is_text() {
+        let t = tree(&[("a", "first\r\none needle\r")]);
+        let found = find(t.path(), "needle");
+        assert_eq!(found.texts("a"), [(2, "one needle\r")]);
+        assert!(!found.lines("a")[0].inexact);
+        assert_eq!(found.lines("a")[0].spans, [(4, 10)]);
+    }
+
+    #[test]
+    fn regexp_exclude_path_filters_do_not_prune_directories() {
+        let t = tree(&[
+            ("src/a.rs", "needle\n"),
+            ("src/sub/b.rs", "needle\n"),
+            ("top", "needle\n"),
+            ("dir/x.y", "needle\n"),
+        ]);
+        let search = |pattern: &str| {
+            let exclude = FilterSpec { regexp: true, ..not_path(pattern) };
+            run(Query::new(t.path(), vec![line("needle"), exclude]))
+        };
+        // Files directly in `src`: the pattern matches `/src/`, but not the files further down.
+        assert_eq!(search("^/src/[^/]*$").paths(), ["dir/x.y", "src/sub/b.rs", "top"]);
+        // Paths without a dot: `/dir/` is one, `/dir/x.y` is not.
+        assert_eq!(search("^[^.]*$").paths(), ["dir/x.y", "src/a.rs", "src/sub/b.rs"]);
+        // No file path ends in a slash.
+        assert_eq!(search("/$").paths(), ["dir/x.y", "src/a.rs", "src/sub/b.rs", "top"]);
+        // What a regexp does exclude, it excludes file by file.
+        let found = search("^/src/");
+        assert_eq!(found.paths(), ["dir/x.y", "top"]);
+        assert_eq!(found.summary.files_searched, 2, "not opened");
+        // A literal still excludes, and prunes (`an_excluded_directory_is_not_entered`).
+        let found = run(Query::new(t.path(), vec![line("needle"), not_path("/src/")]));
+        assert_eq!(found.paths(), ["dir/x.y", "top"]);
+    }
+
+    /// An [`Output`] that records what it is sent, can refuse a send, and has a clock of its own: the time
+    /// stands still at `started` until `late_after` walk entries have been visited, then it is an hour later.
+    struct Mock {
+        started: Instant,
+        sent: Mutex<Vec<Item>>,
+        /// Calls of `send`, refused ones included.
+        sends: AtomicUsize,
+        /// The first send to refuse, counted from 0; that one and all later ones fail.
+        fail_at: usize,
+        entries: AtomicUsize,
+        late_after: usize,
+        late: AtomicBool,
+    }
+
+    impl Mock {
+        fn new(fail_at: usize, late_after: usize) -> Mock {
+            Mock {
+                started: Instant::now(),
+                sent: Mutex::new(Vec::new()),
+                sends: AtomicUsize::new(0),
+                fail_at,
+                entries: AtomicUsize::new(0),
+                late_after,
+                late: AtomicBool::new(false),
+            }
+        }
+
+        /// Searches `dir` for `needle` with `sort_budget` on the mock's clock; the result of [`Search::run`].
+        fn run(&self, dir: &Path, sort_budget: Duration) -> bool {
+            let filters = Filters::compile(&[line("needle")], Case::Smart).unwrap();
+            let config = Config {
+                dir: dir.to_path_buf(),
+                filters,
+                types: None,
+                use_ignore_files: true,
+                include_hidden: true,
+                ignores: Vec::new(),
+                max_lines: usize::MAX,
+                max_columns: 500,
+                sort_budget,
+                started: self.started,
+            };
+            Search::new(config).unwrap().run(self)
+        }
+
+        fn paths(&self) -> Vec<String> {
+            let sent = self.sent.lock().unwrap();
+            sent.iter()
+                .filter_map(|item| if let Item::File { path, .. } = item { Some(path.clone()) } else { None })
+                .collect()
+        }
+
+        fn summary(&self) -> Option<Item> {
+            self.sent.lock().unwrap().iter().find(|item| matches!(item, Item::Summary { .. })).cloned()
+        }
+    }
+
+    impl Output for Mock {
+        fn send(&self, item: Item) -> bool {
+            if self.sends.fetch_add(1, Ordering::SeqCst) >= self.fail_at {
+                return false;
+            }
+            self.sent.lock().unwrap().push(item);
+            true
+        }
+
+        fn is_cancelled(&self) -> bool {
+            // Asked once per walk entry, before the entry is looked at.
+            if self.entries.fetch_add(1, Ordering::SeqCst) + 1 >= self.late_after {
+                self.late.store(true, Ordering::SeqCst);
+            }
+            false
+        }
+
+        fn now(&self) -> Instant {
+            if self.late.load(Ordering::SeqCst) { self.started + Duration::from_secs(3600) } else { self.started }
+        }
+    }
+
+    fn threads() -> usize {
+        std::thread::available_parallelism().map_or(1, |n| n.get())
+    }
+
+    /// When the clock of [`Mock`] jumps for a tree of [`many`], so that at least `files` files were collected
+    /// before: of the entries visited until then, at most one per other thread is unfinished, and 17 are
+    /// directories.
+    fn late_after(files: usize) -> usize {
+        threads() + 17 + files
+    }
+
+    const SECOND: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn the_sort_budget_runs_out_during_the_walk() {
+        let t = many(400, 1);
+        let mock = Mock::new(usize::MAX, late_after(50));
+        assert!(mock.run(t.path(), SECOND));
+        let paths = mock.paths();
+        // Nothing lost, nothing twice.
+        let mut all = paths.clone();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!((paths.len(), all.len()), (400, 400));
+        // What was collected until then came first, sorted.
+        assert!(paths[..50].is_sorted(), "{:?}", &paths[..50]);
+        let sent = mock.sent.lock().unwrap();
+        assert_eq!(sent.len(), 401);
+        let Some(Item::Summary { files_matched, lines, sorted, truncated, .. }) = sent.last() else {
+            panic!("the last item is not a summary: {:?}", sent.last())
+        };
+        assert_eq!((*files_matched, *lines, *sorted, *truncated), (400, 400, false, false));
+    }
+
+    #[test]
+    fn a_search_within_the_budget_sends_everything_sorted_at_the_end() {
+        let t = many(400, 1);
+        let mock = Mock::new(usize::MAX, usize::MAX);
+        assert!(mock.run(t.path(), SECOND));
+        let paths = mock.paths();
+        assert_eq!(paths.len(), 400);
+        assert!(paths.is_sorted());
+        assert!(matches!(mock.summary(), Some(Item::Summary { sorted: true, files_matched: 400, .. })));
+        // A budget beyond what the clock can add up never runs out.
+        let mock = Mock::new(usize::MAX, 1);
+        assert!(mock.run(t.path(), Duration::MAX));
+        assert!(mock.paths().is_sorted());
+        assert!(matches!(mock.summary(), Some(Item::Summary { sorted: true, files_matched: 400, .. })));
+    }
+
+    #[test]
+    fn a_refused_send_ends_the_search_without_a_summary() {
+        let t = many(400, 1);
+        // While items are streamed as found (no budget)...
+        let streaming = Mock::new(10, usize::MAX);
+        assert!(!streaming.run(t.path(), Duration::ZERO));
+        // ...while the collected items are sent during the walk...
+        let mid_walk = Mock::new(10, late_after(50));
+        assert!(!mid_walk.run(t.path(), SECOND));
+        // ...and while they are sent after it.
+        let at_the_end = Mock::new(10, usize::MAX);
+        assert!(!at_the_end.run(t.path(), SECOND));
+        for (what, mock) in [("streaming", &streaming), ("mid-walk", &mid_walk), ("at the end", &at_the_end)] {
+            assert_eq!(mock.paths().len(), 10, "{what}");
+            assert!(mock.summary().is_none(), "{what}");
+            assert_eq!(mock.sends.load(Ordering::SeqCst), 11, "{what}: nothing is sent after the refusal");
+        }
+        assert!(mid_walk.paths().is_sorted() && at_the_end.paths().is_sorted());
+        // The walk was left early.
+        assert!(streaming.entries.load(Ordering::SeqCst) < 400);
     }
 
     /// `files` files in 16 directories, each with `lines` matching lines.

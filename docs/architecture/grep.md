@@ -43,18 +43,36 @@ of the index, with ignore files and hidden files switchable per search.
 Only regular files are searched. Symbolic links are not, neither to
 directories (the walker never follows them) nor to files (the index lists
 those; grep leaves them out as `rg` does, so that a file is found once,
-under its real path). The path filters are the walker's entry predicate:
-an exclude path filter that matches a directory keeps the walk out of it,
-and a file that the path filters drop is never opened. A file type or
-globs become an `ignore::types::Types` selection.
+under its real path). With hidden files switched off, no entry whose name
+starts with a dot is searched, also not one that the file type or the
+globs select.
+
+The path filters are the walker's entry predicate: a file that they drop
+is never opened, and a literal exclude path filter that occurs in a
+directory's path keeps the walk out of that directory, since it occurs in
+the path of every file below. A regexp exclude path filter does not prune:
+what matches a directory's path need not match the files below it
+(`^/src/[^/]*$`), so it is tested on each file. A file type or globs
+become an `ignore::types::Types` selection; globs match file names, not
+paths.
 
 Each file is searched for the primary filter (the first include line
 filter) by `grep-searcher`. Its `Sink` gets every matching line, removes
 the terminator, asks the other line filters (`Filters::keep_line`), and
 builds the line item: the text as UTF-8, cut at `max-columns` characters,
-and the match positions computed on that text. A file in which the
+and the match positions. The matches are found on the whole line, so that
+a pattern sees what follows the cut, and reported for the text that is
+sent: a match that crosses the cut ends there. (For a very long line the
+filters look 64 KiB beyond the cut, not further.) A file in which the
 searcher meets a NUL byte is binary and gives nothing; a byte order mark
 selects the encoding.
+
+The primary filter runs on buffers that hold many lines of a file, with
+the line terminators in place; the other line filters run on one line at
+a time, without its terminator. The matchers are built so that both
+decide alike for `^`, `$` and `\r\n` line ends. They do not for the text
+anchors `\A` and `\z` or with multi-line mode switched off (`(?-m)`):
+these are not supported in line filters; use `^` and `$`.
 
 ## Order
 
@@ -108,6 +126,14 @@ and `emrs-start`. Nothing starts it at load time. Its `:on-exit`
 (`quarry-grep--on-exit`) forgets the instance if it is still the current
 one. There is no restart: the next search starts a new instance.
 
+Emacs cannot unload a module, so updated Lisp can meet a loaded module
+from before the `grep` service existed. `emrs-start` then signals an
+`emrs-error` for the unknown service; `quarry-grep--ensure-instance`
+turns it into a `user-error` that says the module is older than
+quarry-grep and to rebuild it and restart Emacs. The service name is the
+variable `quarry-grep--service`, so a test can ask for one that does not
+exist.
+
 emrs fails the open calls of a dying instance before it runs `:on-exit`,
 with the message "The instance terminated". A search that ends that way
 remembers its instance (`quarry-grep--dead-instance`); when the exit is a
@@ -154,10 +180,23 @@ history lists.
 ### Streams and serial numbers
 
 `quarry-grep--run` is the one place a search starts. It ensures the
-instance first (so a missing module leaves the buffer untouched), cancels
-the running search, records history, resets the state, renders the filter
-block and the status line, makes the buffer `next-error-last-buffer`, and
-calls `emrs-call-stream`.
+instance first (so a missing module leaves the buffer and its history
+untouched), cancels the running search, records history, widens the
+buffer, resets the state, renders the filter block and the status line,
+makes the buffer `next-error-last-buffer`, and calls `emrs-call-stream`.
+The four commands check before their first prompt
+(`quarry-grep--check-result-buffer`) that the result buffer is not being
+edited with wgrep, and `quarry-grep--start` checks again before it
+touches the buffer.
+
+`clone-buffer` copies the local variables, so a clone would share the
+original's status marker (a marker into the original), its stream and
+its serial number: killing the clone would cancel the original's search.
+A buffer-local `clone-buffer-hook` (`quarry-grep--after-clone`) gives the
+clone a marker of its own at its status line and clears its call and
+serial. A search that was running goes on in the original; the clone
+shows what had arrived as a cancelled search. From then on the two are
+independent, each with its own copy of the history.
 
 The stream's callbacks run from a process filter, at any time and with
 any buffer current. Each search takes a number from a global counter and
@@ -187,7 +226,13 @@ behind it, so blocks appear in arrival order and the status line stays
 last. `quarry-grep--keeping-positions` wraps every insertion and every
 change of the status line: it records point and each window's point and
 start as numbers and puts them back, so nothing scrolls and point is not
-carried along when it stands at or after the insertion.
+carried along when it stands at or after the insertion. It also widens
+around the change and puts a narrowing back afterwards. Results arrive at
+any time, so every function that walks or changes the whole buffer does
+that (`quarry-grep--on-batch`, `quarry-grep--finish`,
+`quarry-grep--blocks`, `quarry-grep--stale-files`, folding all blocks,
+`quarry-grep--edit-restore`); the user's narrowing is theirs and stays. A
+new search and `e` widen for good.
 
 Commands read these properties and never the text (ADR 0012). The
 properties of a line cover its newline, so a line is identified at its
@@ -212,8 +257,10 @@ keywords. Filter lines, headings and result lines have `mouse-face` and
 `follow-link`, so `mouse-1` arrives as `mouse-2`, which the mode map binds.
 
 The header line is `(:eval (quarry-grep--header))`, a string built from
-the current search and the counts, so a `%` in a directory name is not
-taken as a format. Each clickable part carries a keymap from
+the current search and the counts. Emacs takes the string an `:eval`
+form returns as a mode line format again, so `quarry-grep--header-part`
+doubles each `%` in a value; otherwise a directory `100%b` would show the
+buffer name in its place. Each clickable part carries a keymap from
 `quarry-grep--header-map` that selects the clicked window and calls the
 part's command interactively, on `mouse-1` and on `mouse-2`.
 
@@ -256,9 +303,18 @@ whatever list results, and `r`, `t` and `K` use it.
   pattern and syntax is not added: an enabled one is a `user-error`, a
   disabled one is replaced by the enabled filter in its place.
 - The three commands that read the result at point take the path from
-  the `quarry-grep-file` property. `- f` uses `/` plus the path; `- d`
-  and `+ d` prefill the minibuffer with `/` plus the directory part and
-  refuse a file without one.
+  the `quarry-grep-file` property. `- d` and `+ d` prefill the
+  minibuffer with `/` plus the directory part and refuse a file without
+  one; the result is a literal filter that matches at any depth, which
+  the prompt ("containing") says and the user can edit.
+- `- f` must name one file. A literal path filter matches anywhere in a
+  path (`/a.c` also names `a.cpp` and `sub/a.c`), so
+  `quarry-grep--file-pattern` builds a regexp filter: `(?-i)^/`, the path
+  quoted by `quarry-grep--regexp-quote`, and `$`. The quoting escapes
+  every character that is special in the Rust `regex` crate
+  (`regexp-quote` is for Emacs regexps and leaves `(){}|` alone). `(?-i)`
+  keeps case apart although path filters use smart case. The pattern is
+  the same for the same file, so the duplicate rule still applies.
 - `k`, `x`, `!` and `%` replace or drop the filter object of the line at
   point (`quarry-grep-filter` property). `%` cannot break the primary
   rule and goes through `quarry-grep--replace-filter`.
@@ -281,10 +337,12 @@ erases the buffer.
   block, `quarry-grep--return-near` moves point to the first heading
   whose path sorts after the recorded one, else to the first heading.
   A cancelled or failed search leaves point alone.
-- Both steps act only while point is still where the search put it
-  (`quarry-grep--return-pending-p`); a user who moved point is left
-  alone, and the record is dropped. Once point is placed the record is
-  dropped too, so later batches follow the rule that results never move
+- Both steps act only where point is still at the position the search
+  put it (`quarry-grep--return-goto`), and that is decided separately
+  for the buffer's own point and for the point of each window that shows
+  the buffer. A window in which the user moved point or scrolled is left
+  alone, also when it is not the selected one. After the step the record
+  is dropped, so later batches follow the rule that results never move
   point.
 - The four commands move point to the start of the buffer first, which
   is the first filter line, so they start at the top.
@@ -310,8 +368,11 @@ is the mode's `next-error-function`; `n` and `p` make the buffer
 `quarry-grep--past` and `quarry-grep--future` are buffer-local lists of
 searches. `quarry-grep--run` pushes the search shown so far onto the past
 and empties the future when the new search is not `equal` to it; `g`
-therefore adds nothing. Back and forward move the current search to the
-other list, pop theirs, and run it with history left alone. The history
+therefore adds nothing. Back and forward pass the first search of their
+list and the direction to `quarry-grep--run`, which takes it from that
+list and moves the current search to the other one. All of this happens
+in `quarry-grep--run` after the instance is there, so a search that
+cannot start (module missing) leaves both lists as they were. The history
 belongs to the buffer and survives a new command that reuses it.
 
 ### Editing with wgrep
@@ -324,7 +385,11 @@ refused while a search runs and without result lines.
 **Stale check.** `quarry-grep--stale-files` goes over the file blocks and
 lists the paths whose file is gone, whose modification time (`time-convert`
 to milliseconds, which rounds down as the service does) differs from the
-heading's `quarry-grep-mtime`, or that a modified buffer visits. A nil
+heading's `quarry-grep-mtime`, or that a modified buffer visits. Buffers
+are compared by true name (`buffer-file-truename` of the modified
+file-visiting buffers, collected once, against `file-truename` of each
+result file), since a buffer can visit the file through a symbolic link;
+nothing is resolved while no buffer is modified. A nil
 `quarry-grep-mtime` is unknown and does not count. With such files `e`
 asks (`y-or-n-p`); yes runs the search again and does not enter edit mode.
 

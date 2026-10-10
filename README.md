@@ -1,11 +1,14 @@
 # quarry
 
-A fast project file finder for Emacs. A Rust module keeps a live index of
-each project's files, updated by a file watcher, and answers fuzzy queries
-from it with [nucleo](https://github.com/helix-editor/nucleo) ranking, so
+A fast project file finder and an interactive grep for Emacs, both backed
+by one Rust module.
+
+For the file finder, the module keeps a live index of each project's
+files, updated by a file watcher, and answers fuzzy queries from it with
+[nucleo](https://github.com/helix-editor/nucleo) ranking, so
 `project-find-file` stays fast on large repositories.
 
-The package also holds `quarry-grep`, an interactive grep in the manner of
+The grep tool, `quarry-grep`, works in the manner of
 [rg.el](https://github.com/dajva/rg.el): the search runs in the same
 module, and the matches are shown in a buffer from which the search is
 changed and run again (see "Grep"). The two tools do not need each other.
@@ -21,6 +24,12 @@ backends (`docs/backlog.md`). There is no CI. It installs from GitHub with
 package recipes and a local cargo build; only the Doom recipe is checked by
 hand, the straight, elpaca and package-vc variants are untested. There are
 no prebuilt binaries.
+
+The grep tool was tested by the ERT suite in batch and by hand in a
+terminal Emacs. It has not been run in a GUI frame, its faces were not
+looked at in any theme, and it shares the Emacs 30 gap. Editing results
+with wgrep is untested on files with `\r\n` line ends and on files in
+encodings other than UTF-8.
 
 ## Requirements
 
@@ -336,22 +345,29 @@ The commands are autoloaded; without package autoloads, `(require
 | Command | Asks for | Searches |
 |---|---|---|
 | `quarry-grep` | regexp, file type, directory | the directory |
-| `quarry-grep-literal` | string, file type, directory | the directory |
+| `quarry-grep-literal` | literal, file type, directory | the directory |
 | `quarry-grep-project` | regexp, file type | the project root (`project-current`), or `default-directory` outside a project |
-| `quarry-grep-dwim` | nothing | the project root for the symbol at point as a string, in files of the current buffer's type |
+| `quarry-grep-dwim` | nothing | the project root for the symbol at point as a literal, in files of the current buffer's type |
 
 The pattern prompt offers the active region, or else the symbol at point,
 as default. The file type prompt completes over the type names of the
 `ignore` crate (what `rg --type-list` prints) and `everything`; its
 default is the type of the current buffer's file, else `everything`.
+`all` is not a type name; `everything` is the word for no restriction.
 Input that is not a type name is taken as globs separated by spaces, for
-example `*.el *.org`. An empty pattern is refused.
+example `*.el *.org`. A glob is matched against the file name alone, not
+the path, and case counts. A glob with a `/` is refused (`glob
+"sub/*.txt" names a directory; globs match file names, use a path filter
+for directories`); restrict the search to directories with a path filter
+(`+ p`, see "Filters"). An empty pattern is refused.
 
 ### The result buffer
 
 One buffer, `*quarry-grep*`, reused by each search. Its
 `default-directory` is the searched directory, and paths are shown
-relative to it.
+relative to it. To keep a result while you search for something else,
+clone the buffer (`M-x clone-buffer`); the clone is a result buffer of
+its own, with its own searches and history.
 
 ```text
  files: rust   dir: ~/src/emacs-quarry/   case: smart   ign: on   hidden: on   hits: 3 in 2 files
@@ -359,7 +375,7 @@ relative to it.
 + line     walk
 - line/re  ^\s*//
 - path     /tests/
-+ path     bench                                  (off)
++ path     bench  (off)
 
 File: src/grep/search.rs (1)
    41 pub fn walk_and_search(
@@ -383,11 +399,17 @@ Search finished: 3 lines in 2 files, 61 ms
 - The last line says `Searching…` while results arrive, then how many
   lines were found in how many files and how long it took. It also names
   a search that stopped at the line cap, files that could not be read, a
-  cancellation, and an error such as an invalid regexp.
+  cancellation, and an error such as an invalid regexp. It says "stopped
+  at N lines" whenever N lines were found, also when the tree holds
+  exactly that many.
+- An invalid regexp leaves the filters as they are. The status line shows
+  the engine's message and point goes to the faulty filter, where `RET`
+  corrects it.
 
 Results appear as they arrive, without moving point or scrolling the
-window. A search that finishes within 150 ms is shown sorted by path; a
-longer one shows the files in the order they are found.
+window. A search that finishes within 150 ms is shown sorted by path. In
+a longer one, what was found in the first 150 ms is shown sorted and the
+rest follows in the order it is found.
 
 | Key | Action |
 |---|---|
@@ -397,16 +419,16 @@ longer one shows the files in the order they are found.
 | `TAB` | Fold or unfold the file at point |
 | `S-TAB` | Fold all files, or unfold them when all are folded |
 | `g` | Search again |
-| `r`, `t` | Edit the primary filter, as a regexp or as a string |
+| `r`, `t` | Edit the primary filter, as a regexp or as a literal |
 | `d`, `f` | Change the directory; the file type |
 | `c` | Cycle the case rule: smart, sensitive, insensitive |
 | `i`, `H` | Switch ignore files on or off; hidden files |
-| `- p`, `+ p` | Add a path filter, excluding or keeping only what matches |
-| `- l`, `+ l` | Add a line filter, excluding or keeping only what matches |
+| `- p`, `+ p` | Add a path filter, excluding or including, with a literal as pattern |
+| `- l`, `+ l` | Add a line filter, excluding or including, with a literal as pattern |
 | `- P`, `+ P`, `- L`, `+ L` | The same, with the pattern as a regexp |
-| `- f` | Exclude the file at point |
+| `- f` | Exclude the file at point, and only that file |
 | `- d`, `+ d` | Exclude, or search only, the directory of the file at point |
-| `k`, `x`, `!`, `%` | On a filter line: remove it; switch it off or on; flip it between including and excluding; switch it between string and regexp |
+| `k`, `x`, `!`, `%` | On a filter line: remove it; switch it off or on; flip it between including and excluding; switch it between literal and regexp |
 | `K` | Remove all filters except the primary one |
 | `C-c <`, `C-c >` | Go back or forward in the buffer's search history |
 | `C-c C-k` | Cancel the running search |
@@ -434,8 +456,8 @@ version control directories; `quarry-ignores` is not applied then either.
 ### Filters
 
 A search is a list of filters, shown at the top of the buffer. Each filter
-looks at lines or at paths, keeps only what matches (`+`) or drops it
-(`-`), and is a string or, marked `/re`, a regexp. The pattern a command
+looks at lines or at paths, includes only what matches (`+`) or excludes
+it (`-`), and is a literal or, marked `/re`, a regexp. The pattern a command
 asks for is the first of them, a `+ line` filter, and is a filter like the
 others. Every change to the filters runs the search again.
 
@@ -445,30 +467,43 @@ others. Every change to the filters runs the search again.
   relative to the searched directory. So `/test/` matches `test/a.c` and
   `src/test/a.c`, a directory `test` at any depth, and `.rs` matches by
   extension.
-  Path filters always use smart case. A directory that an excluding path
-  filter matches is not entered.
+  Path filters always use smart case. A directory that a literal
+  exclude path filter matches is not entered.
 - The filters are combined with "and": a line is shown when it and its
   file match every `+` filter and no `-` filter, so each added filter can
   only narrow the result. For "either of two", write one regexp filter,
   such as `/(audio|video)/` for two directories or `foo|bar` for two
   words (`+ P`, `+ L`, or `%` on the filter's line).
 
-`- p`, `+ p`, `- l` and `+ l` ask for a string and add the filter at the
+`- p`, `+ p`, `- l` and `+ l` ask for a literal and add the filter at the
 end of the list. The same keys with an uppercase letter, `- P`, `+ P`,
 `- L` and `+ L`, ask for a regexp.
 
-`- f`, `- d` and `+ d` take the pattern from the result at point. `- f`
-excludes that file at once. `- d` and `+ d` put the file's directory into
-the minibuffer, as `/dir/sub/`; confirm it, or shorten it to a parent
-such as `/dir/` first. These are ordinary path filters, so `/dir/sub/`
-also matches a directory `dir/sub` deeper in the tree.
+`- f`, `- d` and `+ d` take the pattern from the result at point.
+
+`- f` excludes that file at once, and no other: it adds a regexp path
+filter that is anchored at both ends and keeps case apart. For
+`src/a.c` the filter line is
+
+```text
+- path/re  (?-i)^/src/a\.c$
+```
+
+so `src/a.cpp`, `lib/src/a.c` and `src/A.c` stay.
+
+`- d` and `+ d` put the file's directory into the minibuffer, as
+`/dir/sub/`; confirm it, or shorten it to a parent such as `/dir/` first.
+These are ordinary literal path filters, so `/dir/sub/` also matches a
+directory `dir/sub` deeper in the tree. For a file that lies in the
+searched directory itself there is no directory to name, and the two
+commands refuse.
 
 A filter the search already has is not added twice; if it is switched
 off, it is switched on.
 
 `k` removes the filter at point, `x` switches it off or on (shown dimmed
 with `(off)`; it stays in the list and is not applied), `!` flips it
-between `+` and `-`, `%` between string and regexp, and `RET` edits its
+between `+` and `-`, `%` between literal and regexp, and `RET` edits its
 pattern. `K` removes all filters but the primary one.
 
 The **primary** filter is the first `+ line` filter that is switched on.
@@ -524,8 +559,8 @@ in it.
   press `e` again when it is done. No edits the results as they are;
   wgrep then refuses each change whose line in the file is no longer the
   text the search found.
-- Folded files are unfolded on entering, and `e` is refused while a
-  search runs.
+- Folded files are unfolded on entering. `e` is refused while a search
+  runs and when there are no results.
 - After a commit the result lines show the edited text and the status
   line says that the results were edited; `g` searches again, which
   shows what is on disk.
@@ -559,7 +594,12 @@ Faces: `quarry-grep-match`, `quarry-grep-match-secondary`,
 - Regexps are Rust regexps (the `regex` crate, as in ripgrep's default
   engine): no backreferences and no look-around. Emacs regexp syntax does
   not apply; a group is `(...)`, not `\(...\)`.
+- In line filters `\A`, `\z` and `(?-m)` are not supported: a pattern is
+  matched line by line, so use `^` and `$`.
 - Matches are single lines; there are no context lines.
+- In files with `\r\n` line ends the `\r` is not part of the line: it is
+  not shown, and `$` matches before it. Files are read as UTF-8; a
+  UTF-16 file is searched when it starts with a byte order mark.
 - Symbolic links are not searched, neither to files nor to directories,
   so a file is found once, under its real path. Version control
   directories (`.git`, `.hg`, `.svn`, `.jj`) are never searched, and files
@@ -751,4 +791,4 @@ so run the first two before merging.
 ## Licence
 
 The Rust code is licensed under either MIT or Apache-2.0, at your option.
-`lisp/quarry.el` is licensed under GPL-3.0-or-later.
+The Emacs Lisp files in `lisp/` are licensed under GPL-3.0-or-later.

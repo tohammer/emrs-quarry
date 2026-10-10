@@ -20,9 +20,9 @@
 //! | `:filters` | list of `(:target :line :exclude nil :pattern "foo" :regexp t)`: the enabled filters in the buffer's order; `:target` is `:line` or `:path`, `:exclude` and `:regexp` may be left out. At least one must be an include line filter | |
 //! | `:case` | `:smart`, `:sensitive` or `:insensitive`: the case rule of the line filters | `:smart` |
 //! | `:file-type` | string: a name from `(:types)` | nil: all files |
-//! | `:globs` | list of strings: globs for file names, e.g. `("*.el" "*.org")`, instead of `:file-type` | nil: all files |
+//! | `:globs` | list of strings: globs for file names (not paths: no `/`), e.g. `("*.el" "*.org")`, instead of `:file-type` | nil: all files |
 //! | `:no-ignore` | non-nil: `.gitignore`, `.ignore` and the git exclude files are not applied | nil |
-//! | `:hidden` | search hidden files; say `:hidden nil` to leave them out | t |
+//! | `:hidden` | search hidden files; say `:hidden nil` to leave out every file and directory whose name starts with a dot, whatever the file type or globs | t |
 //! | `:ignores` | list of strings: extra gitignore lines relative to `:dir` | nil |
 //! | `:max-lines` | integer: the search stops when this many lines are collected | 50000 |
 //! | `:max-columns` | integer: longer lines are cut after this many characters | 500 |
@@ -41,6 +41,7 @@
 //! | `:file-type` and `:globs` both given | `give a file type or globs, not both` | |
 //! | `:file-type` is not a name from `(:types)` | `unknown file type: NAME` | |
 //! | A glob is empty or invalid | `invalid glob "GLOB": MESSAGE` | |
+//! | A glob contains `/` | `glob "GLOB" names a directory; globs match file names, use a path filter for directories` | |
 //! | An `:ignores` line is invalid | `invalid ignore pattern "LINE": MESSAGE` | |
 //!
 //! **Stream items** are of two kinds, told apart by their first element.
@@ -63,8 +64,9 @@
 //!   character offsets into `:text` counted from 0, `END` exclusive, ascending and not overlapping; nil when
 //!   empty.
 //! - `:inexact` is t when `:text` is not exactly the file's line: it was cut after `:max-columns` characters, or
-//!   the line held bytes that are not valid UTF-8 (each shown as U+FFFD). The positions refer to `:text` as
-//!   sent, so a match beyond the cut is not listed.
+//!   the line held bytes that are not valid UTF-8 (each shown as U+FFFD). The matches are found on the whole
+//!   line and listed as positions in `:text` as sent: a match that crosses the cut ends at the cut, a match
+//!   beyond it is not listed.
 //!
 //! The summary item, exactly one, the last item of a search that was not cancelled:
 //!
@@ -189,6 +191,12 @@ fn file_types(file_type: Option<&str>, globs: &[String]) -> Result<Option<Types>
             for glob in globs {
                 if glob.is_empty() {
                     return Err(format!("invalid glob {glob:?}: it is empty"));
+                }
+                // A type's globs are matched against the file name alone; this one would match nothing.
+                if glob.contains('/') {
+                    return Err(format!(
+                        "glob {glob:?} names a directory; globs match file names, use a path filter for directories"
+                    ));
                 }
                 builder.add(GLOB_TYPE, glob).map_err(|e| format!("invalid glob {glob:?}: {e}"))?;
             }
@@ -523,6 +531,40 @@ mod tests {
     }
 
     #[test]
+    fn hidden_files_stay_out_with_a_file_type_or_globs() {
+        let files = [".hidden.txt", "seen.txt", ".hd/x.txt", "sub/y.txt", "sub/.z.txt", "other.rs"];
+        let t = TempDir::new().unwrap();
+        for file in files {
+            write(t.path(), file, "needle\n");
+        }
+        let search = |hidden: bool, file_type: Option<&str>, globs: &[&str]| {
+            let mut q = Query::new(t.path(), vec![line("needle")]);
+            q.hidden = hidden;
+            q.file_type = file_type.map(String::from);
+            q.globs = globs.iter().map(|g| g.to_string()).collect();
+            run(q)
+        };
+        let found = search(false, None, &["*.txt"]);
+        assert_eq!(found.paths(), ["seen.txt", "sub/y.txt"]);
+        assert_eq!(found.summary.files_searched, 2);
+        assert_eq!(search(false, Some("txt"), &[]).paths(), ["seen.txt", "sub/y.txt"]);
+        assert_eq!(search(false, None, &[]).paths(), ["other.rs", "seen.txt", "sub/y.txt"]);
+        let all_txt = [".hd/x.txt", ".hidden.txt", "seen.txt", "sub/.z.txt", "sub/y.txt"];
+        assert_eq!(search(true, None, &["*.txt"]).paths(), all_txt);
+        assert_eq!(search(true, Some("txt"), &[]).paths(), all_txt);
+    }
+
+    #[test]
+    fn a_sort_budget_beyond_the_clock_is_no_budget_limit() {
+        let t = tree(&[("b", "needle\n"), ("a", "needle\n")]);
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        q.sort_budget_ms = u64::MAX;
+        let found = run(q);
+        assert_eq!(found.paths(), ["a", "b"]);
+        assert!(found.summary.sorted);
+    }
+
+    #[test]
     fn bad_type_requests_are_refused() {
         let t = tree(&[("a.rs", "needle\n")]);
         let query = || Query::new(t.path(), vec![line("needle")]);
@@ -550,6 +592,13 @@ mod tests {
         let mut empty_glob = query();
         empty_glob.globs = vec![String::new()];
         assert!(refused(empty_glob).message().starts_with("invalid glob \"\""));
+
+        let mut dir_glob = query();
+        dir_glob.globs = vec!["*.rs".into(), "sub/*.txt".into()];
+        assert_eq!(
+            refused(dir_glob).message(),
+            "glob \"sub/*.txt\" names a directory; globs match file names, use a path filter for directories"
+        );
     }
 
     #[test]

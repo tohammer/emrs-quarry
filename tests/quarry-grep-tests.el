@@ -1489,7 +1489,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
       (goto-char (quarry-test-grep--line-pos "a/d.txt" 1))
       (should-not (quarry-test-grep--prompts (lambda () (quarry-test-grep--keys "- f"))))
       (should (equal (quarry-test-grep--sent)
-                     '((:line nil "needle" t) (:path t "/a/d.txt" nil))))
+                     '((:line nil "needle" t) (:path t "(?-i)^/a/d\\.txt$" t))))
       (should (equal (quarry-test-grep--headings) '("a/b/c.txt" "e/f.txt" "top.txt")))
       ;; Point is on the file that follows the one that went.
       (should (= (point) (quarry-test-grep--heading-pos "e/f.txt")))
@@ -1509,7 +1509,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
                       (lambda () (quarry-test-grep--keys "+ d RET")))))
         (should (equal prompts '(("Keep only paths containing: " . "/a/b/")))))
       (should (equal (quarry-test-grep--sent)
-                     '((:line nil "needle" t) (:path t "/a/d.txt" nil)
+                     '((:line nil "needle" t) (:path t "(?-i)^/a/d\\.txt$" t)
                        (:path nil "/a/b/" nil))))
       (should (equal (quarry-test-grep--headings) '("a/b/c.txt")))
       (should (= (point) (quarry-test-grep--line-pos "a/b/c.txt" 1)))
@@ -1525,7 +1525,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
       (quarry-test-grep--keys "- f")
       ;; Switched on again, not added a second time.
       (should (equal (quarry-test-grep--filter-lines)
-                     '(("+" "line/re" "needle" nil) ("-" "path" "/a/d.txt" nil))))
+                     '(("+" "line/re" "needle" nil) ("-" "path/re" "(?-i)^/a/d\\.txt$" nil))))
       (should-not (member "a/d.txt" (quarry-test-grep--headings))))))
 
 (ert-deftest quarry-test-grep-filter-line-commands ()
@@ -1824,6 +1824,274 @@ Each is (PROMPT . INITIAL-CONTENTS)."
         (batch (quarry-test-grep--item "zzz.txt" '(1 "needle" 0 6)))
         (funcall (nth 2 (car quarry-test-grep--fake)) 'cancelled nil)
         (should (= (point) (point-min)))))))
+
+(ert-deftest quarry-test-grep-exclude-file-exactly ()
+  "- f excludes the file at point and no file with a similar path."
+  (let ((odd "we.ird+(x)[y]{z}|q$ ü^*?#&~-.c"))
+    (should (equal (quarry-grep--regexp-quote "a.c+(x)[y]{z}|q$^*?\\#&~- ü")
+                   "a\\.c\\+\\(x\\)\\[y\\]\\{z\\}\\|q\\$\\^\\*\\?\\\\\\#\\&\\~\\- ü"))
+    (quarry-test-grep--with-tree
+        (dir (mapcar (lambda (path) (cons path "needle\n"))
+                     (list "a.c" "a.cpp" "a.c.orig" "axc" "sub/a.c" "sub/b.c" "A.C"
+                           odd (concat "sub/" odd) (concat odd "x"))))
+      (quarry-test-grep--search dir)
+      (let ((all (quarry-test-grep--headings)))
+        (should (= (length all) 10))
+        (goto-char (quarry-test-grep--heading-pos "a.c"))
+        (quarry-test-grep--keys "- f")
+        (should (equal (quarry-test-grep--headings) (remove "a.c" all)))
+        (should (equal (cadr (quarry-test-grep--filter-lines))
+                       '("-" "path/re" "(?-i)^/a\\.c$" nil)))
+        ;; A name full of characters that are special in a regexp.
+        (goto-char (quarry-test-grep--line-pos odd 1))
+        (quarry-test-grep--keys "- f")
+        (should (equal (quarry-test-grep--headings) (remove odd (remove "a.c" all))))
+        ;; In a directory.
+        (goto-char (quarry-test-grep--heading-pos "sub/a.c"))
+        (quarry-test-grep--keys "- f")
+        (should (equal (quarry-test-grep--headings)
+                       (remove "sub/a.c" (remove odd (remove "a.c" all)))))
+        (should (eq (quarry-test-grep--state) 'done))
+        ;; The same file again: the filter is switched on, not added.
+        (goto-char (quarry-test-grep--filter-pos 1))
+        (quarry-test-grep--keys "x")
+        (should (equal (quarry-test-grep--headings) (remove "sub/a.c" (remove odd all))))
+        (goto-char (quarry-test-grep--heading-pos "a.c"))
+        (quarry-test-grep--keys "- f")
+        (should (= (length (quarry-test-grep--filter-lines)) 4))
+        (should-not (member "a.c" (quarry-test-grep--headings)))
+        (should (member "A.C" (quarry-test-grep--headings)))))))
+
+(ert-deftest quarry-test-grep-header-percent ()
+  "A % in the directory or in a glob is doubled for the header line."
+  (quarry-test-grep--with-tree (dir '(("100%b/%-x.txt" . "needle\n")))
+    (let ((sub (expand-file-name "100%b/" dir)))
+      (quarry-grep "needle" '("%-*.txt") sub)
+      (quarry-test-grep--wait)
+      (should (equal (quarry-test-grep--results) '(("%-x.txt" 1 "needle"))))
+      ;; The string is a mode line format: %% stands for one %.
+      (should (equal (quarry-test-grep--header)
+                     (format " files: %%%%-*.txt   dir: %s   case: smart   ign: on   hidden: on   hits: 1 in 1 file"
+                             (string-replace "%" "%%" (abbreviate-file-name sub)))))
+      (should (string-match-p "100%%b/" (quarry-test-grep--header)))
+      (should-not (string-match-p "\\(?:\\`\\|[^%]\\)%\\(?:[^%]\\|\\'\\)"
+                                  (quarry-test-grep--header))))))
+
+(ert-deftest quarry-test-grep-history-survives-a-failed-start ()
+  "Back and forward leave the history alone when the search cannot start."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (quarry-test-grep--keys "c")
+    (quarry-test-grep--keys "H")
+    (quarry-test-grep--keys "C-c <")
+    (let ((current quarry-grep--current)
+          (past (copy-sequence quarry-grep--past))
+          (future (copy-sequence quarry-grep--future))
+          (text (buffer-string)))
+      (should (= (length past) 1))
+      (should (= (length future) 1))
+      (cl-letf (((symbol-function 'quarry-grep--ensure-instance)
+                 (lambda () (user-error "No module"))))
+        (dolist (command '(quarry-grep-history-back quarry-grep-history-forward
+                                                    quarry-grep-rerun quarry-grep-cycle-case))
+          (should-error (funcall command) :type 'user-error)
+          (should (eq quarry-grep--current current))
+          (should (equal quarry-grep--past past))
+          (should (equal quarry-grep--future future))
+          (should (equal (buffer-string) text))))
+      ;; They still work afterwards.
+      (quarry-test-grep--keys "C-c >")
+      (should (eq quarry-grep--current (car future)))
+      (should (equal quarry-grep--past (cons current past)))
+      (should-not quarry-grep--future))))
+
+(ert-deftest quarry-test-grep-narrowed-buffer ()
+  "Results and the end of a search arrive in a narrowed buffer as in a whole one."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--with-fake-stream
+      (quarry-grep "needle" nil dir)
+      (let ((on-batch (nth 1 (car quarry-test-grep--fake)))
+            (on-end (nth 2 (car quarry-test-grep--fake))))
+        (set-buffer (quarry-test-grep--buffer))
+        (funcall on-batch (list (quarry-test-grep--item "a.txt" '(1 "needle one" 0 6)
+                                                        '(2 "needle two" 0 6))))
+        (let ((bol (quarry-test-grep--line-pos "a.txt" 1)))
+          (goto-char (+ bol 8))
+          (narrow-to-region bol (+ bol 12))
+          (funcall on-batch (list (quarry-test-grep--item "b.txt" '(3 "needle" 0 6))))
+          (funcall on-batch (list (list :summary :files-searched 2 :files-matched 2 :lines 3
+                                        :truncated nil :sorted t :millis 5 :skipped 0)))
+          (funcall on-end 'done nil)
+          ;; The narrowing and point are the user's.
+          (should (buffer-narrowed-p))
+          (should (= (point-min) bol))
+          (should (= (point) (+ bol 8)))
+          (widen)
+          (should (= (point) (+ bol 8))))
+        (should (equal (quarry-test-grep--results)
+                       '(("a.txt" 1 "needle one") ("a.txt" 2 "needle two")
+                         ("b.txt" 3 "needle"))))
+        (should (equal (quarry-test-grep--headings) '("a.txt" "b.txt")))
+        (should (equal (quarry-test-grep--status)
+                       "Search finished: 3 lines in 2 files, 5 ms"))
+        ;; One status line, and the buffer is the blocks in order.
+        (should (= (length (quarry-test-grep--lines-with 'quarry-grep-status)) 1))
+        (should (= (length (quarry-grep--blocks)) 2))
+        ;; Folding all and a new search see the whole buffer too.
+        (narrow-to-region (quarry-test-grep--line-pos "a.txt" 1)
+                          (quarry-test-grep--line-pos "a.txt" 2))
+        (should (= (length (quarry-grep--blocks)) 2))
+        (quarry-grep-rerun)
+        (should-not (buffer-narrowed-p))
+        (should (equal (quarry-test-grep--status) "Searching…"))
+        (should-not (quarry-test-grep--headings))
+        (should (equal (quarry-test-grep--filter-lines) '(("+" "line/re" "needle" nil))))))))
+
+(ert-deftest quarry-test-grep-stale-by-true-name ()
+  "A modified buffer that visits a result file through a link makes it stale."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (should-not (quarry-grep--stale-files))
+    (make-symbolic-link (expand-file-name "sub" dir) (expand-file-name "link" dir))
+    (let ((visiting (find-file-noselect (expand-file-name "link/deep.txt" dir))))
+      (unwind-protect
+          (progn
+            (should-not (get-file-buffer (expand-file-name "sub/deep.txt" dir)))
+            (should-not (quarry-grep--stale-files))
+            (with-current-buffer visiting
+              (goto-char (point-max))
+              (insert "more\n"))
+            (should (equal (quarry-grep--stale-files) '("sub/deep.txt")))
+            ;; Nothing is resolved while no buffer is modified.
+            (with-current-buffer visiting
+              (set-buffer-modified-p nil))
+            (cl-letf (((symbol-function 'file-truename)
+                       (lambda (&rest _) (error "A true name was asked for"))))
+              (should-not (quarry-grep--stale-files))))
+        (with-current-buffer visiting (set-buffer-modified-p nil))
+        (kill-buffer visiting)))))
+
+(ert-deftest quarry-test-grep-module-without-service ()
+  "A module that has no grep service is reported as too old."
+  (quarry-test-grep--with-tree (dir)
+    (let ((quarry-grep--instance nil)
+          (quarry-grep--service "no-such-service"))
+      (let ((err (should-error (quarry-grep "needle" nil dir) :type 'user-error)))
+        (should (string-match-p "older than quarry-grep" (cadr err)))
+        (should (string-match-p "M-x quarry-build-module" (cadr err)))
+        (should (string-match-p "restart Emacs" (cadr err))))
+      (should-not (quarry-test-grep--buffer))
+      (should-not quarry-grep--instance))))
+
+(ert-deftest quarry-test-grep-clone-buffer ()
+  "A clone of a result buffer is independent of the original."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (let* ((original (quarry-test-grep--buffer))
+           (text (buffer-string))
+           (clone (clone-buffer "*quarry-grep-test-clone*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer clone
+              (should (eq major-mode 'quarry-grep-mode))
+              (should (equal (buffer-string) text))
+              ;; A marker of its own, at its own status line.
+              (should (eq (marker-buffer quarry-grep--status-marker) clone))
+              (should (= quarry-grep--status-marker
+                         (text-property-any (point-min) (point-max) 'quarry-grep-status t)))
+              (should (eq quarry-grep--state 'done))
+              ;; A search in the clone leaves the original alone.
+              (let ((quarry-grep-buffer-name (buffer-name clone)))
+                (goto-char (point-min))
+                (quarry-test-grep--keys "c")
+                (quarry-test-grep--keys "- l again RET")
+                (should (= (length (quarry-test-grep--results)) 4))))
+            (with-current-buffer original
+              (should (equal (buffer-string) text))
+              (should (eq (marker-buffer quarry-grep--status-marker) original))
+              (should (eq (quarry-grep--search-case quarry-grep--current) 'smart))
+              (should-not quarry-grep--past))
+            (kill-buffer clone)
+            ;; Cloned while a search runs: the search stays the original's.
+            (quarry-test-grep--with-fake-stream
+              (with-current-buffer original
+                (quarry-grep-rerun)
+                (funcall (nth 1 (car quarry-test-grep--fake))
+                         (list (quarry-test-grep--item "a.txt" '(1 "needle" 0 6))))
+                (setq clone (clone-buffer "*quarry-grep-test-clone*")))
+              (with-current-buffer clone
+                (should (eq quarry-grep--state 'cancelled))
+                (should-not quarry-grep--call)
+                (should-not quarry-grep--serial)
+                (let ((quarry-grep-buffer-name (buffer-name clone)))
+                  (should (equal (quarry-test-grep--status)
+                                 "Search cancelled: 1 line in 1 file so far"))))
+              (with-current-buffer original
+                (should (eq quarry-grep--state 'running))
+                (should (equal (quarry-test-grep--status) "Searching…"))
+                (should quarry-grep--serial))
+              ;; Killing the clone does not end the original's search.
+              (kill-buffer clone)
+              (with-current-buffer original
+                (should quarry-grep--serial)
+                (funcall (nth 1 (car quarry-test-grep--fake))
+                         (list (quarry-test-grep--item "b.txt" '(1 "needle" 0 6))))
+                (funcall (nth 2 (car quarry-test-grep--fake)) 'done nil)
+                (should (equal (quarry-test-grep--headings) '("a.txt" "b.txt")))
+                (should (equal (quarry-test-grep--status)
+                               "Search finished: 2 lines in 2 files")))))
+        (when (buffer-live-p clone)
+          (kill-buffer clone))))
+    ;; A real search in the original is not cancelled by killing a clone.
+    (set-buffer (quarry-test-grep--buffer))
+    (quarry-grep-rerun)
+    (let ((call (car quarry-test-grep--calls))
+          (clone (clone-buffer "*quarry-grep-test-clone*")))
+      (kill-buffer clone)
+      (should-not (emrs-call-done call))
+      (quarry-test-grep--wait)
+      (should (eq (quarry-test-grep--state) 'done))
+      (should (equal (quarry-test-grep--results) quarry-test-grep--needles)))))
+
+(ert-deftest quarry-test-grep-point-returns-per-window ()
+  "A window in which point was moved during the search keeps its point."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (let* ((results (quarry-test-grep--buffer))
+           (moved (selected-window))
+           (waiting (split-window moved nil t)))
+      (set-window-buffer waiting results)
+      (quarry-test-grep--with-fake-stream
+        (goto-char (quarry-test-grep--line-pos "src/a.rs" 4))
+        (quarry-grep-rerun)
+        (should (= (window-point moved) (point-min)))
+        (should (= (window-point waiting) (point-min)))
+        ;; The buffer is shown in two windows that are not selected, and
+        ;; in one of them point is moved.
+        (with-selected-window (split-window moved)
+          (switch-to-buffer (get-buffer-create "*quarry-grep-test-other*"))
+          (unwind-protect
+              (let ((elsewhere (with-current-buffer results (point-max))))
+                (set-window-point moved elsewhere)
+                (with-temp-buffer
+                  (funcall (nth 1 (car quarry-test-grep--fake))
+                           (list (quarry-test-grep--item "src/a.rs" '(2 "needle" 0 6)
+                                                         '(4 "needle" 0 6))
+                                 (quarry-test-grep--item "z.txt" '(1 "needle" 0 6)))))
+                (should (= (window-point moved) elsewhere))
+                (should (= (window-point waiting) (quarry-test-grep--line-pos "src/a.rs" 4)))
+                ;; The end does not move anything any more.
+                (funcall (nth 2 (car quarry-test-grep--fake)) 'done nil)
+                (should (= (window-point moved) elsewhere))
+                (should (= (window-point waiting) (quarry-test-grep--line-pos "src/a.rs" 4))))
+            (kill-buffer "*quarry-grep-test-other*")))))))
+
+(ert-deftest quarry-test-grep-edit-docstring ()
+  "The help of the edit command reads well without wgrep."
+  (let ((doc (documentation 'quarry-grep-edit)))
+    (should (string-match-p "C-c C-c applies" doc))
+    (should (string-match-p "C-c C-k" doc))
+    (should-not (string-match-p "not currently defined\\|wgrep-mode-map" doc))))
 
 ;;;; Loading
 

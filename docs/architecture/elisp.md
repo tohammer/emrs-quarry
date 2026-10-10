@@ -51,7 +51,9 @@ when it is done. Otherwise the `user-error` names the expected file and
 count, `indexing`, `watching`, epoch, a unique `id` for cache keys, and
 whether the watch-failure warning was shown). `quarry--ensure` returns the
 running record or starts an instance with `emrs-start` and the start
-arguments (`:root`, `:include-hidden`, `:ignores`). Events update the
+arguments (`:root`, `:include-hidden`, `:ignores`; the last two from the
+options `quarry-include-hidden` and `quarry-ignores`, which live in
+`quarry-core.el` because the grep tool uses them too). Events update the
 record: `:indexed` sets the file count, `:changed` adjusts it by the
 added and removed counts, and both increment the epoch; `:watch-failed` clears `watching` and shows one warning. On exit the
 record is removed; a failed instance leaves a warning and its message. There

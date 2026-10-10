@@ -4,9 +4,11 @@ This document describes the system as it is now.
 
 ## Overview
 
-quarry is an Emacs package with two parts: a Rust `cdylib` built on emrs
-(`src/`) that keeps one file index per project root, and the Elisp library
-`lisp/quarry.el` that starts the instances, owns the completion table and
+quarry is an Emacs package with two tools, a project file finder and an
+interactive grep, in two parts: a Rust `cdylib` built on emrs (`src/`)
+with one service per tool, and the Elisp libraries in `lisp/`. For the
+file finder the module keeps one file index per project root, and
+`lisp/quarry.el` starts the instances, owns the completion table and
 provides the commands. An optional file, `lisp/quarry-consult.el`, adds a
 consult front end. The project was renamed from projdex; older specs and
 ADRs use the old name (ADR 0010).
@@ -32,6 +34,15 @@ the wgrep package, which is optional and loaded only by the edit command
                                                         │     │ FsChanges/FsRescan/
                                                         │     │ WatchFailed
                                                         └─ walk task, quarry-watch thread
+
+ quarry-grep.el                             grep service, one instance, no state
+   quarry-grep, g, filter commands
+     quarry-grep--run ── emrs-call-stream (:search) ─────► handle: checks, opens the stream
+   on-batch ◄── file items ... summary item ◄───────────── search task + walker threads
+     insert before the status line                           (one set per running search)
+   on-end ◄── done / failed / cancelled
+   prompt ── emrs-call-sync (:types), cached
+   emrs-cancel (new search, C-c C-k, buffer killed) ─────► stream token
 ```
 
 The service owns the index. Everything that changes it reaches the service
@@ -46,7 +57,7 @@ as a self-message through `ctx.address()`, so all index access happens in
 | `src/service.rs` | `IndexService`: start arguments, `Request`/`Event`, `start`, `handle`; generations; pending `:files` and `:rescan` replies; the `:files` stream task | `index`, `matcher`, `walk`, `watch`, `emrs` |
 | `src/index.rs` | The path set of one project: add, remove, remove by directory prefix, iterate; a version number that changes with every mutation; paths kept as `Utf32String` | `nucleo-matcher` |
 | `src/matcher.rs` | Query text to ranked paths with match positions; parallel scoring; incremental narrowing | `index`, `nucleo-matcher` |
-| `src/walk.rs` | The walker rules both services share (`ignore` crate): version control directories, symbolic links, hidden files, ignore files, extra ignore lines. For the index: the parallel walk sending batches of at most 1000 paths, skipped count. For grep: `walker`, a parallel walker for a caller with its own options (ignore files on or off, file types, an entry predicate) | `ignore` |
+| `src/walk.rs` | The walker rules both services share (`ignore` crate): version control directories, symbolic links not followed, hidden files, ignore files, extra ignore lines. What a symbolic link to a file means differs: the index lists it, grep skips it. For the index: the parallel walk sending batches of at most 1000 paths, skipped count. For grep: `walker`, a parallel walker for a caller with its own options (ignore files on or off, file types, an entry predicate) | `ignore` |
 | `src/watch.rs` | Watch set, debouncing, translation of file-system events into index changes, rescan triggers, failure reporting | `walk`, `notify`, `notify-debouncer-full` |
 | `src/grep/filter.rs` | The filters of a search as pure logic: compile the list (literal or regexp, case rule), choose the primary filter, keep or drop a path or a line, decide whether a directory is entered, match positions in paths and lines as character offsets | `grep-regex`, `grep-matcher` |
 | `src/grep/search.rs` | One search: the walk, a searcher per walker thread, the `Sink` that turns matching lines into line items, the line cap, the sort buffer, cancellation; the item types. No emrs types | `grep/filter`, `walk`, `grep-searcher`, `ignore` |
@@ -62,9 +73,13 @@ as a self-message through `ctx.address()`, so all index access happens in
 
 ## How it fits together
 
-`emrs.el` loads `quarry-module` and talks to its `index` service; `quarry.el`
-uses the emrs API (`emrs-start`, `emrs-call`, `emrs-call-sync`,
-`emrs-call-stream`, ...) and never calls the module functions directly. The
+`emrs.el` loads `quarry-module` and talks to its two services: `quarry.el`
+to `index`, one instance per project root, and `quarry-grep.el` to
+`grep`, one instance for all result buffers. Both use the emrs API
+(`emrs-start`, `emrs-call`, `emrs-call-sync`, `emrs-call-stream`, ...)
+and never call the module functions directly. Loading the module and the
+offer to build it are shared in `quarry-core.el`; neither tool loads the
+other's Elisp or uses the other's service. The
 module's emrs version is fixed by the commit pinned in `Cargo.toml`, and the
 test and benchmark scripts use the `emrs.el` from that checkout. Installed
 from GitHub, `emrs.el` is its own package that follows emrs's default

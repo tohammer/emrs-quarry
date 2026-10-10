@@ -46,6 +46,10 @@ The name projdex means project index and does not fit a set of tools.
   0001 to 0009) keep the name projdex. They are history; read `projdex`
   as `quarry` there. `README.md`, `docs/architecture*`, `docs/backlog.md`
   and `docs/next-steps.md` use the new name.
+- "The same rules for which files count" has one deliberate exception:
+  the index lists symbolic links to files, grep does not search symbolic
+  links at all. A linked file would appear twice in a grep result, and an
+  edit would reach it by two paths.
 - Sharing the index between two services is not designed. emrs has no
   service-to-service calls, and the index is owned by one service without
   locks. This needs its own decision when it is wanted.

@@ -30,7 +30,13 @@ UTF-8) are marked so that wgrep does not edit them.
 
 - Users get the edit, commit and abort behaviour and keys they know from
   rg.el and consult.
-- quarry relies on wgrep's property interface. The wgrep tests run only
-  when wgrep is on the test load path, like the consult tests.
+- quarry relies on wgrep's property interface, and on more than that:
+  wgrep has no hook for leaving edit mode, so quarry notices the exit
+  from a buffer-local `post-command-hook` and repairs the buffer in
+  place; it sets the internal variables `wgrep-original-mode-map` and
+  `wgrep-prepared` itself and does not call `wgrep-setup-internal`,
+  which would bind a key in quarry's own map. A wgrep upgrade can break
+  this. The wgrep tests run only when wgrep is on the test load path,
+  like the consult tests.
 - Line numbers come from the disk state at search time. Entering edit
   mode checks the files for changes since the search first.

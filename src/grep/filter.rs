@@ -20,20 +20,30 @@
 //! - The search's [`Case`] applies to each of them. `Smart` is decided per filter by the matcher builder: the
 //!   filter is case-insensitive unless its own pattern has an uppercase letter (for a regexp, escapes such as
 //!   `\W` or `\S` do not count).
+//! - Not supported: the text anchors `\A` and `\z`, and switching multi-line mode off (`(?-m)`). Use `^` and
+//!   `$`. They are not rejected, but they mean different things in the primary filter, which runs on a buffer
+//!   holding many lines of the file, and in the other line filters, which run on one line at a time: `a\z` as
+//!   primary filter finds at most the last line of a buffer, as another include filter it keeps every line
+//!   that ends in `a`.
 //!
 //! Path filters:
 //! - They are matched against `/` followed by the path relative to the search directory, `/`-separated. So
 //!   `/test/` matches `test/a.c` and `src/test/a.c` but not `contest/a.c`, and `.rs` matches by extension.
-//! - `^` is the start of that text, i.e. the added `/`; `$` is its end. For a directory test the text is
-//!   `/` + the relative directory + `/`, so `$` is after the trailing `/`.
+//! - `^` is the start of that text, i.e. the added `/`; `$` is its end.
 //! - They always use smart case, whatever the search's case rule.
 //!
 //! A file is kept when its path matches every include path filter and no exclude path filter; a line when it
-//! matches every include line filter and no exclude line filter. An exclude path filter also decides whether a
-//! directory is entered ([`Filters::skip_dir`]); include path filters never do, since files below a directory
-//! may match when the directory itself does not.
+//! matches every include line filter and no exclude line filter.
 //!
-//! Highlight positions are character offsets (Unicode scalar values), not bytes; ends are exclusive.
+//! A *literal* exclude path filter also decides whether a directory is entered ([`Filters::skip_dir`]): when it
+//! occurs in `/` + the relative directory + `/`, it occurs in the path of every file below, so none of them
+//! would be kept. No other filter does: files below a directory may match an include path filter when the
+//! directory does not, and a regexp exclude filter that matches the directory's text need not match the files
+//! below it (`^/src/[^/]*$` matches `/src/` and `/src/a.rs`, not `/src/sub/b.rs`). Regexp exclude path filters
+//! are tested on each file.
+//!
+//! Highlight positions are character offsets (Unicode scalar values), not bytes; ends are exclusive. They are
+//! found on the whole line and reported for the part of it that is sent ([`Filters::line_spans`]).
 
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
@@ -114,11 +124,21 @@ pub struct Filters {
     exclude_lines: Vec<RegexMatcher>,
     include_paths: Vec<RegexMatcher>,
     exclude_paths: Vec<RegexMatcher>,
+    /// The literal ones among `exclude_paths`: those that also keep the walk out of a directory.
+    prune_dirs: Vec<RegexMatcher>,
 }
+
+/// How far beyond the part of a line that is sent [`Filters::line_spans`] looks for matches, in bytes. A line
+/// can be many megabytes long (minified code); its highlights are not worth a scan of all of it per filter.
+const SPAN_LOOKAHEAD: usize = 64 * 1024;
 
 fn build(spec: &FilterSpec, line: bool, case: Case) -> Result<RegexMatcher, String> {
     let mut builder = RegexMatcherBuilder::new();
     builder.fixed_strings(!spec.regexp);
+    if line && !spec.regexp && spec.pattern.contains(['\n', '\r']) {
+        // The engine's message for this talks about a regex.
+        return Err(format!("invalid filter `{}`: a pattern cannot contain a line break", spec.pattern));
+    }
     if line {
         match case {
             Case::Smart => builder.case_smart(true),
@@ -135,9 +155,18 @@ fn build(spec: &FilterSpec, line: bool, case: Case) -> Result<RegexMatcher, Stri
 
 /// Byte ranges of the non-empty matches of `matcher` in `haystack`.
 fn find_all(matcher: &RegexMatcher, haystack: &[u8]) -> Vec<(usize, usize)> {
+    find_before(matcher, haystack, haystack.len())
+}
+
+/// Byte ranges of the non-empty matches of `matcher` in `haystack` that start before `limit`. The search ends
+/// at the first match that starts at or beyond it.
+fn find_before(matcher: &RegexMatcher, haystack: &[u8], limit: usize) -> Vec<(usize, usize)> {
     let mut found = Vec::new();
     // The error type is `NoError`: the regex matcher cannot fail while searching.
     let _ = matcher.find_iter(haystack, |m| {
+        if m.start() >= limit {
+            return false;
+        }
         if m.start() < m.end() {
             found.push((m.start(), m.end()));
         }
@@ -208,6 +237,7 @@ impl Filters {
         let mut exclude_lines = Vec::new();
         let mut include_paths = Vec::new();
         let mut exclude_paths = Vec::new();
+        let mut prune_dirs = Vec::new();
         for (index, spec) in specs.iter().enumerate() {
             let error = |message: String| FilterError { index: Some(index), message };
             if spec.pattern.is_empty() {
@@ -219,13 +249,18 @@ impl Filters {
                 (Target::Line, false) => other_includes.push(matcher),
                 (Target::Line, true) => exclude_lines.push(matcher),
                 (Target::Path, false) => include_paths.push(matcher),
-                (Target::Path, true) => exclude_paths.push(matcher),
+                (Target::Path, true) => {
+                    if !spec.regexp {
+                        prune_dirs.push(matcher.clone());
+                    }
+                    exclude_paths.push(matcher);
+                }
             }
         }
         let Some(primary) = primary else {
             return Err(FilterError { index: None, message: "a search needs an include line filter".to_string() });
         };
-        Ok(Filters { primary, other_includes, exclude_lines, include_paths, exclude_paths })
+        Ok(Filters { primary, other_includes, exclude_lines, include_paths, exclude_paths, prune_dirs })
     }
 
     /// The matcher the searcher scans files with: the first include line filter.
@@ -242,14 +277,15 @@ impl Filters {
             && !self.exclude_paths.iter().any(|m| is_match(m, haystack))
     }
 
-    /// Whether a directory is not entered: an exclude path filter matches `/` + `rel_dir` + `/`. Include path
-    /// filters never skip a directory. `rel_dir` is relative, `/`-separated, without slashes at either end.
+    /// Whether a directory is not entered: a literal exclude path filter occurs in `/` + `rel_dir` + `/`, and
+    /// so in the path of every file below. No other filter skips a directory (see the module docs). `rel_dir`
+    /// is relative, `/`-separated, without slashes at either end.
     pub fn skip_dir(&self, rel_dir: &str) -> bool {
-        if self.exclude_paths.is_empty() {
+        if self.prune_dirs.is_empty() {
             return false;
         }
         let haystack = format!("/{rel_dir}/");
-        self.exclude_paths.iter().any(|m| is_match(m, haystack.as_bytes()))
+        self.prune_dirs.iter().any(|m| is_match(m, haystack.as_bytes()))
     }
 
     /// Character ranges of `rel` (without the added leading `/`) matched by include path filters: sorted,
@@ -278,16 +314,29 @@ impl Filters {
         self.other_includes.iter().all(|m| is_match(m, line)) && !self.exclude_lines.iter().any(|m| is_match(m, line))
     }
 
-    /// Highlight positions in `text`, the line as it will be shown (without terminator): all non-empty matches
-    /// of the primary filter and of the other include line filters, as character ranges sorted by start and not
-    /// overlapping. Primary matches are reported as they are. Secondary matches are merged where they overlap
-    /// each other, then clipped to the parts outside primary matches; empty remainders are dropped.
-    pub fn line_spans(&self, text: &str) -> Vec<Span> {
-        let bytes = text.as_bytes();
-        let primary = find_all(&self.primary, bytes);
+    /// Highlight positions for a line of which the first `shown` bytes are sent. `text` is the whole line
+    /// (without terminator) and `shown` a character boundary in it, `text.len()` when the line is not cut.
+    ///
+    /// The matches are found on the whole line, so that `$`, `\b` and greedy patterns see what really follows
+    /// the cut: all non-empty matches of the primary filter and of the other include line filters that start
+    /// before `shown`. A match that crosses `shown` is clipped to it. The result is character ranges into the
+    /// shown part, sorted by start and not overlapping. Primary matches are reported as they are. Secondary
+    /// matches are merged where they overlap each other, then clipped to the parts outside primary matches;
+    /// empty remainders are dropped.
+    ///
+    /// Cost: a filter is not searched for beyond its first match that starts at or after `shown`, and never
+    /// further than [`SPAN_LOOKAHEAD`] bytes beyond `shown`. In a line longer than that, a pattern is matched
+    /// as if the line ended there.
+    pub fn line_spans(&self, text: &str, shown: usize) -> Vec<Span> {
+        let mut end = text.len().min(shown.saturating_add(SPAN_LOOKAHEAD));
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        let bytes = &text.as_bytes()[..end];
+        let primary = find_before(&self.primary, bytes, shown);
         let mut secondary = Vec::new();
         for matcher in &self.other_includes {
-            secondary.extend(find_all(matcher, bytes));
+            secondary.extend(find_before(matcher, bytes, shown));
         }
         let mut pieces: Vec<(usize, usize, bool)> = primary.iter().map(|&(s, e)| (s, e, false)).collect();
         for (start, end) in merge(secondary) {
@@ -304,10 +353,11 @@ impl Filters {
             }
         }
         pieces.sort_unstable();
-        let offsets = CharOffsets::new(text);
+        let offsets = CharOffsets::new(&text[..shown]);
         pieces
             .into_iter()
-            .map(|(s, e, secondary)| Span { start: offsets.at(s), end: offsets.at(e), secondary })
+            .filter(|&(s, _, _)| s < shown)
+            .map(|(s, e, secondary)| Span { start: offsets.at(s), end: offsets.at(e.min(shown)), secondary })
             .filter(|span| span.start < span.end)
             .collect()
     }
@@ -337,6 +387,10 @@ mod tests {
     }
     fn primary_matches(f: &Filters, text: &str) -> bool {
         is_match(f.primary(), text.as_bytes())
+    }
+    /// The spans of a line that is sent whole.
+    fn spans(f: &Filters, text: &str) -> Vec<Span> {
+        f.line_spans(text, text.len())
     }
     fn sp(start: u32, end: u32, secondary: bool) -> Span {
         Span { start, end, secondary }
@@ -515,26 +569,96 @@ mod tests {
         assert!(!primary_matches(&f, "alpha"));
         assert!(f.keep_line(b"alpha"));
         assert!(!f.keep_line(b"beta"));
-        assert_eq!(f.line_spans("alpha beta"), vec![sp(0, 5, true), sp(6, 10, false)]);
+        assert_eq!(spans(&f, "alpha beta"), vec![sp(0, 5, true), sp(6, 10, false)]);
     }
 
     #[test]
-    fn skip_dir_follows_exclude_path_filters_only() {
-        let f = compile(&[line("x", false), not_path("/test/", false), not_path("^/vendor/", true)]);
+    fn skip_dir_follows_literal_exclude_path_filters_only() {
+        let f = compile(&[line("x", false), not_path("/test/", false), not_path("Vendor", false)]);
         assert!(f.skip_dir("test"));
         assert!(f.skip_dir("src/test"));
         assert!(!f.skip_dir("contest"));
         assert!(!f.skip_dir("src"));
-        assert!(f.skip_dir("vendor"));
-        assert!(!f.skip_dir("src/vendor"));
+        assert!(f.skip_dir("a/Vendor.d"));
+        assert!(!f.skip_dir("a/vendor.d"), "smart case, as for the files");
         // Include path filters never skip a directory.
         let f = compile(&[line("x", false), path(".rs", false), path("/test/", false)]);
         assert!(!f.skip_dir("src"));
         assert!(!f.skip_dir("other"));
-        // For a directory `$` is after the trailing slash.
-        let f = compile(&[line("x", false), not_path("/old/$", true)]);
-        assert!(f.skip_dir("a/old"));
-        assert!(!f.skip_dir("a/old/b"));
+        // Nor do regexp exclude filters: what matches the directory's text need not match the files below.
+        for pattern in ["^/src/[^/]*$", "^[^.]*$", "/$", "^/vendor/", "/old/", "src"] {
+            let f = compile(&[line("x", false), not_path(pattern, true)]);
+            for dir in ["src", "src/sub", "dir", "vendor", "a/old"] {
+                assert!(!f.skip_dir(dir), "{pattern} {dir}");
+            }
+        }
+        // They are tested on each file.
+        let f = compile(&[line("x", false), not_path("^/src/[^/]*$", true)]);
+        assert!(!f.keep_file("src/a.rs"));
+        assert!(f.keep_file("src/sub/b.rs"));
+        let f = compile(&[line("x", false), not_path("^[^.]*$", true)]);
+        assert!(!f.keep_file("top"));
+        assert!(f.keep_file("dir/x.y"));
+        let f = compile(&[line("x", false), not_path("/$", true)]);
+        assert!(f.keep_file("dir/x.y"));
+    }
+
+    #[test]
+    fn a_literal_line_filter_with_a_line_break_is_refused_in_plain_words() {
+        for pattern in ["a\nb", "a\r\nb", "a\rb"] {
+            let err = Filters::compile(&[line("x", false), not_line(pattern, false)], Case::Smart).unwrap_err();
+            assert_eq!(err.index, Some(1));
+            assert_eq!(err.message, format!("invalid filter `{pattern}`: a pattern cannot contain a line break"));
+        }
+        // A file name may contain one.
+        assert!(Filters::compile(&[line("x", false), path("a\nb", false)], Case::Smart).is_ok());
+        // A regexp that names one keeps the engine's message.
+        let err = Filters::compile(&[line("a\\nb", true)], Case::Smart).unwrap_err();
+        assert!(err.message.starts_with("invalid filter `a\\nb`: ") && !err.message.contains("line break"));
+    }
+
+    #[test]
+    fn line_spans_of_a_cut_line_come_from_the_whole_line() {
+        // `$` is the end of the line, not of the part that is shown.
+        let f = compile(&[line("foo$", true)]);
+        assert!(f.line_spans("xxfoo yy foo", 5).is_empty());
+        assert_eq!(f.line_spans("xxfoo yy foo", 12), vec![sp(9, 12, false)]);
+        assert_eq!(f.line_spans("xxfoo", 5), vec![sp(2, 5, false)]);
+        // A greedy match that reaches the end of the line is not one of the shown part's last word.
+        let f = compile(&[line("\\w+$", true)]);
+        assert!(f.line_spans("ab cd ef", 5).is_empty());
+        assert_eq!(f.line_spans("ab cdef", 5), vec![sp(3, 5, false)], "clipped to the cut");
+        // `\b` sees the character after the cut.
+        let f = compile(&[line("foo\\b", true)]);
+        assert!(f.line_spans("a foobar", 5).is_empty());
+        assert_eq!(f.line_spans("a foo bar", 5), vec![sp(2, 5, false)]);
+        // A match that crosses the cut is clipped, one that starts at or beyond it is dropped.
+        let f = compile(&[line("needle", false), line("hay", false)]);
+        assert_eq!(f.line_spans("hay needle hay", 7), vec![sp(0, 3, true), sp(4, 7, false)]);
+        assert_eq!(f.line_spans("hay needle hay", 4), vec![sp(0, 3, true)]);
+        assert_eq!(f.line_spans("hay needle hay", 13), vec![sp(0, 3, true), sp(4, 10, false), sp(11, 13, true)]);
+        assert!(f.line_spans("hay needle hay", 0).is_empty());
+        // A secondary match is clipped to the outside of a primary match that itself crosses the cut.
+        let f = compile(&[line("cdef", false), line("bcd", false)]);
+        assert_eq!(f.line_spans("abcdefg", 3), vec![sp(1, 2, true), sp(2, 3, false)]);
+        // Character offsets, with non-ASCII text before the cut; `shown` is in bytes.
+        let f = compile(&[line("needle", false)]);
+        assert_eq!(f.line_spans("äö needle ü needle", 9), vec![sp(3, 7, false)]);
+        assert_eq!(
+            f.line_spans("äö needle ü needle", "äö needle ü ne".len()),
+            vec![sp(3, 9, false), sp(12, 14, false)]
+        );
+    }
+
+    #[test]
+    fn line_spans_look_a_bounded_distance_beyond_the_cut() {
+        let f = compile(&[line("foo$", true), line("zz", false)]);
+        let long = format!("xxfoo{}", " y".repeat(SPAN_LOOKAHEAD));
+        // The line goes on for longer than is looked at: `$` is taken at the end of that window, far from the cut.
+        assert!(f.line_spans(&long, 5).is_empty());
+        let long = format!("xxfoo zz{} zz foo", "ä".repeat(SPAN_LOOKAHEAD));
+        assert_eq!(f.line_spans(&long, 8), vec![sp(6, 8, true)]);
+        assert_eq!(f.line_spans(&long, long.len()).len(), 3);
     }
 
     #[test]
@@ -566,64 +690,64 @@ mod tests {
     #[test]
     fn line_spans_primary_and_secondary() {
         let f = compile(&[line("foo", false), line("bar", false)]);
-        assert_eq!(f.line_spans("bar foo"), vec![sp(0, 3, true), sp(4, 7, false)]);
+        assert_eq!(spans(&f, "bar foo"), vec![sp(0, 3, true), sp(4, 7, false)]);
         // Several matches of each.
         assert_eq!(
-            f.line_spans("foo bar foo bar"),
+            spans(&f, "foo bar foo bar"),
             vec![sp(0, 3, false), sp(4, 7, true), sp(8, 11, false), sp(12, 15, true)]
         );
         // Exclude filters and path filters add nothing.
         let f = compile(&[line("foo", false), not_line("bar", false), path("foo", false)]);
-        assert_eq!(f.line_spans("foo bar"), vec![sp(0, 3, false)]);
-        assert!(f.line_spans("nothing").is_empty());
+        assert_eq!(spans(&f, "foo bar"), vec![sp(0, 3, false)]);
+        assert!(spans(&f, "nothing").is_empty());
     }
 
     #[test]
     fn line_spans_clip_secondary_to_outside_the_primary() {
         // Secondary `abcdef` overlapped by primary `cd` in the middle: two remainders.
         let f = compile(&[line("cd", false), line("abcdef", false)]);
-        assert_eq!(f.line_spans("abcdef"), vec![sp(0, 2, true), sp(2, 4, false), sp(4, 6, true)]);
+        assert_eq!(spans(&f, "abcdef"), vec![sp(0, 2, true), sp(2, 4, false), sp(4, 6, true)]);
         // Secondary inside the primary vanishes.
         let f = compile(&[line("abcdef", false), line("cd", false)]);
-        assert_eq!(f.line_spans("abcdef"), vec![sp(0, 6, false)]);
+        assert_eq!(spans(&f, "abcdef"), vec![sp(0, 6, false)]);
         // Partial overlap on one side.
         let f = compile(&[line("cdef", false), line("abcd", false)]);
-        assert_eq!(f.line_spans("abcdef"), vec![sp(0, 2, true), sp(2, 6, false)]);
+        assert_eq!(spans(&f, "abcdef"), vec![sp(0, 2, true), sp(2, 6, false)]);
         // Identical matches: only the primary one.
         let f = compile(&[line("foo", false), line("foo", true)]);
-        assert_eq!(f.line_spans("foo"), vec![sp(0, 3, false)]);
+        assert_eq!(spans(&f, "foo"), vec![sp(0, 3, false)]);
     }
 
     #[test]
     fn line_spans_merge_overlapping_secondary() {
         let f = compile(&[line("zz", false), line("abc", false), line("bcd", false)]);
-        assert_eq!(f.line_spans("abcd zz"), vec![sp(0, 4, true), sp(5, 7, false)]);
+        assert_eq!(spans(&f, "abcd zz"), vec![sp(0, 4, true), sp(5, 7, false)]);
         // A merged secondary range is clipped around a primary match inside it.
         let f = compile(&[line("c", false), line("abc", false), line("bcd", false)]);
-        assert_eq!(f.line_spans("abcd"), vec![sp(0, 2, true), sp(2, 3, false), sp(3, 4, true)]);
+        assert_eq!(spans(&f, "abcd"), vec![sp(0, 2, true), sp(2, 3, false), sp(3, 4, true)]);
     }
 
     #[test]
     fn line_spans_empty_matches_are_dropped() {
         let f = compile(&[line("a", false), line("x*", true)]);
-        assert_eq!(f.line_spans("bab"), vec![sp(1, 2, false)]);
+        assert_eq!(spans(&f, "bab"), vec![sp(1, 2, false)]);
     }
 
     #[test]
     fn line_spans_use_character_offsets() {
         let f = compile(&[line("foo", false)]);
-        assert_eq!(f.line_spans("ä foo"), vec![sp(2, 5, false)]);
-        assert_eq!(f.line_spans("→ä foo → foo"), vec![sp(3, 6, false), sp(9, 12, false)]);
+        assert_eq!(spans(&f, "ä foo"), vec![sp(2, 5, false)]);
+        assert_eq!(spans(&f, "→ä foo → foo"), vec![sp(3, 6, false), sp(9, 12, false)]);
         let f = compile(&[line("ö", false), line("→", false)]);
-        assert_eq!(f.line_spans("ä→ö"), vec![sp(1, 2, true), sp(2, 3, false)]);
+        assert_eq!(spans(&f, "ä→ö"), vec![sp(1, 2, true), sp(2, 3, false)]);
         // A four-byte character.
         let f = compile(&[line("x", false)]);
-        assert_eq!(f.line_spans("😀x"), vec![sp(1, 2, false)]);
+        assert_eq!(spans(&f, "😀x"), vec![sp(1, 2, false)]);
         // Case-insensitive match of a non-ASCII letter.
         let f = compile(&[line("ÄB", false)]);
-        assert!(f.line_spans("xäb").is_empty());
+        assert!(spans(&f, "xäb").is_empty());
         let f = compile(&[line("äb", false)]);
-        assert_eq!(f.line_spans("xÄB"), vec![sp(1, 3, false)]);
+        assert_eq!(spans(&f, "xÄB"), vec![sp(1, 3, false)]);
     }
 
     #[test]

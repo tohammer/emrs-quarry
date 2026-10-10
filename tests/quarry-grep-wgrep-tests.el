@@ -358,6 +358,7 @@ The line of long.txt is cut and the one of bytes.txt is not valid UTF-8.")
     (quarry-test-grep-wgrep--enter)
     (quarry-test-grep-wgrep--replace "one.txt" 2 "apple" "plum")
     (let ((text (buffer-string))
+          (place (point))
           (sent (length quarry-test-grep--requests)))
       (dolist (call (list #'quarry-grep-rerun
                           #'revert-buffer
@@ -367,6 +368,29 @@ The line of long.txt is cut and the one of bytes.txt is not valid UTF-8.")
                           #'quarry-grep-remove-other-filters
                           #'quarry-grep-edit
                           (lambda () (quarry-grep "apple" nil dir))
+                          (lambda () (quarry-grep-literal "apple" nil dir))
+                          (lambda () (quarry-grep-project "apple" nil))
+                          ;; From another buffer: refused before anything
+                          ;; is asked.
+                          (lambda ()
+                            (with-temp-buffer
+                              (insert "symbol")
+                              (setq default-directory dir)
+                              (quarry-grep-dwim)))
+                          (lambda ()
+                            (let ((prompts nil))
+                              (unwind-protect
+                                  (with-temp-buffer
+                                    (setq default-directory dir)
+                                    (save-window-excursion
+                                      (switch-to-buffer (current-buffer))
+                                      (let ((minibuffer-setup-hook
+                                             (cons (lambda ()
+                                                     (push (minibuffer-prompt) prompts))
+                                                   minibuffer-setup-hook)))
+                                        (execute-kbd-macro
+                                         (kbd "M-x quarry-grep RET apple RET RET RET")))))
+                                (should (equal prompts '("M-x "))))))
                           ;; A click on the header line.
                           (lambda ()
                             (let ((header (quarry-grep--header)))
@@ -382,6 +406,7 @@ The line of long.txt is cut and the one of bytes.txt is not valid UTF-8.")
       (set-buffer (quarry-test-grep--buffer))
       (should (= (length quarry-test-grep--requests) sent))
       (should (equal (buffer-string) text))
+      (should (= (point) place))
       (should (eq (current-local-map) wgrep-mode-map)))
     ;; Edit mode ended from Lisp, where no command loop notices it: the
     ;; next command of the mode puts the buffer in order first.
@@ -391,6 +416,37 @@ The line of long.txt is cut and the one of bytes.txt is not valid UTF-8.")
     (quarry-test-grep--wait)
     (quarry-test-grep-wgrep--working)
     (should (member '("one.txt" 2 "an apple here") (quarry-test-grep--results)))))
+
+(ert-deftest quarry-test-grep-wgrep-commit-while-narrowed ()
+  "A commit from a narrowed buffer restores the whole buffer."
+  (skip-unless (quarry-test-grep-wgrep--p))
+  (quarry-test-grep-wgrep--with-results dir
+    (quarry-test-grep-wgrep--enter)
+    (let ((bol (quarry-test-grep--line-pos "one.txt" 2)))
+      (narrow-to-region bol (save-excursion (goto-char bol) (pos-eol)))
+      (goto-char (point-min))
+      (search-forward "apple")
+      (replace-match "pear" t t)
+      (execute-kbd-macro (kbd "C-c C-c"))
+      (should (buffer-narrowed-p))
+      (widen)
+      (quarry-test-grep-wgrep--working)
+      (should (member '("one.txt" 2 "an pear here") (quarry-test-grep--results)))
+      (should (string-match-p "The results were edited" (quarry-test-grep--status)))
+      (should (= (length (quarry-test-grep--lines-with 'quarry-grep-status)) 2)))
+    ;; Narrowed when e is pressed: wgrep gets the whole buffer.
+    (narrow-to-region (quarry-test-grep--line-pos "two/two.txt" 1) (point-max))
+    (quarry-test-grep-wgrep--answering nil (execute-kbd-macro (kbd "e")))
+    (should (eq (current-local-map) wgrep-mode-map))
+    (should-not (buffer-narrowed-p))
+    (goto-char (point-min))
+    (should-error (insert "x") :type 'text-read-only)
+    (quarry-test-grep-wgrep--replace "two/two.txt" 1 "pie" "cake")
+    (execute-kbd-macro (kbd "C-c C-c"))
+    (quarry-test-grep-wgrep--working)
+    (should (equal (with-current-buffer (get-file-buffer (expand-file-name "two/two.txt" dir))
+                     (buffer-string))
+                   "apple cake\nno fruit\n"))))
 
 ;;;; The stale check
 

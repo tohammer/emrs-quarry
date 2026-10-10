@@ -99,6 +99,10 @@ struct Rules {
     use_ignore_files: bool,
     extra: Gitignore,
     types: Option<ignore::types::Types>,
+    /// With `include_hidden` false: also reject every entry whose name starts with a dot in the entry check.
+    /// The `ignore` crate does not treat a file as hidden when a selected file type whitelists it, so with
+    /// `types` its own rule lets `.hidden.txt` through. False for the index, which has no types.
+    reject_dot_names: bool,
     /// Consulted for entries that passed every other rule (not for the walk's start directory).
     filter: Option<EntryFilter>,
     on_dir: Option<OnDir>,
@@ -107,7 +111,8 @@ struct Rules {
 /// The configured walk builder: the one implementation of the rules (the index's parallel walk, the test
 /// reference walk and [`walker`]).
 fn make_builder_from(rules: Rules, start: &Path) -> WalkBuilder {
-    let Rules { root, include_hidden, use_ignore_files, extra, types, filter, on_dir } = rules;
+    let Rules { root, include_hidden, use_ignore_files, extra, types, reject_dot_names, filter, on_dir } = rules;
+    let reject_dot_names = reject_dot_names && !include_hidden;
     let mut b = WalkBuilder::new(start);
     b.hidden(!include_hidden)
         .parents(use_ignore_files)
@@ -133,20 +138,26 @@ fn make_builder_from(rules: Rules, start: &Path) -> WalkBuilder {
         if is_dir && entry.file_name().to_str().is_some_and(|n| VCS_DIRS.contains(&n)) {
             return false;
         }
+        if reject_dot_names && entry.file_name().as_encoded_bytes().first() == Some(&b'.') {
+            return false;
+        }
         if extra.matched(entry.path(), is_dir).is_ignore() {
             return false;
         }
-        let rel = rel_string(&root, entry.path());
-        if let (Some(filter), Some(rel)) = (&filter, &rel)
-            && !filter(rel, is_dir)
+        // The relative path is built only when somebody asks for it: the index's walk needs it for
+        // directories alone.
+        let on_dir = if is_dir { on_dir.as_ref() } else { None };
+        if filter.is_none() && on_dir.is_none() {
+            return true;
+        }
+        let Some(rel) = rel_string(&root, entry.path()) else { return true };
+        if let Some(filter) = &filter
+            && !filter(&rel, is_dir)
         {
             return false;
         }
-        if is_dir
-            && let Some(on_dir) = &on_dir
-            && let Some(rel) = &rel
-        {
-            on_dir(rel);
+        if let Some(on_dir) = on_dir {
+            on_dir(&rel);
         }
         true
     });
@@ -161,6 +172,7 @@ fn make_builder(config: &WalkConfig, start: &Path, extra: Gitignore, on_dir: Opt
         use_ignore_files: true,
         extra,
         types: None,
+        reject_dot_names: false,
         filter: None,
         on_dir,
     };
@@ -189,6 +201,9 @@ pub type EntryFilter = Arc<dyn Fn(&str, bool) -> bool + Send + Sync>;
 /// symbolic links not followed, hidden files per `include_hidden`, extra `ignores` as an additional exclusion
 /// layer, ignore files per `use_ignore_files`) and the walker's thread count.
 ///
+/// With `include_hidden` false no entry whose name starts with a dot is yielded, also not a file that
+/// `options.types` selects (the `ignore` crate alone would yield that one).
+///
 /// `filter`, if given, is consulted for every entry below the root that passed the other rules, not for the root
 /// itself. An entry whose path is not valid UTF-8 cannot be given to the filter: it is kept, and the caller
 /// decides what to do with it (use [`rel_string`], which returns `None` for it).
@@ -202,6 +217,7 @@ pub fn walker(options: &WalkOptions, filter: Option<EntryFilter>) -> Result<igno
         use_ignore_files: options.use_ignore_files,
         extra,
         types: options.types.clone(),
+        reject_dot_names: true,
         filter,
         on_dir: None,
     };
@@ -970,6 +986,27 @@ mod tests {
         let mut options = opts(dir.path(), true, true, &[]);
         options.types = Some(tb.build().unwrap());
         assert_eq!(walker_files(&options, None), set(&["a.rs", "sub/b.rs", "sub/deep/c.rs"]));
+    }
+
+    #[test]
+    fn walker_types_do_not_bring_hidden_files_back() {
+        let t = TempDir::new().unwrap();
+        for file in [".hidden.txt", "seen.txt", ".hd/x.txt", "sub/y.txt", "sub/.z.txt", "other.rs"] {
+            write(t.path(), file, "");
+        }
+        let mut tb = ignore::types::TypesBuilder::new();
+        tb.add("text", "*.txt").unwrap();
+        tb.select("text");
+        let types = tb.build().unwrap();
+        let mut options = opts(t.path(), false, true, &[]);
+        options.types = Some(types.clone());
+        assert_eq!(walker_files(&options, None), set(&["seen.txt", "sub/y.txt"]));
+        let mut options = opts(t.path(), true, true, &[]);
+        options.types = Some(types);
+        assert_eq!(
+            walker_files(&options, None),
+            set(&[".hd/x.txt", ".hidden.txt", "seen.txt", "sub/.z.txt", "sub/y.txt"])
+        );
     }
 
     #[test]
