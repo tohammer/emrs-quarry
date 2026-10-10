@@ -1,4 +1,4 @@
 /target
 *.elc
-lisp/projdex-module.*
+lisp/quarry-module.*
 /.cargo/config.toml

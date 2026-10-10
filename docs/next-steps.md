@@ -5,7 +5,8 @@ architecture.md or an ADR.
 
 ## Next
 
-Pick from the backlog.
+- Write the spec for the grep tool (ADR 0010). The evaluation is
+  `GREP-EVALUATION.md` in the emrs repository.
 
 ## Watch out for
 
@@ -22,11 +23,11 @@ Pick from the backlog.
   unescaping changes in a way that matters.
 - Development mode (Doom, `:local-repo` with `:build (:not compile)`, README
   "Development"): Elisp edits need no `doom sync`, only `eval-buffer` or a
-  restart; Rust changes need `M-x projdex-build-module` and a restart; a
+  restart; Rust changes need `M-x quarry-build-module` and a restart; a
   new file in `lisp/` needs `doom sync` once. The module is loaded from
-  `lisp/projdex-module.so` in the checkout.
+  `lisp/quarry-module.so` in the checkout.
 - The consult front end uses consult internals (`consult--async-pipeline`
   and its steps, ADR 0008). After a consult upgrade, rerun
-  `tests/run-ert.sh` with `PROJDEX_TEST_LOAD_PATH` pointing at it (and at
+  `tests/run-ert.sh` with `QUARRY_TEST_LOAD_PATH` pointing at it (and at
   compat); without it the command and end-to-end tests
   are skipped.

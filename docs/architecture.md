@@ -4,23 +4,24 @@ This document describes the system as it is now.
 
 ## Overview
 
-projdex is an Emacs package with two parts: a Rust `cdylib` built on emrs
+quarry is an Emacs package with two parts: a Rust `cdylib` built on emrs
 (`src/`) that keeps one file index per project root, and the Elisp library
-`lisp/projdex.el` that starts the instances, owns the completion table and
-provides the commands. An optional file, `lisp/projdex-consult.el`, adds a
-consult front end.
+`lisp/quarry.el` that starts the instances, owns the completion table and
+provides the commands. An optional file, `lisp/quarry-consult.el`, adds a
+consult front end. The project was renamed from projdex; older specs and
+ADRs use the old name (ADR 0010).
 
 ```text
  Emacs thread                               runtime threads (emrs pool)
- projdex.el                                 projdex service, one per root
-   projdex-find-file                          index + matcher state
+ quarry.el                                  index service, one per root
+   quarry-find-file                           index + matcher state
      completing-read ── table ── emrs-call-sync (:query) ─► handle
                                                             ▲  ▲
    project-files :around ── emrs-call-stream (:files) ─────┘  │ self-messages
    on-event ◄── (:indexed) (:changed) (:watch-failed) ◄─┐     │ WalkBatch/WalkDone,
                                                         │     │ FsChanges/FsRescan/
                                                         │     │ WatchFailed
-                                                        └─ walk task, projdex-watch thread
+                                                        └─ walk task, quarry-watch thread
 ```
 
 The service owns the index. Everything that changes it reaches the service
@@ -31,22 +32,22 @@ as a self-message through `ctx.address()`, so all index access happens in
 
 | Component | Responsibility | Depends on |
 |---|---|---|
-| `src/lib.rs` | `emrs::module!("projdex", [Projdex])`; module docs | `service` |
-| `src/service.rs` | `Projdex`: start arguments, `Request`/`Event`, `start`, `handle`; generations; pending `:files` and `:rescan` replies; the `:files` stream task | `index`, `matcher`, `walk`, `watch`, `emrs` |
+| `src/lib.rs` | `emrs::module!("quarry", [IndexService])`; module docs | `service` |
+| `src/service.rs` | `IndexService`: start arguments, `Request`/`Event`, `start`, `handle`; generations; pending `:files` and `:rescan` replies; the `:files` stream task | `index`, `matcher`, `walk`, `watch`, `emrs` |
 | `src/index.rs` | The path set of one project: add, remove, remove by directory prefix, iterate; a version number that changes with every mutation; paths kept as `Utf32String` | `nucleo-matcher` |
 | `src/matcher.rs` | Query text to ranked paths with match positions; parallel scoring; incremental narrowing | `index`, `nucleo-matcher` |
 | `src/walk.rs` | Walker configuration (`ignore` crate), parallel walk sending batches of at most 1000 paths, skipped count | `ignore` |
 | `src/watch.rs` | Watch set, debouncing, translation of file-system events into index changes, rescan triggers, failure reporting | `walk`, `notify`, `notify-debouncer-full` |
-| `lisp/projdex.el` | Options, module lookup, instance table, event and exit handling, query entry points, completion table and `projdex` style, `projdex--prepare`, commands, `projdex-mode` and its remap through `projdex-find-file-command`, `project-files` method | `emrs.el`, `projdex-build.el`, `project` |
-| `lisp/projdex-consult.el` | Optional consult front end: `projdex-consult-find-file`, the async pipeline step that queries the index, its options and history. Loads and byte-compiles without consult; `projdex.el` never loads it | `projdex.el`, `emrs.el`, consult 2.0 or later (optional) |
-| `lisp/projdex-build.el` | Builds the module with cargo and installs it as `lisp/projdex-module` plus `module-file-suffix` in the repository: repository detection, `projdex-build-module` (async), `projdex-build-module-sync` (for `:pre-build`), install by rename. Needs neither emrs nor the module | Cargo, Emacs |
-| `tests/projdex-tests.el`, `tests/projdex-consult-tests.el`, `tests/run-ert.sh` | ERT suite on generated trees. The script builds the debug module, copies the Lisp files and the module as `projdex-module` to `target/elisp` (so a module built in `lisp/` is not the one under test), takes `emrs.el` from the emrs checkout Cargo resolved and runs with `--module-assertions`. The script also adds the directories of `PROJDEX_TEST_LOAD_PATH` (consult, compat) to `load-path` and loads the consult tests; without consult 2.0 or later only the command and end-to-end tests are skipped, the step tests run | Cargo, Emacs |
+| `lisp/quarry.el` | Options, module lookup, instance table, event and exit handling, query entry points, completion table and `quarry` style, `quarry--prepare`, commands, `quarry-mode` and its remap through `quarry-find-file-command`, `project-files` method | `emrs.el`, `quarry-build.el`, `project` |
+| `lisp/quarry-consult.el` | Optional consult front end: `quarry-consult-find-file`, the async pipeline step that queries the index, its options and history. Loads and byte-compiles without consult; `quarry.el` never loads it | `quarry.el`, `emrs.el`, consult 2.0 or later (optional) |
+| `lisp/quarry-build.el` | Builds the module with cargo and installs it as `lisp/quarry-module` plus `module-file-suffix` in the repository: repository detection, `quarry-build-module` (async), `quarry-build-module-sync` (for `:pre-build`), install by rename. Needs neither emrs nor the module | Cargo, Emacs |
+| `tests/quarry-tests.el`, `tests/quarry-consult-tests.el`, `tests/run-ert.sh` | ERT suite on generated trees. The script builds the debug module, copies the Lisp files and the module as `quarry-module` to `target/elisp` (so a module built in `lisp/` is not the one under test), takes `emrs.el` from the emrs checkout Cargo resolved and runs with `--module-assertions`. The script also adds the directories of `QUARRY_TEST_LOAD_PATH` (consult, compat) to `load-path` and loads the consult tests; without consult 2.0 or later only the command and end-to-end tests are skipped, the step tests run | Cargo, Emacs |
 | Rust tests (in each `src/*.rs`) | Unit tests per module; service and watcher tests through `emrs::testing::Host` on temporary trees | `tempfile` |
-| `bench/run-bench.sh`, `bench/projdex-bench.el` | Generates 100k and 1M file trees, measures indexing time, memory and per-call latency against a `project-files` + `flex` baseline | Cargo, Emacs, git |
+| `bench/run-bench.sh`, `bench/quarry-bench.el` | Generates 100k and 1M file trees, measures indexing time, memory and per-call latency against a `project-files` + `flex` baseline | Cargo, Emacs, git |
 
 ## How it fits together
 
-`emrs.el` loads `projdex-module` and talks to its services; `projdex.el`
+`emrs.el` loads `quarry-module` and talks to its `index` service; `quarry.el`
 uses the emrs API (`emrs-start`, `emrs-call`, `emrs-call-sync`,
 `emrs-call-stream`, ...) and never calls the module functions directly. The
 module's emrs version is fixed by the commit pinned in `Cargo.toml`, and the
@@ -57,7 +58,7 @@ branch, so `Cargo.toml` pins only commits on that branch (ADR 0007).
 ## Parts
 
 - [The Elisp side](architecture/elisp.md): building and finding the
-  module, instances, completion and `projdex-find-file`, the consult
+  module, instances, completion and `quarry-find-file`, the consult
   front end.
 - [The service](architecture/service.md): threads, message flow,
   generations and rescans, queries, watching.

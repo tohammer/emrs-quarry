@@ -1,4 +1,4 @@
-//! The `projdex` service: one instance per project root, owning the index of that project.
+//! The `index` service: one instance per project root, owning the index of that project.
 //!
 //! Lisp shapes (spec "Start arguments", "Requests and replies", "Events"):
 //!
@@ -173,7 +173,7 @@ struct Walk {
     watch_stamp: Option<WalkStamp>,
 }
 
-pub struct Projdex {
+pub struct IndexService {
     root: String,
     config: Arc<WalkConfig>,
     /// The index of the last finished walk (empty before the first one).
@@ -215,7 +215,7 @@ fn view<'a>(current: &'a Index, has_index: bool, walk: &'a Option<Walk>) -> &'a 
     }
 }
 
-impl Projdex {
+impl IndexService {
     fn view(&self) -> &Index {
         view(&self.current, self.has_index, &self.walk)
     }
@@ -373,8 +373,8 @@ impl Projdex {
     }
 }
 
-impl Service for Projdex {
-    const NAME: &'static str = "projdex";
+impl Service for IndexService {
+    const NAME: &'static str = "index";
     type Args = Args;
     type Request = Request;
     type Event = Event;
@@ -382,12 +382,12 @@ impl Service for Projdex {
     fn start(args: Args, ctx: &Context<Self>) -> Result<Self, Error> {
         let root = PathBuf::from(&args.root);
         if !root.is_absolute() {
-            return Err(Error::new(format!("projdex root is not an absolute path: {}", args.root)));
+            return Err(Error::new(format!("quarry root is not an absolute path: {}", args.root)));
         }
         match std::fs::metadata(&root) {
-            Err(e) => return Err(Error::new(format!("projdex root {} cannot be used: {e}", args.root))),
+            Err(e) => return Err(Error::new(format!("quarry root {} cannot be used: {e}", args.root))),
             Ok(meta) if !meta.is_dir() => {
-                return Err(Error::new(format!("projdex root is not a directory: {}", args.root)));
+                return Err(Error::new(format!("quarry root is not a directory: {}", args.root)));
             }
             Ok(_) => {}
         }
@@ -412,7 +412,7 @@ impl Service for Projdex {
                 None
             }
         };
-        let mut projdex = Projdex {
+        let mut service = IndexService {
             root: args.root,
             config,
             current: Index::new(),
@@ -428,8 +428,8 @@ impl Service for Projdex {
             skipped: 0,
             watch,
         };
-        projdex.start_walk(ctx);
-        Ok(projdex)
+        service.start_walk(ctx);
+        Ok(service)
     }
 
     fn handle(&mut self, request: Request, reply: Reply, ctx: &Context<Self>) {
@@ -645,11 +645,11 @@ mod tests {
         Request::Query { text: text.to_string(), limit, positions, substring: false }
     }
 
-    fn status(host: &mut Host<Projdex>) -> Status {
+    fn status(host: &mut Host<IndexService>) -> Status {
         host.call::<Status>(Request::Status).unwrap()
     }
 
-    fn all_paths(host: &mut Host<Projdex>) -> BTreeSet<String> {
+    fn all_paths(host: &mut Host<IndexService>) -> BTreeSet<String> {
         let result = host.call_stream::<String>(Request::Files).unwrap();
         assert_eq!(result.status, StreamEnd::Done);
         result.items.into_iter().collect()
@@ -660,7 +660,7 @@ mod tests {
     }
 
     /// Waits for the next `:indexed` event, skipping other events.
-    fn indexed_files(host: &mut Host<Projdex>) -> usize {
+    fn indexed_files(host: &mut Host<IndexService>) -> usize {
         loop {
             match host.next_event() {
                 Some(Event::Indexed { files, .. }) => return files,
@@ -671,19 +671,19 @@ mod tests {
     }
 
     /// Waits for an `:indexed` event with `files` files, skipping other events.
-    fn wait_indexed(host: &mut Host<Projdex>, files: usize) {
+    fn wait_indexed(host: &mut Host<IndexService>, files: usize) {
         while indexed_files(host) != files {}
     }
 
     /// Starts an instance and waits for its first `:indexed` event.
-    fn started(root: &Path) -> Host<Projdex> {
-        let mut host = Host::<Projdex>::start(args(root));
+    fn started(root: &Path) -> Host<IndexService> {
+        let mut host = Host::<IndexService>::start(args(root));
         indexed_files(&mut host);
         host
     }
 
     fn start_error(args: Args) -> String {
-        let mut host = Host::<Projdex>::start(args);
+        let mut host = Host::<IndexService>::start(args);
         let (state, error) = host.wait_exit();
         assert_eq!(state, InstanceState::Failed);
         error.expect("a start error").to_string()
@@ -722,8 +722,8 @@ mod tests {
         assert_eq!(all_paths(&mut host), set(&["other"]));
     }
 
-    fn started_with(args: Args) -> Host<Projdex> {
-        let mut host = Host::<Projdex>::start(args);
+    fn started_with(args: Args) -> Host<IndexService> {
+        let mut host = Host::<IndexService>::start(args);
         indexed_files(&mut host);
         host
     }
@@ -733,7 +733,7 @@ mod tests {
         let t = tree(&["src/main.rs", "src/lib.rs", "README.md"]);
         let probe = hook::install(t.path());
         probe.hold();
-        let mut host = Host::<Projdex>::start(args(t.path()));
+        let mut host = Host::<IndexService>::start(args(t.path()));
         assert!(probe.wait_reached(1));
         // Every batch of the first walk was queued before this query, so the partial index is complete here.
         let during = host.call::<QueryReply>(query("", 10, false)).unwrap();
@@ -801,7 +801,7 @@ mod tests {
         let t = tree(&["a", "b/c", "b/d/e"]);
         let probe = hook::install(t.path());
         probe.hold();
-        let mut host = Host::<Projdex>::start(args(t.path()));
+        let mut host = Host::<IndexService>::start(args(t.path()));
         assert!(probe.wait_reached(1));
         let call = host.begin_stream(Request::Files).unwrap();
         // The status request is handled after the files request; the stream has not started then.
@@ -900,7 +900,7 @@ mod tests {
         watch_hook::fail_setup(t.path());
         let probe = hook::install(t.path());
         probe.hold();
-        let mut host = Host::<Projdex>::start(args(t.path()));
+        let mut host = Host::<IndexService>::start(args(t.path()));
         assert!(probe.wait_reached(1));
         write(t.path(), "b");
         let rescan = host.begin_stream(Request::Rescan).unwrap();
@@ -966,7 +966,7 @@ mod tests {
         watch_hook::fail_setup(t.path());
         let probe = hook::install(t.path());
         probe.hold();
-        let mut host = Host::<Projdex>::start(args(t.path()));
+        let mut host = Host::<IndexService>::start(args(t.path()));
         assert!(probe.wait_reached(1));
         let files = host.begin_stream(Request::Files).unwrap();
         let rescan = host.begin_stream(Request::Rescan).unwrap();
@@ -1000,7 +1000,7 @@ mod tests {
         watch_hook::fail_setup(t.path());
         let probe = hook::install(t.path());
         probe.hold();
-        let mut host = Host::<Projdex>::start(args(t.path()));
+        let mut host = Host::<IndexService>::start(args(t.path()));
         assert!(probe.wait_reached(1));
         host.send(Request::WalkDone {
             generation: 1,
@@ -1036,7 +1036,7 @@ mod tests {
         let t = tree(&["a"]);
         let probe = hook::install(t.path());
         probe.hold();
-        let mut host = Host::<Projdex>::start(args(t.path()));
+        let mut host = Host::<IndexService>::start(args(t.path()));
         assert!(probe.wait_reached(1));
         let files = host.begin_stream(Request::Files).unwrap();
         assert_eq!(host.stop(), InstanceState::Stopped);
@@ -1062,12 +1062,12 @@ mod tests {
     }
 
     /// The paths queries see now (does not wait for a running walk).
-    fn view_paths(host: &mut Host<Projdex>) -> BTreeSet<String> {
+    fn view_paths(host: &mut Host<IndexService>) -> BTreeSet<String> {
         host.call::<QueryReply>(query("", 10_000, false)).unwrap().paths.into_iter().collect()
     }
 
     /// Polls queries until the paths are exactly `want`.
-    fn wait_paths(host: &mut Host<Projdex>, want: &[&str]) {
+    fn wait_paths(host: &mut Host<IndexService>, want: &[&str]) {
         let want = set(want);
         let deadline = Instant::now() + WAIT;
         loop {
@@ -1081,7 +1081,7 @@ mod tests {
     }
 
     /// Collects `:changed` events until they add up to (`added`, `removed`); skips other events.
-    fn wait_changed(host: &mut Host<Projdex>, added: usize, removed: usize) {
+    fn wait_changed(host: &mut Host<IndexService>, added: usize, removed: usize) {
         let (mut a, mut r) = (0, 0);
         while (a, r) != (added, removed) {
             match host.next_event() {
@@ -1403,7 +1403,7 @@ mod tests {
         let r = t.path();
         let probe = hook::install(r);
         probe.hold();
-        let mut host = Host::<Projdex>::start(args(r));
+        let mut host = Host::<IndexService>::start(args(r));
         assert!(probe.wait_reached(1));
         write(r, "c");
         std::fs::remove_file(r.join("a")).unwrap();
@@ -1419,7 +1419,7 @@ mod tests {
         let t = tree(&["a", "b"]);
         let r = t.path();
         watch_hook::fail_setup(r);
-        let mut host = Host::<Projdex>::start(args(r));
+        let mut host = Host::<IndexService>::start(args(r));
         match host.next_event() {
             Some(Event::WatchFailed { message }) => assert!(message.contains("simulated"), "{message}"),
             other => panic!("expected :watch-failed, got {other:?}"),

@@ -15,14 +15,14 @@ when quota allows; then mirror emrs's matrix (Linux, macOS, Emacs 30.1 and
 Installation from GitHub works through package recipes and a local cargo
 build (spec 2026-10-09-install-from-github, README "Installation"). Open:
 prebuilt binaries, which need CI (see above) and would replace the cargo
-build and its Rust requirement, and a package archive (MELPA) for projdex
+build and its Rust requirement, and a package archive (MELPA) for quarry
 and emrs. Depends on emrs's own distribution work (emrs backlog, "Prebuilt
 artifacts and distribution"). Origin: the install-from-GitHub spec, which
-left both out of scope. Revisit before announcing projdex to users.
+left both out of scope. Revisit before announcing quarry to users.
 
 ## nucleo-matcher back to a crates.io release
 
-projdex pins `nucleo-matcher` to an upstream git commit because 0.3.1 has
+quarry pins `nucleo-matcher` to an upstream git commit because 0.3.1 has
 the case-sensitive prefix bug (ADR 0003). Revisit when a release after
 0.3.1 appears on crates.io.
 
@@ -92,7 +92,7 @@ shared strings).
 
 ## Waiting for `(:files)` runs other process filters
 
-`projdex--collect-files` waits with `(accept-process-output nil 0.05)`,
+`quarry--collect-files` waits with `(accept-process-output nil 0.05)`,
 so other processes' filters and timers can run inside `project-files`.
 `emrs-call-sync` waits on the module pipe only, but that pipe is private
 to emrs. Origin: v1 review (Elisp), 2026-10-09; deferred because it needs
@@ -101,7 +101,7 @@ pipe). Revisit with the next emrs change.
 
 ## Symlinked project roots get separate instances
 
-`projdex--root` does not resolve symlinks, so one directory reached by two
+`quarry--root` does not resolve symlinks, so one directory reached by two
 spellings gets two instances and two sets of watches. Using
 `file-truename` only for the instance key would fix it, but
 `project-files` must keep returning paths under the project's own
@@ -110,20 +110,20 @@ Revisit on a report.
 
 ## Order-dependent ERT test
 
-`projdex-test-build-async-installs` passes only while no projdex module is
+`quarry-test-build-async-installs` passes only while no quarry module is
 loaded: with one loaded, the message gains "; restart Emacs to use it".
 ERT runs tests alphabetically, so a test that loads the module and sorts
-before it breaks it; the consult tests are named `projdex-test-consult-*`
+before it breaks it; the consult tests are named `quarry-test-consult-*`
 to sort after it. Origin: task 2 of the consult spec (2026-10-09).
 Revisit when the next test that loads the module is added, or fix the
 test to accept both messages.
 
 ## Generic message when an instance dies during a consult prompt
 
-When the instance exits while `projdex-consult-find-file` waits for a
-reply, the step reports "projdex: The instance terminated" instead of the
+When the instance exits while `quarry-consult-find-file` waits for a
+reply, the step reports "quarry: The instance terminated" instead of the
 reason: emrs fails open calls before it runs `on-exit`, where
-`projdex--on-exit` records the reason in `projdex--failures`. The
+`quarry--on-exit` records the reason in `quarry--failures`. The
 `display-warning` from `on-exit` still shows the reason. Fix: report from
 a `run-at-time 0` timer, after `on-exit` ran. Origin: review of the
 consult spec (2026-10-09); deferred because the warning already carries
