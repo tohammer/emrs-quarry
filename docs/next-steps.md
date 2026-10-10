@@ -5,8 +5,7 @@ architecture.md or an ADR.
 
 ## Next
 
-- Write the spec for the grep tool (ADR 0010). The evaluation is
-  `GREP-EVALUATION.md` in the emrs repository.
+- Implement the grep tool: spec `2026-10-10-grep`, branch `grep`.
 
 ## Watch out for
 
