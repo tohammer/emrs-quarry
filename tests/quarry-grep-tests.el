@@ -529,7 +529,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
                     (nth 2 (quarry-grep--search-filters second))))))))
 
 (ert-deftest quarry-test-grep-keymap ()
-  "The keys of task 5 are bound; those of later tasks are not."
+  "The keys of the mode are bound; the one of the wgrep task is not."
   (pcase-dolist (`(,key . ,command)
                  '(("RET" . quarry-grep-visit)
                    ("<mouse-2>" . quarry-grep-mouse-visit)
@@ -553,9 +553,20 @@ Each is (PROMPT . INITIAL-CONTENTS)."
                    ("C-c <" . quarry-grep-history-back)
                    ("C-c >" . quarry-grep-history-forward)
                    ("C-c C-k" . quarry-grep-cancel)
+                   ("- p" . quarry-grep-exclude-path)
+                   ("+ p" . quarry-grep-include-path)
+                   ("- l" . quarry-grep-exclude-line)
+                   ("+ l" . quarry-grep-include-line)
+                   ("- f" . quarry-grep-exclude-file)
+                   ("- d" . quarry-grep-exclude-directory)
+                   ("+ d" . quarry-grep-include-directory)
+                   ("k" . quarry-grep-remove-filter)
+                   ("x" . quarry-grep-toggle-filter)
+                   ("!" . quarry-grep-flip-filter)
+                   ("K" . quarry-grep-remove-other-filters)
                    ("q" . quit-window)))
     (should (eq (keymap-lookup quarry-grep-mode-map key) command)))
-  (dolist (key '("-" "+" "k" "x" "!" "K" "e"))
+  (dolist (key '("e"))
     (should-not (string-prefix-p "quarry-grep"
                                  (format "%s" (keymap-lookup quarry-grep-mode-map key)))))
   (should (eq (get 'quarry-grep-mode 'derived-mode-parent) 'special-mode)))
@@ -1340,6 +1351,471 @@ Each is (PROMPT . INITIAL-CONTENTS)."
             (funcall (nth 2 (nth 0 parts)) click)
             (funcall (nth 2 (nth 1 parts)) click))
           (should (equal asked '(directory files))))))))
+
+;;;; Filters
+
+(defun quarry-test-grep--filter-pos (n)
+  "Return the start of the Nth filter line, counted from 0."
+  (nth n (quarry-test-grep--lines-with 'quarry-grep-filter)))
+
+(defun quarry-test-grep--run-filters (&rest filters)
+  "Run the current search with FILTERS, lists of `quarry-grep--make-filter' arguments."
+  (set-buffer (quarry-test-grep--buffer))
+  (let ((search (quarry-grep--copy-search quarry-grep--current)))
+    (setf (quarry-grep--search-filters search)
+          (mapcar (lambda (args) (apply #'quarry-grep--make-filter args)) filters))
+    (quarry-grep--run search)
+    (quarry-test-grep--wait)))
+
+(defun quarry-test-grep--sent ()
+  "Return the filters of the last request as lists (TARGET EXCLUDE PATTERN REGEXP)."
+  (mapcar (lambda (filter)
+            (mapcar (lambda (key) (plist-get filter key))
+                    '(:target :exclude :pattern :regexp)))
+          (quarry-test-grep--request :filters)))
+
+(defun quarry-test-grep--has-face (pos face)
+  "Return non-nil when the text at POS of the result buffer has FACE."
+  (with-current-buffer (quarry-test-grep--buffer)
+    (let ((value (get-text-property pos 'face)))
+      (if (listp value) (memq face value) (eq value face)))))
+
+(defmacro quarry-test-grep--refused (message &rest body)
+  "Check that BODY signals a `user-error' matching MESSAGE and sends nothing."
+  (declare (indent 1))
+  `(let ((sent (length quarry-test-grep--requests))
+         (lines (quarry-test-grep--filter-lines)))
+     (pop-to-buffer-same-window (quarry-test-grep--buffer))
+     (let ((err (should-error (progn ,@body) :type 'user-error)))
+       (should (string-match-p ,message (cadr err))))
+     (should (= (length quarry-test-grep--requests) sent))
+     (should (equal (quarry-test-grep--filter-lines) lines))))
+
+(ert-deftest quarry-test-grep-add-filters ()
+  "- p, + p, - l and + l ask for a pattern and append a filter."
+  (quarry-test-grep--with-tree (dir)
+    (let ((quarry-grep-line-filter-history nil)
+          (quarry-grep-path-filter-history nil))
+      (quarry-test-grep--search dir)
+      (let ((prompts (quarry-test-grep--prompts
+                      (lambda () (quarry-test-grep--keys "- p sub RET")))))
+        (should (equal prompts '(("Exclude paths containing: " . "")))))
+      (should (equal (quarry-test-grep--sent)
+                     '((:line nil "needle" t) (:path t "sub" nil))))
+      (should (equal (quarry-test-grep--filter-lines)
+                     '(("+" "line/re" "needle" nil) ("-" "path" "sub" nil))))
+      (should (equal (quarry-test-grep--headings) '(".hidden.txt" "notes.txt" "src/a.rs")))
+      ;; With a prefix argument the pattern is a regexp.
+      (let ((prompts (quarry-test-grep--prompts
+                      (lambda () (quarry-test-grep--keys "C-u + p \\.(rs|md)$ RET")))))
+        (should (equal prompts '(("Keep only paths matching regexp: " . "")))))
+      (should (equal (nth 2 (quarry-test-grep--sent)) '(:path nil "\\.(rs|md)$" t)))
+      (should (equal (quarry-test-grep--headings) '("src/a.rs")))
+      (let ((prompts (quarry-test-grep--prompts
+                      (lambda () (quarry-test-grep--keys "- l again RET")))))
+        (should (equal prompts '(("Exclude lines containing: " . "")))))
+      (should (equal (nth 3 (quarry-test-grep--sent)) '(:line t "again" nil)))
+      (should (equal (quarry-test-grep--results) '(("src/a.rs" 2 "    let needle = 1;"))))
+      (let ((prompts (quarry-test-grep--prompts
+                      (lambda () (quarry-test-grep--keys "+ l = SPC 1 RET")))))
+        (should (equal prompts '(("Keep only lines containing: " . "")))))
+      (should (equal (nth 4 (quarry-test-grep--sent)) '(:line nil "= 1" nil)))
+      ;; After a bare C-u the key - is the minus sign of the argument, so
+      ;; the - commands need a digit.
+      (quarry-test-grep--keys "C-u 1 - l ^\\s*// RET")
+      (quarry-test-grep--keys "C-u + l let\\s RET")
+      (quarry-test-grep--keys "C-u 1 - p \\.org$ RET")
+      (should (equal (quarry-test-grep--sent)
+                     '((:line nil "needle" t) (:path t "sub" nil)
+                       (:path nil "\\.(rs|md)$" t) (:line t "again" nil)
+                       (:line nil "= 1" nil) (:line t "^\\s*//" t)
+                       (:line nil "let\\s" t) (:path t "\\.org$" t))))
+      (should (equal (quarry-test-grep--filter-lines)
+                     '(("+" "line/re" "needle" nil) ("-" "path" "sub" nil)
+                       ("+" "path/re" "\\.(rs|md)$" nil) ("-" "line" "again" nil)
+                       ("+" "line" "= 1" nil) ("-" "line/re" "^\\s*//" nil)
+                       ("+" "line/re" "let\\s" nil) ("-" "path/re" "\\.org$" nil))))
+      (should (equal (quarry-test-grep--results) '(("src/a.rs" 2 "    let needle = 1;"))))
+      ;; Each kind has its history.
+      (should (equal quarry-grep-path-filter-history '("\\.org$" "\\.(rs|md)$" "sub")))
+      (should (equal quarry-grep-line-filter-history '("let\\s" "^\\s*//" "= 1" "again")))
+      ;; An empty pattern.
+      (quarry-test-grep--refused "pattern is empty" (execute-kbd-macro (kbd "- p RET")))
+      (quarry-test-grep--refused "pattern is empty" (execute-kbd-macro (kbd "C-u + l RET")))
+      ;; A filter the search has is not added again; the same pattern in
+      ;; another direction or syntax is a different filter.
+      (quarry-test-grep--refused "already has the filter - path sub"
+        (execute-kbd-macro (kbd "- p sub RET")))
+      (quarry-test-grep--refused "already has the filter \\+ line/re let"
+        (execute-kbd-macro (kbd "C-u + l let\\s RET")))
+      ;; One that is switched off is switched on instead.
+      (goto-char (quarry-test-grep--filter-pos 1))
+      (quarry-test-grep--keys "x")
+      (should (equal (nth 1 (quarry-test-grep--filter-lines)) '("-" "path" "sub" "(off)")))
+      (quarry-test-grep--keys "- p sub RET")
+      (should (= (length (quarry-test-grep--filter-lines)) 8))
+      (should (equal (nth 1 (quarry-test-grep--filter-lines)) '("-" "path" "sub" nil)))
+      (quarry-test-grep--keys "+ p sub RET")
+      (should (equal (nth 8 (quarry-test-grep--filter-lines)) '("+" "path" "sub" nil))))))
+
+(ert-deftest quarry-test-grep-filters-from-point ()
+  "- f, - d and + d take the file or directory of the result at point."
+  (quarry-test-grep--with-tree (dir '(("top.txt" . "needle\n")
+                                      ("a/b/c.txt" . "needle\n")
+                                      ("a/d.txt" . "needle\n")
+                                      ("e/f.txt" . "needle\n")))
+    (let ((quarry-grep-path-filter-history nil))
+      (quarry-test-grep--search dir)
+      (should (equal (quarry-test-grep--headings)
+                     '("a/b/c.txt" "a/d.txt" "e/f.txt" "top.txt")))
+      ;; Not in a file block.
+      (dolist (keys '("- f" "- d" "+ d"))
+        (goto-char (point-min))
+        (quarry-test-grep--refused "No file at point" (execute-kbd-macro (kbd keys))))
+      ;; A file in the search directory has no directory to name.
+      (dolist (keys '("- d" "+ d"))
+        (goto-char (quarry-test-grep--line-pos "top.txt" 1))
+        (quarry-test-grep--refused "top\\.txt is in the search directory itself"
+          (execute-kbd-macro (kbd keys))))
+      ;; - f, from a result line, without a prompt.
+      (goto-char (quarry-test-grep--line-pos "a/d.txt" 1))
+      (should-not (quarry-test-grep--prompts (lambda () (quarry-test-grep--keys "- f"))))
+      (should (equal (quarry-test-grep--sent)
+                     '((:line nil "needle" t) (:path t "/a/d.txt" nil))))
+      (should (equal (quarry-test-grep--headings) '("a/b/c.txt" "e/f.txt" "top.txt")))
+      ;; Point is on the file that follows the one that went.
+      (should (= (point) (quarry-test-grep--heading-pos "e/f.txt")))
+      ;; - d: the prompt holds the directory and is shortened to a parent.
+      (goto-char (quarry-test-grep--heading-pos "a/b/c.txt"))
+      (let ((prompts (quarry-test-grep--prompts
+                      (lambda () (quarry-test-grep--keys "- d DEL DEL RET")))))
+        (should (equal prompts '(("Exclude paths containing: " . "/a/b/")))))
+      (should (equal (nth 2 (quarry-test-grep--sent)) '(:path t "/a/" nil)))
+      (should (equal (quarry-test-grep--headings) '("e/f.txt" "top.txt")))
+      (should (= (point) (quarry-test-grep--heading-pos "e/f.txt")))
+      (should (equal (car quarry-grep-path-filter-history) "/a/"))
+      ;; + d, as it stands, on the search before.
+      (quarry-test-grep--keys "C-c <")
+      (goto-char (quarry-test-grep--line-pos "a/b/c.txt" 1))
+      (let ((prompts (quarry-test-grep--prompts
+                      (lambda () (quarry-test-grep--keys "+ d RET")))))
+        (should (equal prompts '(("Keep only paths containing: " . "/a/b/")))))
+      (should (equal (quarry-test-grep--sent)
+                     '((:line nil "needle" t) (:path t "/a/d.txt" nil)
+                       (:path nil "/a/b/" nil))))
+      (should (equal (quarry-test-grep--headings) '("a/b/c.txt")))
+      (should (= (point) (quarry-test-grep--line-pos "a/b/c.txt" 1)))
+      ;; The file is excluded already.
+      (quarry-test-grep--keys "C-c <")
+      (quarry-test-grep--keys "C-c <")
+      (should (equal (quarry-test-grep--sent) '((:line nil "needle" t))))
+      (quarry-test-grep--keys "C-c >")
+      (goto-char (quarry-test-grep--filter-pos 1))
+      (quarry-test-grep--keys "x")
+      (should (member "a/d.txt" (quarry-test-grep--headings)))
+      (goto-char (quarry-test-grep--heading-pos "a/d.txt"))
+      (quarry-test-grep--keys "- f")
+      ;; Switched on again, not added a second time.
+      (should (equal (quarry-test-grep--filter-lines)
+                     '(("+" "line/re" "needle" nil) ("-" "path" "/a/d.txt" nil))))
+      (should-not (member "a/d.txt" (quarry-test-grep--headings))))))
+
+(ert-deftest quarry-test-grep-filter-line-commands ()
+  "k, x, !, % and K change the filter at point; the primary one is kept."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (quarry-test-grep--run-filters '(:pattern "needle" :regexp t)
+                                   '(:pattern "again")
+                                   '(:target path :pattern "/sub/" :exclude t)
+                                   '(:target path :pattern "txt" :enabled nil))
+    (let ((all '(("+" "line/re" "needle" nil) ("+" "line" "again" nil)
+                 ("-" "path" "/sub/" nil) ("+" "path" "txt" "(off)"))))
+      (should (equal (quarry-test-grep--filter-lines) all))
+      (should (equal (quarry-test-grep--sent)
+                     '((:line nil "needle" t) (:line nil "again" nil) (:path t "/sub/" nil))))
+      ;; Not on a filter line.
+      (dolist (keys '("k" "x" "!" "%"))
+        (goto-char (quarry-test-grep--line-pos "src/a.rs" 4))
+        (quarry-test-grep--refused "No filter at point" (execute-kbd-macro (kbd keys))))
+      ;; x: off, not sent, and on again; point stays on the line.
+      (goto-char (1+ (quarry-test-grep--filter-pos 1)))
+      (quarry-test-grep--keys "x")
+      (should (equal (nth 1 (quarry-test-grep--filter-lines)) '("+" "line" "again" "(off)")))
+      (should (equal (quarry-test-grep--sent) '((:line nil "needle" t) (:path t "/sub/" nil))))
+      (should (= (length (quarry-test-grep--results)) 4))
+      (should (= (point) (1+ (quarry-test-grep--filter-pos 1))))
+      (quarry-test-grep--keys "x")
+      (should (equal (quarry-test-grep--filter-lines) all))
+      (should (equal (quarry-test-grep--results) '(("src/a.rs" 4 "// Needle again, needle"))))
+      ;; !: include and exclude.
+      (quarry-test-grep--keys "!")
+      (should (equal (nth 1 (quarry-test-grep--filter-lines)) '("-" "line" "again" nil)))
+      (should (equal (nth 1 (quarry-test-grep--sent)) '(:line t "again" nil)))
+      (should (= (length (quarry-test-grep--results)) 3))
+      (quarry-test-grep--keys "!")
+      (goto-char (quarry-test-grep--filter-pos 2))
+      (quarry-test-grep--keys "!")
+      (should (equal (nth 2 (quarry-test-grep--sent)) '(:path nil "/sub/" nil)))
+      (should-not (quarry-test-grep--results))
+      (quarry-test-grep--keys "!")
+      ;; %: also on a path filter.
+      (quarry-test-grep--keys "%")
+      (should (equal (nth 2 (quarry-test-grep--filter-lines)) '("-" "path/re" "/sub/" nil)))
+      (should (equal (nth 2 (quarry-test-grep--sent)) '(:path t "/sub/" t)))
+      (quarry-test-grep--keys "%")
+      (should (equal (quarry-test-grep--filter-lines) all))
+      ;; k: the line that takes its place; from the last line, the new
+      ;; last line.
+      (should (= (point) (quarry-test-grep--filter-pos 2)))
+      (quarry-test-grep--keys "k")
+      (should (equal (quarry-test-grep--filter-lines)
+                     '(("+" "line/re" "needle" nil) ("+" "line" "again" nil)
+                       ("+" "path" "txt" "(off)"))))
+      (should (= (point) (quarry-test-grep--filter-pos 2)))
+      (quarry-test-grep--keys "k")
+      (should (equal (quarry-test-grep--filter-lines)
+                     '(("+" "line/re" "needle" nil) ("+" "line" "again" nil))))
+      (should (= (point) (quarry-test-grep--filter-pos 1)))
+      (should (equal (quarry-test-grep--sent) '((:line nil "needle" t) (:line nil "again" nil))))
+      ;; The primary filter goes: the next include line filter takes over.
+      (should (eql (get-text-property (quarry-test-grep--line-pos "src/a.rs" 4)
+                                      'quarry-grep-column)
+                   3))
+      (goto-char (point-min))
+      (quarry-test-grep--keys "x")
+      (should (equal (quarry-test-grep--filter-lines)
+                     '(("+" "line/re" "needle" "(off)") ("+" "line" "again" nil))))
+      (should (eq (quarry-grep--primary quarry-grep--current)
+                  (get-text-property (quarry-test-grep--filter-pos 1) 'quarry-grep-filter)))
+      (should (equal (quarry-test-grep--results) '(("src/a.rs" 4 "// Needle again, needle"))))
+      (should (eql (get-text-property (quarry-test-grep--line-pos "src/a.rs" 4)
+                                      'quarry-grep-column)
+                   10))
+      ;; r and t edit the one that is primary now.
+      (let ((prompts (quarry-test-grep--prompts
+                      (lambda () (quarry-test-grep--keys "t RET")))))
+        (should (equal prompts '(("Line literal: " . "again")))))
+      ;; The only enabled include line filter cannot be lost.
+      (goto-char (quarry-test-grep--filter-pos 1))
+      (dolist (keys '("k" "x" "!"))
+        (quarry-test-grep--refused "needs an enabled include line filter"
+          (execute-kbd-macro (kbd keys))))
+      ;; With the other one on again, each of the three is allowed.
+      (goto-char (point-min))
+      (quarry-test-grep--keys "x")
+      (quarry-test-grep--keys "!")
+      (should (equal (quarry-test-grep--filter-lines)
+                     '(("-" "line/re" "needle" nil) ("+" "line" "again" nil))))
+      (should-not (quarry-test-grep--results))
+      (quarry-test-grep--keys "k")
+      (should (equal (quarry-test-grep--filter-lines) '(("+" "line" "again" nil))))
+      (quarry-test-grep--refused "needs an enabled include line filter"
+        (execute-kbd-macro (kbd "k")))
+      ;; K: only the primary filter stays, from anywhere.
+      (quarry-test-grep--refused "no other filters" (execute-kbd-macro (kbd "K")))
+      (quarry-test-grep--run-filters '(:pattern "hidden" :enabled nil)
+                                     '(:pattern "zzz" :exclude t)
+                                     '(:pattern "needle" :regexp t)
+                                     '(:pattern "again")
+                                     '(:target path :pattern "txt" :enabled nil))
+      (let ((before (quarry-test-grep--filter-lines)))
+        (goto-char (quarry-test-grep--line-pos "src/a.rs" 4))
+        (quarry-test-grep--keys "K")
+        (should (equal (quarry-test-grep--filter-lines) '(("+" "line/re" "needle" nil))))
+        (should (equal (quarry-test-grep--sent) '((:line nil "needle" t))))
+        (should (equal (quarry-test-grep--results) quarry-test-grep--needles))
+        ;; History holds the whole list, the disabled filters too.
+        (quarry-test-grep--keys "C-c <")
+        (should (equal (quarry-test-grep--filter-lines) before))
+        (should (equal (quarry-test-grep--sent)
+                       '((:line t "zzz" nil) (:line nil "needle" t) (:line nil "again" nil))))
+        (quarry-test-grep--keys "C-c <")
+        (should (equal (quarry-test-grep--filter-lines) '(("+" "line" "again" nil))))
+        (quarry-test-grep--keys "C-c >")
+        (quarry-test-grep--keys "C-c >")
+        (should (equal (quarry-test-grep--filter-lines) '(("+" "line/re" "needle" nil))))))))
+
+(ert-deftest quarry-test-grep-highlighting ()
+  "Primary, secondary and path matches have their faces; two options."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (cl-flet ((faces ()
+                ;; For "// Needle again, needle": P, S or - per character.
+                (let* ((bol (quarry-test-grep--line-pos "src/a.rs" 4))
+                       (text (next-single-property-change bol 'quarry-grep-prefix)))
+                  (mapconcat (lambda (i)
+                               (cond ((quarry-test-grep--has-face (+ text i) 'quarry-grep-match)
+                                      "P")
+                                     ((quarry-test-grep--has-face
+                                       (+ text i) 'quarry-grep-match-secondary)
+                                      "S")
+                                     (t "-")))
+                             (number-sequence 0 22) "")))
+              (path-faces ()
+                ;; For the heading's "src/a.rs": M where a path filter matched.
+                (let ((path (+ (quarry-test-grep--heading-pos "src/a.rs") 6)))
+                  (should (equal (buffer-substring-no-properties path (+ path 8)) "src/a.rs"))
+                  (mapconcat (lambda (i)
+                               (should (quarry-test-grep--has-face
+                                        (+ path i) 'quarry-grep-file-heading))
+                               (if (quarry-test-grep--has-face (+ path i) 'quarry-grep-path-match)
+                                   "M"
+                                 "-"))
+                             (number-sequence 0 7) "")))
+              (pattern-face (n)
+                (get-text-property
+                 (text-property-any (quarry-test-grep--filter-pos n) (point-max)
+                                    'quarry-grep-part 'pattern)
+                 'face)))
+      (should (equal (faces) "---PPPPPP--------PPPPPP"))
+      (should (equal (path-faces) "--------"))
+      (should (eq (pattern-face 0) 'quarry-grep-match))
+      ;; A second include line filter, one whose match overlaps a primary
+      ;; one (the rest of it lies next to that), and two path filters.
+      (quarry-test-grep--keys "+ l again RET")
+      (quarry-test-grep--keys "+ l Needle SPC a RET")
+      (quarry-test-grep--keys "+ p rc/ RET")
+      (quarry-test-grep--keys "C-u + p \\.rs$ RET")
+      (quarry-test-grep--keys "- l zzz RET")
+      (should (equal (quarry-test-grep--results) '(("src/a.rs" 4 "// Needle again, needle"))))
+      (should (equal (faces) "---PPPPPPSSSSSS--PPPPPP"))
+      (should (equal (path-faces) "-MMM-MMM"))
+      (should (eql (get-text-property (quarry-test-grep--line-pos "src/a.rs" 4)
+                                      'quarry-grep-column)
+                   3))
+      ;; The filter block shows which colour is whose.
+      (should (equal (mapcar #'pattern-face '(0 1 2 3 4 5))
+                     '(quarry-grep-match quarry-grep-match-secondary
+                       quarry-grep-match-secondary quarry-grep-path-match
+                       quarry-grep-path-match quarry-grep-filter-pattern)))
+      ;; A filter that is off has no colour.
+      (goto-char (quarry-test-grep--filter-pos 1))
+      (quarry-test-grep--keys "x")
+      (should (eq (pattern-face 1) 'quarry-grep-filter-disabled))
+      (should (equal (faces) "---PPPPPPSS------PPPPPP"))
+      (quarry-test-grep--keys "x")
+      ;; The options, read at the next search.
+      (let ((quarry-grep-highlight-include-filters nil))
+        (should (equal (faces) "---PPPPPPSSSSSS--PPPPPP"))
+        (quarry-test-grep--keys "g")
+        (should (equal (faces) "---PPPPPP--------PPPPPP"))
+        (should (equal (path-faces) "-MMM-MMM"))
+        (should (equal (mapcar #'pattern-face '(0 1 2 3 4 5))
+                       '(quarry-grep-match quarry-grep-filter-pattern
+                         quarry-grep-filter-pattern quarry-grep-path-match
+                         quarry-grep-path-match quarry-grep-filter-pattern))))
+      (let ((quarry-grep-highlight-path-filters nil))
+        (quarry-test-grep--keys "g")
+        (should (equal (faces) "---PPPPPPSSSSSS--PPPPPP"))
+        (should (equal (path-faces) "--------"))
+        (should (equal (mapcar #'pattern-face '(0 1 2 3 4 5))
+                       '(quarry-grep-match quarry-grep-match-secondary
+                         quarry-grep-match-secondary quarry-grep-filter-pattern
+                         quarry-grep-filter-pattern quarry-grep-filter-pattern))))
+      (should (equal (list (default-value 'quarry-grep-highlight-include-filters)
+                           (default-value 'quarry-grep-highlight-path-filters))
+                     '(t t)))
+      (dolist (face '(quarry-grep-match quarry-grep-match-secondary quarry-grep-path-match))
+        (should (facep face))))))
+
+(ert-deftest quarry-test-grep-point-returns ()
+  "A search started in the buffer brings point back to its result."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    ;; The same line.
+    (goto-char (+ (quarry-test-grep--line-pos "src/a.rs" 4) 9))
+    (quarry-test-grep--keys "g")
+    (should (= (point) (quarry-test-grep--line-pos "src/a.rs" 4)))
+    (should (= (window-point) (point)))
+    (quarry-test-grep--keys "c")
+    (should (= (point) (quarry-test-grep--line-pos "src/a.rs" 4)))
+    (quarry-test-grep--keys "C-c <")
+    (should (= (point) (quarry-test-grep--line-pos "src/a.rs" 4)))
+    ;; A heading.
+    (goto-char (quarry-test-grep--heading-pos "notes.txt"))
+    (quarry-test-grep--keys "H")
+    (should (= (point) (quarry-test-grep--heading-pos "notes.txt")))
+    ;; The line is gone, its file is not: the heading.
+    (goto-char (quarry-test-grep--line-pos "src/a.rs" 4))
+    (quarry-test-grep--keys "- l again RET")
+    (should (equal (quarry-test-grep--results)
+                   '(("notes.txt" 1 "a needle in text")
+                     ("src/a.rs" 2 "    let needle = 1;")
+                     ("sub/deep.txt" 1 "über needle"))))
+    (should (= (point) (quarry-test-grep--heading-pos "src/a.rs")))
+    ;; The file is gone: the heading that sorts after it, else the first.
+    (goto-char (quarry-test-grep--line-pos "notes.txt" 1))
+    (quarry-test-grep--keys "- f")
+    (should (= (point) (quarry-test-grep--heading-pos "src/a.rs")))
+    (goto-char (quarry-test-grep--line-pos "sub/deep.txt" 1))
+    (quarry-test-grep--keys "- f")
+    (should (equal (quarry-test-grep--headings) '("src/a.rs")))
+    (should (= (point) (quarry-test-grep--heading-pos "src/a.rs")))
+    ;; No results: the start of the buffer.
+    (quarry-test-grep--keys "+ l zzz RET")
+    (should-not (quarry-test-grep--headings))
+    (should (= (point) (point-min)))
+    ;; From the status line: the start too.
+    (quarry-test-grep--keys "K")
+    (goto-char (point-max))
+    (quarry-test-grep--keys "g")
+    (should (= (point) (point-min)))
+    ;; A command starts at the start of the buffer.
+    (goto-char (quarry-test-grep--line-pos "src/a.rs" 4))
+    (quarry-test-grep--search dir)
+    (should (= (point) (point-min)))
+    ;; Played by hand: the block arrives in a later batch, and results
+    ;; after it leave point where it was put.
+    (quarry-test-grep--with-fake-stream
+      (cl-flet ((batch (&rest items) (apply (nth 1 (car quarry-test-grep--fake)) (list items)))
+                (end () (funcall (nth 2 (car quarry-test-grep--fake)) 'done nil)))
+        (goto-char (quarry-test-grep--line-pos "src/a.rs" 4))
+        (quarry-grep-rerun)
+        (should (= (point) (point-min)))
+        (batch (quarry-test-grep--item "a.txt" '(1 "needle" 0 6)))
+        (should (= (point) (point-min)))
+        (batch (quarry-test-grep--item "b.txt" '(1 "needle" 0 6))
+               (quarry-test-grep--item "src/a.rs" '(2 "needle" 0 6) '(4 "needle" 0 6))
+               (quarry-test-grep--item "c.txt" '(1 "needle" 0 6)))
+        (let ((place (quarry-test-grep--line-pos "src/a.rs" 4)))
+          (should (= (point) place))
+          (should (= (window-point) place))
+          (batch (quarry-test-grep--item "d.txt" '(1 "needle" 0 6)))
+          (end)
+          (should (= (point) place)))
+        ;; The user moved point while the search ran: it is left alone,
+        ;; when the block arrives and at the end.
+        (goto-char (quarry-test-grep--line-pos "src/a.rs" 4))
+        (quarry-grep-rerun)
+        (batch (quarry-test-grep--item "a.txt" '(1 "needle" 0 6)))
+        (let ((place (quarry-test-grep--heading-pos "a.txt")))
+          (goto-char place)
+          (batch (quarry-test-grep--item "src/a.rs" '(4 "needle" 0 6)))
+          (should (= (point) place))
+          (end)
+          (should (= (point) place)))
+        (goto-char (quarry-test-grep--line-pos "src/a.rs" 4))
+        (quarry-grep-rerun)
+        (goto-char (point-max))
+        (let ((place (point)))
+          (batch (quarry-test-grep--item "z.txt" '(1 "needle" 0 6)))
+          (end)
+          (should (= (point) place)))
+        ;; The file does not come back and the files are not sorted: the
+        ;; first heading that sorts after it.
+        (goto-char (quarry-test-grep--heading-pos "z.txt"))
+        (quarry-grep-rerun)
+        (batch (quarry-test-grep--item "y.txt" '(1 "needle" 0 6))
+               (quarry-test-grep--item "zz.txt" '(1 "needle" 0 6))
+               (quarry-test-grep--item "zy.txt" '(1 "needle" 0 6)))
+        (should (= (point) (point-min)))
+        (end)
+        (should (= (point) (quarry-test-grep--heading-pos "zz.txt")))
+        ;; A cancelled or failed search leaves point at the start.
+        (quarry-grep-rerun)
+        (batch (quarry-test-grep--item "zzz.txt" '(1 "needle" 0 6)))
+        (funcall (nth 2 (car quarry-test-grep--fake)) 'cancelled nil)
+        (should (= (point) (point-min)))))))
 
 ;;;; Loading
 

@@ -3,8 +3,8 @@
 The interactive grep: first the Rust service (threads, messages, what is
 searched, order, cap and cancellation), then the Elisp side
 (`lisp/quarry-grep.el`). Part of [the architecture](../architecture.md).
-The filter commands and the wgrep integration are not written yet (spec
-`2026-10-10-grep.md`, tasks 6 and 7).
+The wgrep integration is not written yet (spec `2026-10-10-grep.md`,
+task 7).
 
 ## Threads
 
@@ -217,15 +217,81 @@ taken as a format. Each clickable part carries a keymap from
 `quarry-grep--header-map` that selects the clicked window and calls the
 part's command interactively, on `mouse-1` and on `mouse-2`.
 
-A new search erases the buffer. Point goes to the start, except when it
-was on a filter line: then it stays on the line of the filter at the same
-position in the list, so `%` can be pressed again.
+A new search erases the buffer; where point goes is described under
+"Point after a search".
+
+Highlighting is decided when lines are inserted. The item's `:spans` get
+`quarry-grep-match`; its `:secondary` spans get
+`quarry-grep-match-secondary` when `quarry-grep-highlight-include-filters`
+is non-nil; the heading's `:path-spans` get `quarry-grep-path-match`,
+added to the heading face with `add-face-text-property`, when
+`quarry-grep-highlight-path-filters` is non-nil. In the filter block
+`quarry-grep--filter-roles` gives each enabled include filter the face of
+its matches (the primary filter always, the others as the two options
+say), and `quarry-grep--insert-filter` shows the pattern in that face.
 
 Folding puts an overlay with `invisible` `quarry-grep-fold` over a block
 from the end of its heading to the end of its last line. Blocks are found
 through the `quarry-grep-file` property (`quarry-grep--block-at`,
 `quarry-grep--blocks`). `quarry-grep--next-error` removes the overlay of
 the block it enters.
+
+### Filter commands
+
+All of them build a new filter list and hand it to
+`quarry-grep--set-filters`, which copies the current search, refuses a
+list without an enabled include line filter with a `user-error` (the
+primary rule: nothing was changed at that point) and calls
+`quarry-grep--run`. So every filter change is a history entry, and the
+commands need no rule of their own for which filter is primary:
+`quarry-grep--primary` picks the first enabled include line filter of
+whatever list results, and `r`, `t` and `K` use it.
+
+- `quarry-grep--add-filter` (behind `- p`, `+ p`, `- l`, `+ l`, `- f`,
+  `- d`, `+ d`) appends a literal filter, or a regexp one with a prefix
+  argument. A filter equal to an existing one in target, direction,
+  pattern and syntax is not added: an enabled one is a `user-error`, a
+  disabled one is replaced by the enabled filter in its place.
+- The three commands that read the result at point take the path from
+  the `quarry-grep-file` property. `- f` uses `/` plus the path; `- d`
+  and `+ d` prefill the minibuffer with `/` plus the directory part and
+  refuse a file without one.
+- `k`, `x`, `!` and `%` replace or drop the filter object of the line at
+  point (`quarry-grep-filter` property). `%` cannot break the primary
+  rule and goes through `quarry-grep--replace-filter`.
+
+After a bare `C-u`, Emacs takes `-` as the sign of the prefix argument,
+so the `-` commands get their prefix argument as `C-u 1 - p`.
+
+### Point after a search
+
+`quarry-grep--render-start` looks at the line point is on before it
+erases the buffer.
+
+- On a filter line, point stays on the filter line at the same position
+  in the list, or on the last one when the list got shorter, at the same
+  column. This is done at once, since the filter block is rendered
+  before the request is sent.
+- On a result line or a heading, point goes to the start of the buffer
+  and `quarry-grep--return` records the path, the line number (nil for a
+  heading) and where point was put. `quarry-grep--insert-file` notes the
+  start of the block with that path; after the batch,
+  `quarry-grep--return-to-block` moves point to the line with that
+  number, or to the heading. When the search ends as done without that
+  block, `quarry-grep--return-near` moves point to the first heading
+  whose path sorts after the recorded one, else to the first heading.
+  A cancelled or failed search leaves point alone.
+- Both steps act only while point is still where the search put it
+  (`quarry-grep--return-pending-p`); a user who moved point is left
+  alone, and the record is dropped. Once point is placed the record is
+  dropped too, so later batches follow the rule that results never move
+  point.
+- The four commands move point to the start of the buffer first, which
+  is the first filter line, so they start at the top.
+
+The window start is set to the buffer start without force when a search
+starts; when point is then moved to a returning line outside the window,
+redisplay scrolls to it.
 
 ### Visiting
 

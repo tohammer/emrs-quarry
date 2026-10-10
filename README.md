@@ -352,7 +352,11 @@ relative to it.
 
 ```text
  files: rust   dir: ~/src/emacs-quarry/   case: smart   ign: on   hidden: on   hits: 3 in 2 files
-+ line/re  fn walk\w*
++ line/re  fn \w+
++ line     walk
+- line/re  ^\s*//
+- path     /tests/
++ path     bench                                  (off)
 
 File: src/grep/search.rs (1)
    41 pub fn walk_and_search(
@@ -368,11 +372,11 @@ Search finished: 3 lines in 2 files, 61 ms
   whether ignore files are used and hidden files searched, and the number
   of lines and files found so far. A click with `mouse-1` on a part runs
   the command of its key below.
-- The first line is the pattern: `line` for a string, `line/re` for a
-  regexp.
+- The filter block has one line per filter, in the order they were added
+  (see "Filters"). The first line is the pattern the command asked for.
 - Each file has a heading with the number of its lines, and one line per
-  match with the line number and the text; the matches have the face
-  `quarry-grep-match`.
+  match with the line number and the text, with the matches highlighted
+  (see "Highlighting").
 - The last line says `Searching…` while results arrive, then how many
   lines were found in how many files and how long it took. It also names
   a search that stopped at the line cap, files that could not be read, a
@@ -384,30 +388,107 @@ longer one shows the files in the order they are found.
 
 | Key | Action |
 |---|---|
-| `RET`, `mouse-1`, `mouse-2` | On a result line or its number: visit the file at that line, at the column of the first match. On a file heading: visit the file. On the pattern line: edit the pattern in the minibuffer |
+| `RET`, `mouse-1`, `mouse-2` | On a result line or its number: visit the file at that line, at the column of the first match of the primary filter. On a file heading: visit the file. On a filter line: edit its pattern in the minibuffer |
 | `n`, `p` | Show the next or previous match in another window without selecting it |
 | `}`, `{`, `M-N`, `M-P` | Move to the next or previous file heading |
 | `TAB` | Fold or unfold the file at point |
 | `S-TAB` | Fold all files, or unfold them when all are folded |
 | `g` | Search again |
-| `r`, `t` | Edit the pattern, as a regexp or as a string |
-| `%` | On the pattern line: switch between string and regexp |
+| `r`, `t` | Edit the primary filter, as a regexp or as a string |
 | `d`, `f` | Change the directory; the file type |
 | `c` | Cycle the case rule: smart, sensitive, insensitive |
 | `i`, `H` | Switch ignore files on or off; hidden files |
+| `- p`, `+ p` | Add a path filter, excluding or keeping only what matches |
+| `- l`, `+ l` | Add a line filter, excluding or keeping only what matches |
+| `- f` | Exclude the file at point |
+| `- d`, `+ d` | Exclude, or search only, the directory of the file at point |
+| `k`, `x`, `!`, `%` | On a filter line: remove it; switch it off or on; flip it between including and excluding; switch it between string and regexp |
+| `K` | Remove all filters except the primary one |
 | `C-c <`, `C-c >` | Go back or forward in the buffer's search history |
 | `C-c C-k` | Cancel the running search |
 | `q` | Quit the window |
 
 `next-error` and `previous-error` (`M-g n`, `M-g p`) walk the results from
 any buffer, also through folded files. Every search that differs from the
-one before is an entry in the buffer's history; going back or forward
-runs that search again. A new search cancels the one that is running, and
-so does killing the buffer.
+one before, by a filter too, is an entry in the buffer's history; going
+back or forward runs that search again with its filters, including those
+switched off. A new search cancels the one that is running, and so does
+killing the buffer.
+
+A search started from the result buffer (`g`, a switch, a filter command,
+the history) brings point back to the result line it was on, or to that
+file's heading when the line is gone. When the file is gone too, as after
+`- f`, point goes to the next file. On a filter line point stays on that
+line. If you move point while the search runs, it is left where you put
+it.
 
 With `smart` case a pattern ignores case unless it has an uppercase
 letter. With ignore files off (`ign: off`) everything is searched except
 version control directories; `quarry-ignores` is not applied then either.
+
+### Filters
+
+A search is a list of filters, shown at the top of the buffer. Each filter
+looks at lines or at paths, keeps only what matches (`+`) or drops it
+(`-`), and is a string or, marked `/re`, a regexp. The pattern a command
+asks for is the first of them, a `+ line` filter, and is a filter like the
+others. Every change to the filters runs the search again.
+
+- A **line** filter is matched against the text of a line. The case rule
+  of the header line applies to each line filter by itself.
+- A **path** filter is matched against a slash followed by the path
+  relative to the searched directory. So `/test/` matches `test/a.c` and
+  `src/test/a.c`, a directory `test` at any depth, and `.rs` matches by
+  extension.
+  Path filters always use smart case. A directory that an excluding path
+  filter matches is not entered.
+- The filters are combined with "and": a line is shown when it and its
+  file match every `+` filter and no `-` filter, so each added filter can
+  only narrow the result. For "either of two", write one regexp filter,
+  such as `/(audio|video)/` for two directories or `foo|bar` for two
+  words (`C-u + p`, or `%` on the filter's line).
+
+`- p`, `+ p`, `- l` and `+ l` ask for a string and add the filter at the
+end of the list. With a prefix argument the input is a regexp: `C-u + p`,
+but `C-u 1 - p`, because Emacs reads `-` after a bare `C-u` as the sign
+of the argument. `%` on the new filter's line does the same afterwards.
+
+`- f`, `- d` and `+ d` take the pattern from the result at point. `- f`
+excludes that file at once. `- d` and `+ d` put the file's directory into
+the minibuffer, as `/dir/sub/`; confirm it, or shorten it to a parent
+such as `/dir/` first. These are ordinary path filters, so `/dir/sub/`
+also matches a directory `dir/sub` deeper in the tree.
+
+A filter the search already has is not added twice; if it is switched
+off, it is switched on.
+
+`k` removes the filter at point, `x` switches it off or on (shown dimmed
+with `(off)`; it stays in the list and is not applied), `!` flips it
+between `+` and `-`, `%` between string and regexp, and `RET` edits its
+pattern. `K` removes all filters but the primary one.
+
+The **primary** filter is the first `+ line` filter that is switched on.
+The files are scanned for it; it decides which matches get the main
+highlight and where point lands when a result is visited, not which lines
+are found. A search needs one: removing, switching off or flipping the
+only `+ line` filter that is on is refused. When the primary filter goes
+and another `+ line` filter is on, that one becomes the primary filter.
+`r` and `t` edit the primary filter.
+
+### Highlighting
+
+| Face | Marks |
+|---|---|
+| `quarry-grep-match` (inherits `match`) | The matches of the primary filter in a result line |
+| `quarry-grep-match-secondary` (inherits `lazy-highlight`) | The matches of the other `+ line` filters, where they lie outside the primary matches |
+| `quarry-grep-path-match` (inherits `highlight`) | The parts of a file heading's path that `+ path` filters matched |
+
+In the filter block each `+` filter that is on shows its pattern in the
+face of its matches, so you can see which colour belongs to which filter.
+`-` filters have nothing to highlight.
+`quarry-grep-highlight-include-filters` and
+`quarry-grep-highlight-path-filters` switch the second and the third face
+off; the primary matches are always highlighted.
 
 ### Options and faces
 
@@ -419,10 +500,13 @@ Customize group `quarry-grep`. They apply to the next search.
 | `quarry-grep-max-lines` | `50000` | The search stops when this many lines are found, and the last line says so. |
 | `quarry-grep-max-columns` | `500` | Longer lines are shown cut after this many characters. |
 | `quarry-grep-buffer-name` | `*quarry-grep*` | Name of the result buffer. |
+| `quarry-grep-highlight-include-filters` | `t` | Highlight the matches of the `+ line` filters other than the primary one. |
+| `quarry-grep-highlight-path-filters` | `t` | Highlight in file headings what the `+ path` filters matched. |
 | `quarry-include-hidden` | `t` | A new search includes hidden files; `H` switches it per search. |
 | `quarry-ignores` | `nil` | Extra gitignore-syntax patterns, relative to the searched directory. |
 
-Faces: `quarry-grep-match`, `quarry-grep-file-heading`,
+Faces: `quarry-grep-match`, `quarry-grep-match-secondary`,
+`quarry-grep-path-match`, `quarry-grep-file-heading`,
 `quarry-grep-line-number`, `quarry-grep-filter-include`,
 `quarry-grep-filter-exclude`, `quarry-grep-filter-kind`,
 `quarry-grep-filter-pattern`, `quarry-grep-filter-disabled`,

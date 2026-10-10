@@ -17,9 +17,8 @@ shares the walker rules with the index and nothing else: it has no state
 and does not use the index (ADR 0010). Its Elisp side is
 `lisp/quarry-grep.el`: the commands and the result buffer, which is built
 on text properties and is not a `compilation-mode` buffer (ADR 0012). It
-requires `quarry-core.el`, not `quarry.el`. The filter commands and the
-wgrep integration are not written yet (spec `2026-10-10-grep.md`, tasks 6
-and 7).
+requires `quarry-core.el`, not `quarry.el`. The wgrep integration is not
+written yet (spec `2026-10-10-grep.md`, task 7).
 
 ```text
  Emacs thread                               runtime threads (emrs pool)
@@ -53,7 +52,7 @@ as a self-message through `ctx.address()`, so all index access happens in
 | `src/grep/service.rs` | `GrepService`, emrs service `"grep"`: the requests `(:search)` and `(:types)`, the checks of a request and their errors, the stream and the search task; the Lisp shapes in its module docs | `grep/search`, `grep/filter`, `emrs`, `ignore` |
 | `lisp/quarry.el` | Options, instance table, event and exit handling, query entry points, completion table and `quarry` style, `quarry--prepare`, commands, `quarry-mode` and its remap through `quarry-find-file-command`, `project-files` method | `emrs.el`, `quarry-build.el`, `quarry-core.el`, `project` |
 | `lisp/quarry-core.el` | What the quarry tools share: module file lookup, `quarry--load-module`, the offer to build, the options `quarry-include-hidden` and `quarry-ignores`. Requires neither `quarry.el` nor the module | `emrs.el`, `quarry-build.el` |
-| `lisp/quarry-grep.el` | The grep tool: the commands `quarry-grep`, `quarry-grep-literal`, `quarry-grep-project`, `quarry-grep-dwim` and their prompts; the one instance of the `grep` service; the search and its filters as values; `quarry-grep-mode` (from `special-mode`) with the rendering, the header line, visiting, `next-error`, folding, the change commands, history and cancel. Works without `quarry.el` and `quarry-mode` | `emrs.el`, `quarry-core.el`, `project` |
+| `lisp/quarry-grep.el` | The grep tool: the commands `quarry-grep`, `quarry-grep-literal`, `quarry-grep-project`, `quarry-grep-dwim` and their prompts; the one instance of the `grep` service; the search and its filters as values; `quarry-grep-mode` (from `special-mode`) with the rendering, the header line, visiting, `next-error`, folding, the change commands, the filter commands and the highlighting of filter matches, history and cancel. Works without `quarry.el` and `quarry-mode` | `emrs.el`, `quarry-core.el`, `project` |
 | `lisp/quarry-consult.el` | Optional consult front end: `quarry-consult-find-file`, the async pipeline step that queries the index, its options and history. Loads and byte-compiles without consult; `quarry.el` never loads it | `quarry.el`, `emrs.el`, consult 2.0 or later (optional) |
 | `lisp/quarry-build.el` | Builds the module with cargo and installs it as `lisp/quarry-module` plus `module-file-suffix` in the repository: repository detection, `quarry-build-module` (async), `quarry-build-module-sync` (for `:pre-build`), install by rename. Needs neither emrs nor the module | Cargo, Emacs |
 | `tests/quarry-tests.el`, `tests/quarry-consult-tests.el`, `tests/quarry-grep-tests.el`, `tests/run-ert.sh` | ERT suite on generated trees. The grep tests read the result buffer through its text properties and play the service with a recording stand-in for `emrs-call-stream` where timing would matter; their names start with `quarry-test-grep-`, to sort after the test that needs no module loaded (`docs/backlog.md`). The script builds the debug module, copies the Lisp files and the module as `quarry-module` to `target/elisp` (so a module built in `lisp/` is not the one under test), takes `emrs.el` from the emrs checkout Cargo resolved and runs with `--module-assertions`. The script also adds the directories of `QUARRY_TEST_LOAD_PATH` (consult, compat) to `load-path` and loads the consult tests; without consult 2.0 or later only the command and end-to-end tests are skipped, the step tests run | Cargo, Emacs |

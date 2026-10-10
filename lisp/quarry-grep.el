@@ -63,10 +63,32 @@ A line that was cut is shown shortened and cannot be edited."
   "Name of the result buffer."
   :type 'string)
 
+(defcustom quarry-grep-highlight-include-filters t
+  "Non-nil means the matches of all include line filters are highlighted.
+The matches of the primary filter always have the face
+`quarry-grep-match'; with this option those of the other include line
+filters get `quarry-grep-match-secondary'.  Applies to the next search."
+  :type 'boolean)
+
+(defcustom quarry-grep-highlight-path-filters t
+  "Non-nil means file headings show what the include path filters matched.
+The matched parts of the path get the face `quarry-grep-path-match'.
+Applies to the next search."
+  :type 'boolean)
+
 ;;;; Faces
 
 (defface quarry-grep-match '((t :inherit match))
-  "Face for the matches of the primary filter in a result line.")
+  "Face for the matches of the primary filter in a result line.
+The pattern of the primary filter has it in the filter block too.")
+
+(defface quarry-grep-match-secondary '((t :inherit lazy-highlight))
+  "Face for the matches of the other include line filters in a result line.
+See `quarry-grep-highlight-include-filters'.")
+
+(defface quarry-grep-path-match '((t :inherit highlight))
+  "Face for the parts of a file heading that include path filters matched.
+See `quarry-grep-highlight-path-filters'.")
 
 (defface quarry-grep-file-heading '((t :inherit font-lock-function-name-face))
   "Face for the path in a file heading.")
@@ -262,6 +284,15 @@ Signal a `user-error' when the module cannot be loaded."
 (defvar-local quarry-grep--error-filter nil
   "The filter the service rejected, or nil.")
 
+(defvar-local quarry-grep--return nil
+  "Where point is to go when the running search brings it back, or nil.
+A list (PATH LINE START): the file and the line number (nil for the
+heading) point was on when the search started, and where point was put
+then.  Point is only moved while it is still at START.")
+
+(defvar-local quarry-grep--return-block nil
+  "Start of the file block `quarry-grep--return' waits for, once inserted.")
+
 (defvar-local quarry-grep--status-marker nil
   "Marker at the start of the status line.  File blocks go before it.")
 
@@ -303,8 +334,29 @@ Signal a `user-error' when the module cannot be loaded."
   (concat (symbol-name (quarry-grep--filter-target filter))
           (if (quarry-grep--filter-regexp filter) "/re" "")))
 
-(defun quarry-grep--insert-filter (filter)
-  "Insert the line of FILTER at point."
+(defun quarry-grep--filter-roles (search)
+  "Return an alist from the filters of SEARCH to the face of their matches.
+It holds the primary filter and, as the highlight options say, the other
+enabled include filters."
+  (let ((primary (quarry-grep--primary search)))
+    (delq nil
+          (mapcar
+           (lambda (filter)
+             (cond ((eq filter primary) (cons filter 'quarry-grep-match))
+                   ((or (not (quarry-grep--filter-enabled filter))
+                        (quarry-grep--filter-exclude filter))
+                    nil)
+                   ((eq (quarry-grep--filter-target filter) 'line)
+                    (and quarry-grep-highlight-include-filters
+                         (cons filter 'quarry-grep-match-secondary)))
+                   (t (and quarry-grep-highlight-path-filters
+                           (cons filter 'quarry-grep-path-match)))))
+           (quarry-grep--search-filters search)))))
+
+(defun quarry-grep--insert-filter (filter &optional match-face)
+  "Insert the line of FILTER at point.
+MATCH-FACE, if non-nil, is the face its matches have in the results; the
+pattern is shown in it, so that the colours can be told apart."
   (let* ((start (point))
          (off (not (quarry-grep--filter-enabled filter)))
          (exclude (quarry-grep--filter-exclude filter)))
@@ -320,7 +372,9 @@ Signal a `user-error' when the module cannot be loaded."
             (make-string (max 2 (- 9 (length (quarry-grep--filter-kind filter)))) ?\s)
             (propertize (quarry-grep--filter-pattern filter)
                         'quarry-grep-part 'pattern
-                        'face (if off 'quarry-grep-filter-disabled 'quarry-grep-filter-pattern)))
+                        'face (cond (off 'quarry-grep-filter-disabled)
+                                    (match-face)
+                                    (t 'quarry-grep-filter-pattern))))
     (when off
       (insert "  " (propertize "(off)" 'quarry-grep-part 'off
                                 'face 'quarry-grep-filter-disabled)))
@@ -337,6 +391,12 @@ ITEM is the plist of a file item of the service."
     (insert "File: " path (format " (%d)" (length lines)))
     (put-text-property (+ start 6) (+ start 6 (length path))
                        'face 'quarry-grep-file-heading)
+    (when quarry-grep-highlight-path-filters
+      (dolist (span (plist-get item :path-spans))
+        (add-face-text-property (+ start 6 (car span)) (+ start 6 (cadr span))
+                                'quarry-grep-path-match)))
+    (when (and quarry-grep--return (equal path (car quarry-grep--return)))
+      (setq quarry-grep--return-block start))
     (add-text-properties start (point) '(mouse-face highlight follow-link t))
     (insert "\n")
     (add-text-properties start (point)
@@ -359,7 +419,11 @@ ITEM is the plist of a file item of the service."
                              '(quarry-grep-prefix t face quarry-grep-line-number))
         (dolist (span spans)
           (put-text-property (+ text-start (car span)) (+ text-start (cadr span))
-                             'face 'quarry-grep-match))))
+                             'face 'quarry-grep-match))
+        (when quarry-grep-highlight-include-filters
+          (dolist (span (plist-get line :secondary))
+            (put-text-property (+ text-start (car span)) (+ text-start (cadr span))
+                               'face 'quarry-grep-match-secondary)))))
     (put-text-property start (point) 'quarry-grep-file path)
     (insert "\n")
     (cl-incf quarry-grep--files)
@@ -439,32 +503,78 @@ them does not carry them along and no window scrolls."
 
 (defun quarry-grep--render-start ()
   "Show the filter block and the status line of the current search.
-Point stays on the filter line it was on, by position in the list;
-otherwise it goes to the start of the buffer."
+Point stays on the filter line it was on, by position in the list (on
+the last line when the list got shorter).  From a result line or a file
+heading it goes to the start of the buffer, and `quarry-grep--return'
+is set so that the results bring it back."
   (let* ((inhibit-read-only t)
-         (old (get-text-property (pos-bol) 'quarry-grep-filter))
+         (bol (pos-bol))
+         (filters (quarry-grep--search-filters quarry-grep--current))
+         (roles (quarry-grep--filter-roles quarry-grep--current))
          ;; The filter block starts the buffer, one line per filter.
-         (index (and old (count-lines (point-min) (pos-bol))))
-         (column (- (point) (pos-bol))))
+         (index (and (get-text-property bol 'quarry-grep-filter)
+                     (count-lines (point-min) bol)))
+         (column (- (point) bol))
+         (path (get-text-property bol 'quarry-grep-file))
+         (line (get-text-property bol 'quarry-grep-line)))
     (remove-overlays (point-min) (point-max) 'quarry-grep-fold t)
     (erase-buffer)
-    (dolist (filter (quarry-grep--search-filters quarry-grep--current))
-      (quarry-grep--insert-filter filter))
+    (dolist (filter filters)
+      (quarry-grep--insert-filter filter (alist-get filter roles)))
     (insert "\n")
     (set-marker quarry-grep--status-marker (point))
     (insert (propertize "\n" 'quarry-grep-status t))
     (quarry-grep--update-status)
-    (let ((line (quarry-grep--filter-position
-                 (and index (nth index (quarry-grep--search-filters
-                                        quarry-grep--current))))))
+    (let ((filter-line (quarry-grep--filter-position
+                        (and index filters
+                             (nth (min index (1- (length filters))) filters)))))
       (quarry-grep--goto
-       (if line
+       (if filter-line
            (save-excursion
-             (goto-char line)
-             (min (+ line column) (pos-eol)))
+             (goto-char filter-line)
+             (min (+ filter-line column) (pos-eol)))
          (point-min))))
+    (setq quarry-grep--return (and path (list path line (point)))
+          quarry-grep--return-block nil)
     (dolist (window (get-buffer-window-list nil nil t))
-      (set-window-start window (point-min)))))
+      ;; Not forced: a forced start would drag point back into view
+      ;; when the results have moved it before the next redisplay.
+      (set-window-start window (point-min) t))))
+
+(defun quarry-grep--return-pending-p ()
+  "Return non-nil when point still waits where the search put it."
+  (and quarry-grep--return
+       (or (= (point) (nth 2 quarry-grep--return))
+           ;; The user moved: the results leave point alone from now on.
+           (setq quarry-grep--return nil))))
+
+(defun quarry-grep--return-to-block ()
+  "Move point to the place it had, when its file block has arrived.
+That is the result line with the same line number, else the heading."
+  (when (and quarry-grep--return-block (quarry-grep--return-pending-p))
+    (let* ((start quarry-grep--return-block)
+           (end (cdr (quarry-grep--block-at start)))
+           (line (nth 1 quarry-grep--return))
+           (pos (and line (text-property-any start end 'quarry-grep-line line))))
+      (setq quarry-grep--return nil
+            quarry-grep--return-block nil)
+      (quarry-grep--goto (or pos start)))))
+
+(defun quarry-grep--return-near ()
+  "Move point near the place it had, when its file did not come back.
+That is the first heading whose path sorts after the file's, else the
+first heading; without results point stays at the start."
+  (when (quarry-grep--return-pending-p)
+    (let ((path (car quarry-grep--return))
+          (blocks (quarry-grep--blocks)))
+      (setq quarry-grep--return nil)
+      (when blocks
+        (quarry-grep--goto
+         (car (or (cl-find-if (lambda (block)
+                                (string< path (get-text-property
+                                               (car block) 'quarry-grep-file)))
+                              blocks)
+                  (car blocks))))))))
 
 ;;;; Running a search
 
@@ -495,6 +605,9 @@ instance that served the search."
       (setq quarry-grep--error-filter (and (integerp index)
                                            (nth index quarry-grep--sent)))))
   (quarry-grep--update-status)
+  (if (eq quarry-grep--state 'done)
+      (quarry-grep--return-near)
+    (setq quarry-grep--return nil))
   (when-let* ((line (quarry-grep--filter-position quarry-grep--error-filter)))
     ;; Nothing was searched, so there are no results to keep point on;
     ;; RET now corrects the pattern.
@@ -515,6 +628,7 @@ Items of a search that BUFFER does not wait for any more are dropped."
                  (:file (quarry-grep--insert-file (cdr item)))
                  (:summary (setq quarry-grep--summary (cdr item)))))
              (set-marker quarry-grep--status-marker (point)))))
+        (quarry-grep--return-to-block)
         (force-mode-line-update)))))
 
 (defun quarry-grep--on-end (buffer serial instance status err)
@@ -976,7 +1090,7 @@ The prompt says REGEXP or literal.  An empty pattern is a `user-error'."
   "Return the filter of the line at point or signal a `user-error'."
   (quarry-grep--current)
   (or (get-text-property (pos-bol) 'quarry-grep-filter)
-      (user-error "No filter on this line")))
+      (user-error "No filter at point")))
 
 (defun quarry-grep-edit-filter ()
   "Edit the pattern of the filter at point in the minibuffer."
@@ -1058,6 +1172,174 @@ Off, everything is searched except version control directories."
    (lambda (search)
      (setf (quarry-grep--search-hidden search)
            (not (quarry-grep--search-hidden search))))))
+
+;;;; Filters
+
+(defvar quarry-grep-line-filter-history nil
+  "Minibuffer history of the line filters added in a result buffer.")
+
+(defvar quarry-grep-path-filter-history nil
+  "Minibuffer history of the path filters added in a result buffer.")
+
+(defun quarry-grep--filter-text (filter)
+  "Return FILTER as text for a message, as its line shows it."
+  (format "%s %s %s"
+          (if (quarry-grep--filter-exclude filter) "-" "+")
+          (quarry-grep--filter-kind filter)
+          (quarry-grep--filter-pattern filter)))
+
+(defun quarry-grep--set-filters (filters)
+  "Run the current search with FILTERS as its filter list.
+Signal a `user-error' when FILTERS has no enabled include line filter:
+a search needs one to scan the files for."
+  (let ((search (quarry-grep--copy-search (quarry-grep--current))))
+    (setf (quarry-grep--search-filters search) filters)
+    (unless (quarry-grep--primary search)
+      (user-error "A search needs an enabled include line filter"))
+    (quarry-grep--run search)))
+
+(defun quarry-grep--add-filter (target exclude pattern regexp)
+  "Add a filter to the current search and run it.
+The filter matches PATTERN, a regexp if REGEXP is non-nil, against
+TARGET (`line' or `path') and excludes what matches if EXCLUDE is
+non-nil.  It goes to the end of the list.  A filter the search already
+has is not added again: it is switched on, or a `user-error' when it is
+on."
+  (quarry-grep--check-pattern pattern)
+  (let* ((filters (quarry-grep--search-filters (quarry-grep--current)))
+         (new (quarry-grep--make-filter :target target :exclude (and exclude t)
+                                        :pattern pattern :regexp (and regexp t)))
+         (same (cl-find new filters
+                        :test (lambda (a b)
+                                (let ((b (quarry-grep--copy-filter b)))
+                                  (setf (quarry-grep--filter-enabled b) t)
+                                  (equal a b))))))
+    (cond ((null same)
+           (quarry-grep--set-filters (append filters (list new))))
+          ((quarry-grep--filter-enabled same)
+           (user-error "The search already has the filter %s"
+                       (quarry-grep--filter-text same)))
+          (t
+           (quarry-grep--set-filters
+            (mapcar (lambda (filter) (if (eq filter same) new filter)) filters))))))
+
+(defun quarry-grep--read-filter (target exclude regexp &optional initial)
+  "Read the pattern of a new filter on TARGET, starting from INITIAL.
+The prompt says whether it will EXCLUDE and whether it is a REGEXP."
+  (quarry-grep--check-pattern
+   (read-string (format "%s %ss %s: "
+                        (if exclude "Exclude" "Keep only")
+                        target
+                        (if regexp "matching regexp" "containing"))
+                initial
+                (if (eq target 'path)
+                    'quarry-grep-path-filter-history
+                  'quarry-grep-line-filter-history))))
+
+(defun quarry-grep-exclude-path (&optional regexp)
+  "Add a filter that drops the files whose path contains a string.
+With a prefix argument REGEXP, the pattern is a regexp.  The path is
+matched as a slash followed by the path relative to the search
+directory, so `/test/' names a directory at any depth."
+  (interactive "P" quarry-grep-mode)
+  (quarry-grep--current)
+  (quarry-grep--add-filter 'path t (quarry-grep--read-filter 'path t regexp) regexp))
+
+(defun quarry-grep-include-path (&optional regexp)
+  "Add a filter that keeps only the files whose path contains a string.
+With a prefix argument REGEXP, the pattern is a regexp.  See
+`quarry-grep-exclude-path' for what the path is."
+  (interactive "P" quarry-grep-mode)
+  (quarry-grep--current)
+  (quarry-grep--add-filter 'path nil (quarry-grep--read-filter 'path nil regexp) regexp))
+
+(defun quarry-grep-exclude-line (&optional regexp)
+  "Add a filter that drops the lines that contain a string.
+With a prefix argument REGEXP, the pattern is a regexp."
+  (interactive "P" quarry-grep-mode)
+  (quarry-grep--current)
+  (quarry-grep--add-filter 'line t (quarry-grep--read-filter 'line t regexp) regexp))
+
+(defun quarry-grep-include-line (&optional regexp)
+  "Add a filter that keeps only the lines that also contain a string.
+With a prefix argument REGEXP, the pattern is a regexp."
+  (interactive "P" quarry-grep-mode)
+  (quarry-grep--current)
+  (quarry-grep--add-filter 'line nil (quarry-grep--read-filter 'line nil regexp) regexp))
+
+(defun quarry-grep--file-at-point ()
+  "Return the path of the file block at point or signal a `user-error'."
+  (quarry-grep--current)
+  (or (get-text-property (pos-bol) 'quarry-grep-file)
+      (user-error "No file at point")))
+
+(defun quarry-grep--directory-at-point ()
+  "Return the directory of the file at point as a path filter pattern.
+That is a slash, the directory relative to the search directory, and a
+slash.  Signal a `user-error' for a file in the search directory itself."
+  (let ((path (quarry-grep--file-at-point)))
+    (concat "/" (or (file-name-directory path)
+                    (user-error "%s is in the search directory itself" path)))))
+
+(defun quarry-grep-exclude-file ()
+  "Add a filter that drops the file at point."
+  (interactive nil quarry-grep-mode)
+  (quarry-grep--add-filter 'path t (concat "/" (quarry-grep--file-at-point)) nil))
+
+(defun quarry-grep-exclude-directory ()
+  "Add a filter that drops the directory of the file at point.
+The minibuffer holds the directory; shorten it to drop a parent."
+  (interactive nil quarry-grep-mode)
+  (let ((dir (quarry-grep--directory-at-point)))
+    (quarry-grep--add-filter 'path t (quarry-grep--read-filter 'path t nil dir) nil)))
+
+(defun quarry-grep-include-directory ()
+  "Add a filter that keeps only the directory of the file at point.
+The minibuffer holds the directory; shorten it to keep a parent."
+  (interactive nil quarry-grep-mode)
+  (let ((dir (quarry-grep--directory-at-point)))
+    (quarry-grep--add-filter 'path nil (quarry-grep--read-filter 'path nil nil dir) nil)))
+
+(defun quarry-grep-remove-filter ()
+  "Remove the filter at point from the search."
+  (interactive nil quarry-grep-mode)
+  (let ((filter (quarry-grep--filter-at-point)))
+    (quarry-grep--set-filters
+     (remq filter (quarry-grep--search-filters quarry-grep--current)))))
+
+(defun quarry-grep--replace-filter-checked (old new)
+  "Run the current search with the filter OLD replaced by NEW.
+Signal a `user-error' when that leaves no enabled include line filter."
+  (quarry-grep--set-filters
+   (mapcar (lambda (filter) (if (eq filter old) new filter))
+           (quarry-grep--search-filters quarry-grep--current))))
+
+(defun quarry-grep-toggle-filter ()
+  "Switch the filter at point off or on.
+A filter that is off stays in the list and is not applied."
+  (interactive nil quarry-grep-mode)
+  (let* ((filter (quarry-grep--filter-at-point))
+         (new (quarry-grep--copy-filter filter)))
+    (setf (quarry-grep--filter-enabled new) (not (quarry-grep--filter-enabled filter)))
+    (quarry-grep--replace-filter-checked filter new)))
+
+(defun quarry-grep-flip-filter ()
+  "Make the filter at point exclude what it included, or the reverse."
+  (interactive nil quarry-grep-mode)
+  (let* ((filter (quarry-grep--filter-at-point))
+         (new (quarry-grep--copy-filter filter)))
+    (setf (quarry-grep--filter-exclude new) (not (quarry-grep--filter-exclude filter)))
+    (quarry-grep--replace-filter-checked filter new)))
+
+(defun quarry-grep-remove-other-filters ()
+  "Remove all filters except the primary one, also those switched off."
+  (interactive nil quarry-grep-mode)
+  (let* ((search (quarry-grep--current))
+         (primary (or (quarry-grep--primary search)
+                      (user-error "The search has no primary filter"))))
+    (unless (cdr (quarry-grep--search-filters search))
+      (user-error "The search has no other filters"))
+    (quarry-grep--set-filters (list primary))))
 
 ;;;; History
 
@@ -1161,6 +1443,17 @@ With COMMAND, a click on VALUE runs it and HELP is its tooltip."
   "r" #'quarry-grep-change-regexp
   "t" #'quarry-grep-change-literal
   "%" #'quarry-grep-toggle-regexp
+  "- p" #'quarry-grep-exclude-path
+  "+ p" #'quarry-grep-include-path
+  "- l" #'quarry-grep-exclude-line
+  "+ l" #'quarry-grep-include-line
+  "- f" #'quarry-grep-exclude-file
+  "- d" #'quarry-grep-exclude-directory
+  "+ d" #'quarry-grep-include-directory
+  "k" #'quarry-grep-remove-filter
+  "x" #'quarry-grep-toggle-filter
+  "!" #'quarry-grep-flip-filter
+  "K" #'quarry-grep-remove-other-filters
   "d" #'quarry-grep-change-directory
   "f" #'quarry-grep-change-files
   "c" #'quarry-grep-cycle-case

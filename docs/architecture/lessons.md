@@ -53,3 +53,8 @@ Part of [the architecture](../architecture.md).
   is given, it passes the table through `consult--async-wrap`, which adds
   split, indicator and refresh. A pipeline that already contains them
   needs `:async-wrap #'identity`; otherwise the split initialises twice.
+- **`format-mode-line` returns an empty string in batch.** A header or
+  mode line built with `(:eval …)` cannot be read through it in the ERT
+  suite. The grep tests call the function behind the `:eval`
+  (`quarry-grep--header`) directly; that it renders in a real frame was
+  checked by hand in a terminal Emacs.
