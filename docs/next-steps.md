@@ -5,11 +5,7 @@ architecture.md or an ADR.
 
 ## Next
 
-- Finish the rename to quarry (spec `2026-10-10-rename-to-quarry`, tasks 4
-  and 5): rename the GitHub repository before this branch is pushed or
-  merged, move the local checkout, change the Doom configuration, rebuild
-  the module.
-- Then write the spec for the grep tool (ADR 0010). The evaluation is
+- Write the spec for the grep tool (ADR 0010). The evaluation is
   `GREP-EVALUATION.md` in the emrs repository.
 
 ## Watch out for
