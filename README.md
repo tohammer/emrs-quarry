@@ -63,6 +63,16 @@ In `config.el`:
   (projdex-find-file-command 'projdex-find-file))
 ```
 
+`projdex-mode` remaps `project-find-file`, which has no key in Doom:
+Doom binds `C-x p` to its popup command, and `SPC p f` (`C-c p f` without
+evil) runs `projectile-find-file`. Bind the leader key to
+`project-find-file` so the remap applies and `projdex-find-file-command`
+chooses the command:
+
+```elisp
+(map! :leader :desc "Find file in project" "p f" #'project-find-file)
+```
+
 `doom sync` clones both repositories, and the `:pre-build` form runs
 `cargo build --release` in projdex's checkout. straight runs it whenever it
 rebuilds the package, so `doom sync -u` rebuilds the module when projdex
