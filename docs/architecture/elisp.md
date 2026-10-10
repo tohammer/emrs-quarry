@@ -34,7 +34,9 @@ use the new one.
   `:pre-build` form loads `quarry-build.el` and calls it, so `doom sync`
   completes without a Rust toolchain.
 
-`quarry--start` loads the module with `emrs-load-module` from
+`quarry--load-module` (in `quarry-core.el`, which `quarry.el` requires and
+which does not require `quarry.el`; `quarry--start` calls it) loads the
+module with `emrs-load-module` from
 `quarry--module-file` (the file in `lisp/` when it exists), and otherwise
 by name from `load-path`, which keeps manual installations working. When
 loading fails with `file-missing`, an interactive Emacs with a repository

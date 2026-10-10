@@ -57,8 +57,12 @@ pub struct WalkStats {
 }
 
 fn build_extra(config: &WalkConfig) -> Result<Gitignore, String> {
-    let mut b = GitignoreBuilder::new(&config.root);
-    for line in &config.ignores {
+    build_extra_lines(&config.root, &config.ignores)
+}
+
+fn build_extra_lines(root: &Path, ignores: &[String]) -> Result<Gitignore, String> {
+    let mut b = GitignoreBuilder::new(root);
+    for line in ignores {
         b.add_line(None, line).map_err(|e| format!("invalid ignore pattern {line:?}: {e}"))?;
     }
     b.build().map_err(|e| e.to_string())
@@ -70,7 +74,7 @@ pub fn check_ignores(config: &WalkConfig) -> Result<(), String> {
 }
 
 /// Root-relative, `/`-separated form of `path`; `None` if it is not below `root` or not valid UTF-8.
-fn rel_string(root: &Path, path: &Path) -> Option<String> {
+pub(crate) fn rel_string(root: &Path, path: &Path) -> Option<String> {
     let rel = path.strip_prefix(root).ok()?;
     let mut out = String::new();
     for c in rel.components() {
@@ -88,22 +92,39 @@ fn rel_string(root: &Path, path: &Path) -> Option<String> {
     Some(out)
 }
 
-/// The configured walk builder (shared by the parallel walk and the test reference walk).
-fn make_builder(config: &WalkConfig, start: &Path, extra: Gitignore, on_dir: Option<OnDir>) -> WalkBuilder {
+/// The rules both kinds of walk share.
+struct Rules {
+    root: PathBuf,
+    include_hidden: bool,
+    use_ignore_files: bool,
+    extra: Gitignore,
+    types: Option<ignore::types::Types>,
+    /// Consulted for entries that passed every other rule (not for the walk's start directory).
+    filter: Option<EntryFilter>,
+    on_dir: Option<OnDir>,
+}
+
+/// The configured walk builder: the one implementation of the rules (the index's parallel walk, the test
+/// reference walk and [`walker`]).
+fn make_builder_from(rules: Rules, start: &Path) -> WalkBuilder {
+    let Rules { root, include_hidden, use_ignore_files, extra, types, filter, on_dir } = rules;
     let mut b = WalkBuilder::new(start);
-    b.hidden(!config.include_hidden)
-        .parents(true)
-        .ignore(true)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
+    b.hidden(!include_hidden)
+        .parents(use_ignore_files)
+        .ignore(use_ignore_files)
+        .git_ignore(use_ignore_files)
+        .git_exclude(use_ignore_files)
+        .git_global(use_ignore_files)
         .require_git(false)
         .follow_links(false)
         .threads(std::thread::available_parallelism().map_or(1, |n| n.get()));
+    if let Some(types) = types {
+        b.types(types);
+    }
     let extra = Arc::new(extra);
-    let root = config.root.clone();
-    // `filter_entry` runs after the `ignore` crate's own rules (hidden, ignore files) and before a directory's
-    // contents are read, so `on_dir` sees exactly the directories the walk descends into, before it lists them.
+    // `filter_entry` runs after the `ignore` crate's own rules (hidden, ignore files, types) and before a
+    // directory's contents are read, so `on_dir` sees exactly the directories the walk descends into, before it
+    // lists them.
     b.filter_entry(move |entry| {
         if entry.depth() == 0 {
             return true;
@@ -112,21 +133,86 @@ fn make_builder(config: &WalkConfig, start: &Path, extra: Gitignore, on_dir: Opt
         if is_dir && entry.file_name().to_str().is_some_and(|n| VCS_DIRS.contains(&n)) {
             return false;
         }
-        let keep = !extra.matched(entry.path(), is_dir).is_ignore();
-        if keep
-            && is_dir
-            && let Some(on_dir) = &on_dir
-            && let Some(rel) = rel_string(&root, entry.path())
-        {
-            on_dir(&rel);
+        if extra.matched(entry.path(), is_dir).is_ignore() {
+            return false;
         }
-        keep
+        let rel = rel_string(&root, entry.path());
+        if let (Some(filter), Some(rel)) = (&filter, &rel)
+            && !filter(rel, is_dir)
+        {
+            return false;
+        }
+        if is_dir
+            && let Some(on_dir) = &on_dir
+            && let Some(rel) = &rel
+        {
+            on_dir(rel);
+        }
+        true
     });
     b
 }
 
+/// The index's walk builder (shared by the parallel walk and the test reference walk).
+fn make_builder(config: &WalkConfig, start: &Path, extra: Gitignore, on_dir: Option<OnDir>) -> WalkBuilder {
+    let rules = Rules {
+        root: config.root.clone(),
+        include_hidden: config.include_hidden,
+        use_ignore_files: true,
+        extra,
+        types: None,
+        filter: None,
+        on_dir,
+    };
+    make_builder_from(rules, start)
+}
+
+/// Options of a walk for callers other than the index (see [`walker`]).
+#[allow(dead_code)] // the grep service is the coming user
+pub struct WalkOptions {
+    /// Absolute directory to walk. Extra `ignores` are relative to it.
+    pub root: PathBuf,
+    pub include_hidden: bool,
+    /// Extra gitignore-syntax lines, as in [`WalkConfig::ignores`].
+    pub ignores: Vec<String>,
+    /// false: `.gitignore`, `.ignore`, `.git/info/exclude` and the global git excludes are not applied (also not
+    /// those of parent directories). Extra `ignores` and the VCS directory rule still apply.
+    pub use_ignore_files: bool,
+    /// Restricts files to these types; `None` means all files. Directories are not affected by types.
+    pub types: Option<ignore::types::Types>,
+}
+
+/// Decides for an entry whether to keep it: called with the root-relative path (`/`-separated, no leading `./`
+/// or `/`) and whether it is a directory. Returning false for a directory means it is not entered.
+#[allow(dead_code)] // the grep service is the coming user
+pub type EntryFilter = Arc<dyn Fn(&str, bool) -> bool + Send + Sync>;
+
+/// A parallel walker over `options.root` with the rules of the index's walk (VCS directories never entered,
+/// symbolic links not followed, hidden files per `include_hidden`, extra `ignores` as an additional exclusion
+/// layer, ignore files per `use_ignore_files`) and the walker's thread count.
+///
+/// `filter`, if given, is consulted for every entry below the root that passed the other rules, not for the root
+/// itself. An entry whose path is not valid UTF-8 cannot be given to the filter: it is kept, and the caller
+/// decides what to do with it (use [`rel_string`], which returns `None` for it).
+///
+/// Errors: an invalid `ignores` line (the message of [`check_ignores`]).
+#[allow(dead_code)] // the grep service is the coming user
+pub fn walker(options: &WalkOptions, filter: Option<EntryFilter>) -> Result<ignore::WalkParallel, String> {
+    let extra = build_extra_lines(&options.root, &options.ignores)?;
+    let rules = Rules {
+        root: options.root.clone(),
+        include_hidden: options.include_hidden,
+        use_ignore_files: options.use_ignore_files,
+        extra,
+        types: options.types.clone(),
+        filter,
+        on_dir: None,
+    };
+    Ok(make_builder_from(rules, &options.root).build_parallel())
+}
+
 /// Is this walk entry an index entry (regular file or symlink to a file)?
-fn is_file_entry(entry: &ignore::DirEntry) -> bool {
+pub(crate) fn is_file_entry(entry: &ignore::DirEntry) -> bool {
     match entry.file_type() {
         Some(t) if t.is_file() => true,
         Some(t) if t.is_symlink() => std::fs::metadata(entry.path()).is_ok_and(|m| m.is_file()),
@@ -785,5 +871,139 @@ mod tests {
         assert!(is_ignored(&c, "a/.git", true));
         assert!(!is_ignored(&c, "a/b.rs", false));
         assert!(!is_ignored(&cfg(r, true, &[]), ".hidden", false));
+    }
+
+    fn opts(root: &Path, include_hidden: bool, use_ignore_files: bool, ignores: &[&str]) -> WalkOptions {
+        WalkOptions {
+            root: root.to_path_buf(),
+            include_hidden,
+            ignores: ignores.iter().map(|s| s.to_string()).collect(),
+            use_ignore_files,
+            types: None,
+        }
+    }
+
+    /// Relative paths of the file entries `walker` yields.
+    fn walker_files(options: &WalkOptions, filter: Option<EntryFilter>) -> BTreeSet<String> {
+        let out = Mutex::new(BTreeSet::new());
+        walker(options, filter).unwrap().run(|| {
+            Box::new(|res| {
+                let entry = res.unwrap();
+                if entry.depth() > 0
+                    && is_file_entry(&entry)
+                    && let Some(rel) = rel_string(&options.root, entry.path())
+                {
+                    out.lock().unwrap().insert(rel);
+                }
+                WalkState::Continue
+            })
+        });
+        out.into_inner().unwrap()
+    }
+
+    fn ignore_tree() -> TempDir {
+        let dir = TempDir::new().unwrap();
+        let r = dir.path();
+        write(r, ".gitignore", "*.log\n");
+        write(r, ".ignore", "secret.txt\n");
+        write(r, "a.rs", "");
+        write(r, "a.log", "");
+        write(r, "secret.txt", "");
+        write(r, ".hidden", "");
+        write(r, ".git/config", "");
+        write(r, "sub/.gitignore", "local.txt\n");
+        write(r, "sub/local.txt", "");
+        write(r, "sub/b.rs", "");
+        write(r, "sub/.git/HEAD", "");
+        write(r, "sub/x.tmp", "");
+        write(r, "sub/deep/c.rs", "");
+        write(r, "sub/deep/.hg/data", "");
+        write(r, "sub/.svn", "plain file");
+        dir
+    }
+
+    #[test]
+    fn walker_defaults_equal_the_index() {
+        let dir = ignore_tree();
+        for hidden in [true, false] {
+            let config = cfg(dir.path(), hidden, &["*.tmp"]);
+            let (expected, _, _) = run(&config, None);
+            let got = walker_files(&opts(dir.path(), hidden, true, &["*.tmp"]), None);
+            assert_eq!(got, expected, "include_hidden={hidden}");
+            assert!(!got.is_empty());
+        }
+    }
+
+    #[test]
+    fn walker_without_ignore_files() {
+        let dir = ignore_tree();
+        let got = walker_files(&opts(dir.path(), true, false, &["*.tmp"]), None);
+        assert_eq!(
+            got,
+            set(&[
+                ".gitignore",
+                ".hidden",
+                ".ignore",
+                "a.log",
+                "a.rs",
+                "secret.txt",
+                "sub/.gitignore",
+                "sub/.svn",
+                "sub/b.rs",
+                "sub/deep/c.rs",
+                "sub/local.txt",
+            ])
+        );
+    }
+
+    #[test]
+    fn walker_hidden_option() {
+        let dir = ignore_tree();
+        let got = walker_files(&opts(dir.path(), false, false, &[]), None);
+        assert!(got.contains("a.rs") && got.contains("a.log") && got.contains("sub/x.tmp"));
+        assert!(!got.iter().any(|p| p.split('/').any(|c| c.starts_with('.'))), "{got:?}");
+    }
+
+    #[test]
+    fn walker_types() {
+        let dir = ignore_tree();
+        let mut tb = ignore::types::TypesBuilder::new();
+        tb.add_defaults();
+        tb.select("rust");
+        let mut options = opts(dir.path(), true, true, &[]);
+        options.types = Some(tb.build().unwrap());
+        assert_eq!(walker_files(&options, None), set(&["a.rs", "sub/b.rs", "sub/deep/c.rs"]));
+    }
+
+    #[test]
+    fn walker_filter() {
+        let dir = ignore_tree();
+        let seen = Arc::new(Mutex::new(Vec::<(String, bool)>::new()));
+        let log = Arc::clone(&seen);
+        let filter: EntryFilter = Arc::new(move |rel, is_dir| {
+            log.lock().unwrap().push((rel.to_string(), is_dir));
+            rel != "sub/deep" && rel != "a.rs"
+        });
+        let got = walker_files(&opts(dir.path(), true, true, &["*.tmp"]), Some(filter));
+        assert_eq!(got, set(&[".gitignore", ".hidden", ".ignore", "sub/.gitignore", "sub/.svn", "sub/b.rs"]));
+        let seen = seen.lock().unwrap();
+        assert!(seen.contains(&("sub".to_string(), true)));
+        assert!(seen.contains(&("sub/deep".to_string(), true)));
+        assert!(seen.contains(&("sub/b.rs".to_string(), false)));
+        assert!(seen.contains(&("a.rs".to_string(), false)));
+        assert!(!seen.iter().any(|(p, _)| p.starts_with("sub/deep/")), "{seen:?}");
+        assert!(
+            !seen.iter().any(|(p, _)| p.is_empty() || p.starts_with('/') || p.starts_with("./") || p.contains('\\'))
+        );
+        assert!(!seen.iter().any(|(p, _)| p == ".git" || p.starts_with(".git/")), "VCS dirs never reach the filter");
+    }
+
+    #[test]
+    fn walker_invalid_ignores() {
+        let dir = TempDir::new().unwrap();
+        let config = cfg(dir.path(), true, &["[z-a]"]);
+        let expected = check_ignores(&config).unwrap_err();
+        let err = walker(&opts(dir.path(), true, true, &["[z-a]"]), None).err().unwrap();
+        assert_eq!(err, expected);
     }
 }

@@ -29,6 +29,7 @@
 (require 'cl-lib)
 (require 'emrs)
 (require 'quarry-build)
+(require 'quarry-core)
 (require 'project)
 (require 'seq)
 
@@ -38,14 +39,6 @@
   :prefix "quarry-")
 
 ;;;; Options
-
-(defcustom quarry-include-hidden t
-  "Non-nil means hidden files are indexed."
-  :type 'boolean)
-
-(defcustom quarry-ignores nil
-  "Extra gitignore-syntax patterns, relative to the project root."
-  :type '(repeat string))
 
 (defcustom quarry-limit 200
   "Number of candidates returned per query."
@@ -180,41 +173,9 @@ This is a safety net against a stuck instance, not a latency budget."
         (display-warning
          'quarry (format "Instance for %s failed: %s" root message))))))
 
-(defun quarry--module-file ()
-  "Return the module file next to the true quarry.el, or nil.
-Nil when the repository cannot be found or the file does not exist."
-  (let* ((repo (ignore-errors (quarry-build--find-repo)))
-         (file (and repo (quarry-build--module-file repo))))
-    (and file (file-exists-p file) file)))
-
-(defun quarry--offer-build ()
-  "Offer to build the missing module; signal a `user-error' either way."
-  (let ((repo (ignore-errors (quarry-build--find-repo))))
-    (when (get-buffer-process quarry-build--buffer)
-      (user-error "The quarry module is being built; run the command again when it is done"))
-    (if (and repo
-             (file-exists-p (expand-file-name "Cargo.toml" repo))
-             (not noninteractive)
-             (y-or-n-p "quarry module not built. Build it now with cargo? "))
-        (progn
-          (quarry-build-module)
-          (user-error "Building the quarry module; run the command again when it is done"))
-      (user-error "Cannot load the quarry module: install it as quarry-module%s on `load-path', or run M-x quarry-build-module"
-                  module-file-suffix))))
-
 (defun quarry--start (root)
   "Start an instance for ROOT and return its record."
-  (condition-case err
-      (emrs-load-module 'quarry (quarry--module-file))
-    (file-missing
-     (quarry--offer-build))
-    (error
-     (let ((file (quarry--module-file)))
-       (if file
-           (user-error "Loading %s failed: %s; rebuild it with M-x quarry-build-module"
-                       file (error-message-string err))
-         (user-error "Cannot load the quarry module (install it as quarry-module%s on `load-path'): %s"
-                     module-file-suffix (error-message-string err))))))
+  (quarry--load-module)
   (remhash root quarry--failures)
   (let ((rec (quarry--make-rec :root root :indexing t :watching t)))
     (setf (quarry--rec-instance rec)

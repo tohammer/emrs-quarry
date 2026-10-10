@@ -1182,5 +1182,23 @@ Wait for WAIT seconds at most (default 10)."
       (quarry-test--wait (lambda () (zerop (hash-table-count quarry--instances))) 3)
       (delete-directory dir t))))
 
+(ert-deftest quarry-test-core-loads-alone ()
+  "quarry-core.el loads without quarry.el and defines `quarry--load-module'."
+  (let* ((emacs (expand-file-name invocation-name invocation-directory))
+         (lisp (file-name-directory (locate-library "quarry-core")))
+         (emrs (file-name-directory (locate-library "emrs")))
+         (out (generate-new-buffer " *quarry-core-alone*")))
+    (unwind-protect
+        (let ((status (call-process
+                       emacs nil out nil "--batch" "-Q"
+                       "-L" lisp "-L" emrs
+                       "--eval"
+                       (concat "(progn (require 'quarry-core)"
+                               " (kill-emacs (if (and (not (featurep 'quarry))"
+                               " (fboundp 'quarry--load-module)) 0 1)))"))))
+          (should (equal (list status (with-current-buffer out (buffer-string)))
+                         (list 0 (with-current-buffer out (buffer-string))))))
+      (kill-buffer out))))
+
 (provide 'quarry-tests)
 ;;; quarry-tests.el ends here
