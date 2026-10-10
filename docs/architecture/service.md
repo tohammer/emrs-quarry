@@ -7,11 +7,11 @@ The Rust side: threads, messages, rescans, queries and watching. Part of
 
 | Thread | Runs | Talks to the service by |
 |---|---|---|
-| emrs worker pool | `Projdex::handle`, one message at a time per instance | owns the index |
+| emrs worker pool | `IndexService::handle`, one message at a time per instance | owns the index |
 | walk task (`ctx.spawn`) | `walk::walk_dirs`, which uses the `ignore` crate's parallel walker with one thread per core | `WalkBatch`, `WalkDone` self-messages |
 | `:files` stream task (`ctx.spawn`) | Sends a snapshot of the index to the stream (capacity 4096), stops when the stream's token is cancelled | stream |
-| `notify` backend thread, debouncer thread (100 ms window) | Collect and debounce file-system events | channel to `projdex-watch` |
-| `projdex-watch` | Translates debounced events into changes, walking new directories itself | `FsChanges`, `FsRescan`, `WatchFailed` self-messages |
+| `notify` backend thread, debouncer thread (100 ms window) | Collect and debounce file-system events | channel to `quarry-watch` |
+| `quarry-watch` | Translates debounced events into changes, walking new directories itself | `FsChanges`, `FsRescan`, `WatchFailed` self-messages |
 | scoring threads (`std::thread::scope`) | Score chunks of the index when more than 10,000 paths are to be scored | joined before the query returns |
 
 ## Message flow
@@ -92,5 +92,5 @@ produce a full rescan instead; after lost events, full walks re-add every
 directory watch until a walk that began after the loss has become
 current. When the inotify limit is reached or the backend fails,
 the watcher is dropped and `WatchFailed` is sent once; the instance keeps
-answering from the index it has, and `projdex-find-file` sends `:rescan`
+answering from the index it has, and `quarry-find-file` sends `:rescan`
 before each prompt.

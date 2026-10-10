@@ -1,5 +1,5 @@
 #!/bin/sh
-# Benchmark projdex against project-files + flex on generated AOSP-like
+# Benchmark quarry against project-files + flex on generated AOSP-like
 # trees of 100,000 and 1,000,000 empty files (spec "Testing", "Benchmark").
 #
 # Usage: bench/run-bench.sh [--size 100k|1m|both] [--skip-baseline] [--keep]
@@ -10,13 +10,13 @@
 #   --keep           keep the generated trees for the next run; a kept tree
 #                    is reused when its generator version matches
 #
-# Trees go to $PROJDEX_BENCH_DIR (default: target/bench-trees). They need
+# Trees go to $QUARRY_BENCH_DIR (default: target/bench-trees). They need
 # about 1.1 inodes per file plus one 4 KiB block per directory: roughly
 # 80 MB and 120,000 inodes for 100k, 800 MB and 1.2 million inodes for 1m,
 # more with the git repository the baseline needs (the 1m index file alone
 # is about 100 MB).
 #
-# Exits non-zero when projdex's p99 latency exceeds 50 ms (100k) or 150 ms
+# Exits non-zero when quarry's p99 latency exceeds 50 ms (100k) or 150 ms
 # (1m), or on any error.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -53,22 +53,22 @@ fi
 out="$root/target/bench-elisp"
 mkdir -p "$out"
 for ext in so dylib dll; do
-    for built in "target/release/libprojdex.$ext" "target/release/projdex.$ext"; do
+    for built in "target/release/libquarry.$ext" "target/release/quarry.$ext"; do
         if [ -f "$built" ]; then
-            cp "$built" "$out/projdex-module.$ext"
+            cp "$built" "$out/quarry-module.$ext"
         fi
     done
 done
-cp "$root/bench/projdex-bench.el" "$out/"
+cp "$root/bench/quarry-bench.el" "$out/"
 "$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" \
     --eval '(setq byte-compile-error-on-warn t)' \
-    -f batch-byte-compile "$out/projdex-bench.el"
+    -f batch-byte-compile "$out/quarry-bench.el"
 
-trees=${PROJDEX_BENCH_DIR:-$root/target/bench-trees}
+trees=${QUARRY_BENCH_DIR:-$root/target/bench-trees}
 mkdir -p "$trees"
 trees=$(cd "$trees" && pwd)
-version=$("$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" -l "$out/projdex-bench.elc" \
-    --eval '(princ projdex-bench-generator-version)')
+version=$("$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" -l "$out/quarry-bench.elc" \
+    --eval '(princ quarry-bench-generator-version)')
 
 echo "Trees in $trees:"
 df -h "$trees" | tail -n 1
@@ -92,8 +92,8 @@ for size in $sizes; do
         echo "Generating the $size tree in $tree"
         rm -rf "$tree" "$stamp" "$trees/tree-$size.git"
         start=$(now_s)
-        "$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" -l "$out/projdex-bench.elc" \
-            --eval "(projdex-bench-generate $n \"$trees/tree-$size\")"
+        "$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" -l "$out/quarry-bench.elc" \
+            --eval "(quarry-bench-generate $n \"$trees/tree-$size\")"
         mkdir -p "$tree"
         (cd "$tree" && xargs mkdir -p < "$trees/tree-$size.dirs" &&
              xargs touch < "$trees/tree-$size.files")
@@ -116,7 +116,7 @@ for size in $sizes; do
         echo "Committed in $(($(now_s) - start)) s, $(du -sh "$tree/.git" | cut -f 1) in .git"
     fi
     "$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" \
-        -l "$out/projdex-bench.elc" -f projdex-bench-run \
+        -l "$out/quarry-bench.elc" -f quarry-bench-run \
         "$size" "$tree" "$threshold" "$baseline" || status=1
     if [ "$keep" = 0 ]; then
         rm -rf "$tree" "$stamp" "$trees/tree-$size.git"

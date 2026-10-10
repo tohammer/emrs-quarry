@@ -21,7 +21,7 @@
 //!
 //! **Threads.** `notify` runs its backend thread and the debouncer's thread. The backend is created first, so
 //! that a failure to create it (inotify instance limit, too many open files) leaves no debouncer thread behind.
-//! The debouncer hands each batch of debounced events to a channel; the watcher's own thread (`projdex-watch`)
+//! The debouncer hands each batch of debounced events to a channel; the watcher's own thread (`quarry-watch`)
 //! translates them into index changes, walking new directories itself, and sends the results to the service
 //! through a [`Sink`]. Nothing here touches the index: the service applies the changes in `handle`.
 //!
@@ -565,7 +565,7 @@ impl Watcher {
 
         let thread_shared = shared.clone();
         std::thread::Builder::new()
-            .name("projdex-watch".to_string())
+            .name("quarry-watch".to_string())
             .spawn(move || run(thread_shared, config, rx))
             .map_err(|e| format!("cannot start the watcher thread: {e}"))?;
         Ok(Watcher { debouncer: Some(debouncer), tx, shared })

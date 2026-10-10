@@ -14,7 +14,7 @@ Part of [the architecture](../architecture.md).
   (`matcher::narrows`).
 - **`notify-debouncer-full` is quadratic in the number of watches.** It
   keeps the watched roots in a `Vec` and scans it on every `watch` call,
-  which is unusable with hundreds of thousands of directories. projdex uses
+  which is unusable with hundreds of thousands of directories. quarry uses
   the debouncer only for debouncing and adds and removes watches on the
   backend directly (`SharedWatcher` in `src/watch.rs`).
 - **inotify limits matter on AOSP-sized trees.** One watch per indexed
@@ -43,7 +43,7 @@ Part of [the architecture](../architecture.md).
   minibuffer with `execute-kbd-macro` instead.
 - **`project-read-file-name-function` cannot speed up `project-find-file`.**
   `project-find-file` builds the full file list with `project-files` before
-  calling it, which is the slow part. projdex remaps the command instead
+  calling it, which is the slow part. quarry remaps the command instead
   (ADR 0001).
 - **A walk's index must not replace the live one until it is complete.**
   Generations keep queries on the previous index and replay recorded
