@@ -5,6 +5,11 @@ each project's files, updated by a file watcher, and answers fuzzy queries
 from it with [nucleo](https://github.com/helix-editor/nucleo) ranking, so
 `project-find-file` stays fast on large repositories.
 
+The package also holds `quarry-grep`, an interactive grep in the manner of
+[rg.el](https://github.com/dajva/rg.el): the search runs in the same
+module, and the matches are shown in a buffer from which the search is
+changed and run again (see "Grep"). The two tools do not need each other.
+
 quarry is built on [emrs](https://github.com/tohammer/emrs), which runs the
 Rust side as a message-passing service outside the Emacs thread.
 
@@ -315,9 +320,137 @@ Differences from `quarry-find-file`:
   the whole input is the query and nothing is filtered locally.
 - The history is separate: `quarry-consult-history`.
 
+## Grep
+
+`quarry-grep` searches a directory for lines and shows them in a result
+buffer, in the manner of rg.el. The search runs in the module, on all
+cores, and the matches arrive as values, not as text to be parsed; ripgrep
+does not have to be installed. It works with `quarry-mode` off and uses
+neither the file index nor the watcher: every search walks the directory.
+The commands are autoloaded; without package autoloads, `(require
+'quarry-grep)` first.
+
+| Command | Asks for | Searches |
+|---|---|---|
+| `quarry-grep` | regexp, file type, directory | the directory |
+| `quarry-grep-literal` | string, file type, directory | the directory |
+| `quarry-grep-project` | regexp, file type | the project root (`project-current`), or `default-directory` outside a project |
+| `quarry-grep-dwim` | nothing | the project root for the symbol at point as a string, in files of the current buffer's type |
+
+The pattern prompt offers the active region, or else the symbol at point,
+as default. The file type prompt completes over the type names of the
+`ignore` crate (what `rg --type-list` prints) and `everything`; its
+default is the type of the current buffer's file, else `everything`.
+Input that is not a type name is taken as globs separated by spaces, for
+example `*.el *.org`. An empty pattern is refused.
+
+### The result buffer
+
+One buffer, `*quarry-grep*`, reused by each search. Its
+`default-directory` is the searched directory, and paths are shown
+relative to it.
+
+```text
+ files: rust   dir: ~/src/emacs-quarry/   case: smart   ign: on   hidden: on   hits: 3 in 2 files
++ line/re  fn walk\w*
+
+File: src/grep/search.rs (1)
+   41 pub fn walk_and_search(
+
+File: src/walk.rs (2)
+  169 pub fn walk(
+  182 pub fn walk_dirs(
+
+Search finished: 3 lines in 2 files, 61 ms
+```
+
+- The header line shows the file type, the directory, the case rule,
+  whether ignore files are used and hidden files searched, and the number
+  of lines and files found so far. A click with `mouse-1` on a part runs
+  the command of its key below.
+- The first line is the pattern: `line` for a string, `line/re` for a
+  regexp.
+- Each file has a heading with the number of its lines, and one line per
+  match with the line number and the text; the matches have the face
+  `quarry-grep-match`.
+- The last line says `Searching…` while results arrive, then how many
+  lines were found in how many files and how long it took. It also names
+  a search that stopped at the line cap, files that could not be read, a
+  cancellation, and an error such as an invalid regexp.
+
+Results appear as they arrive, without moving point or scrolling the
+window. A search that finishes within 150 ms is shown sorted by path; a
+longer one shows the files in the order they are found.
+
+| Key | Action |
+|---|---|
+| `RET`, `mouse-1`, `mouse-2` | On a result line or its number: visit the file at that line, at the column of the first match. On a file heading: visit the file. On the pattern line: edit the pattern in the minibuffer |
+| `n`, `p` | Show the next or previous match in another window without selecting it |
+| `}`, `{`, `M-N`, `M-P` | Move to the next or previous file heading |
+| `TAB` | Fold or unfold the file at point |
+| `S-TAB` | Fold all files, or unfold them when all are folded |
+| `g` | Search again |
+| `r`, `t` | Edit the pattern, as a regexp or as a string |
+| `%` | On the pattern line: switch between string and regexp |
+| `d`, `f` | Change the directory; the file type |
+| `c` | Cycle the case rule: smart, sensitive, insensitive |
+| `i`, `H` | Switch ignore files on or off; hidden files |
+| `C-c <`, `C-c >` | Go back or forward in the buffer's search history |
+| `C-c C-k` | Cancel the running search |
+| `q` | Quit the window |
+
+`next-error` and `previous-error` (`M-g n`, `M-g p`) walk the results from
+any buffer, also through folded files. Every search that differs from the
+one before is an entry in the buffer's history; going back or forward
+runs that search again. A new search cancels the one that is running, and
+so does killing the buffer.
+
+With `smart` case a pattern ignores case unless it has an uppercase
+letter. With ignore files off (`ign: off`) everything is searched except
+version control directories; `quarry-ignores` is not applied then either.
+
+### Options and faces
+
+Customize group `quarry-grep`. They apply to the next search.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `quarry-grep-case` | `smart` | Case rule a new search starts with: `smart`, `sensitive` or `insensitive`. |
+| `quarry-grep-max-lines` | `50000` | The search stops when this many lines are found, and the last line says so. |
+| `quarry-grep-max-columns` | `500` | Longer lines are shown cut after this many characters. |
+| `quarry-grep-buffer-name` | `*quarry-grep*` | Name of the result buffer. |
+| `quarry-include-hidden` | `t` | A new search includes hidden files; `H` switches it per search. |
+| `quarry-ignores` | `nil` | Extra gitignore-syntax patterns, relative to the searched directory. |
+
+Faces: `quarry-grep-match`, `quarry-grep-file-heading`,
+`quarry-grep-line-number`, `quarry-grep-filter-include`,
+`quarry-grep-filter-exclude`, `quarry-grep-filter-kind`,
+`quarry-grep-filter-pattern`, `quarry-grep-filter-disabled`,
+`quarry-grep-status`, `quarry-grep-error` and `quarry-grep-header-value`.
+
+### Limits
+
+- Local directories only. In a remote (TRAMP) directory the commands
+  signal an error; use rg.el there.
+- Regexps are Rust regexps (the `regex` crate, as in ripgrep's default
+  engine): no backreferences and no look-around. Emacs regexp syntax does
+  not apply; a group is `(...)`, not `\(...\)`.
+- Matches are single lines; there are no context lines.
+- Symbolic links are not searched, neither to files nor to directories,
+  so a file is found once, under its real path. Version control
+  directories (`.git`, `.hg`, `.svn`, `.jj`) are never searched, and files
+  with a NUL byte are skipped as binary.
+- The search stops at `quarry-grep-max-lines` lines; narrow the search
+  or raise the option to see more.
+- `~/.ripgreprc`, PCRE2 and compressed files are not supported.
+- The result buffer is not a `compilation-mode` buffer
+  (`docs/decisions/0012`), so commands made for those, such as
+  `grep-edit-mode`, do not work in it.
+
 ## Options
 
-Customize group `quarry`. `quarry-include-hidden` and `quarry-ignores`
+The options of the file finder; those of the grep tool are listed under
+"Grep". Customize group `quarry`. `quarry-include-hidden` and `quarry-ignores`
 apply to instances started afterwards; run `quarry-stop` to restart a
 project's instance. The other options apply at once.
 
@@ -466,7 +599,8 @@ bench/run-bench.sh      # benchmark, run by hand
 QUARRY_TEST_LOAD_PATH=~/.emacs.d/straight/build/consult:~/.emacs.d/straight/build/compat tests/run-ert.sh
 ```
 
-The consult front end tests (`tests/quarry-consult-tests.el`) need consult
+The grep tests (`tests/quarry-grep-tests.el`) need nothing extra. The
+consult front end tests (`tests/quarry-consult-tests.el`) need consult
 2.0 or later and its dependency compat. `QUARRY_TEST_LOAD_PATH`
 is a colon-separated list of directories that the script adds to
 `load-path`; put the directories of consult and compat there. Without it,

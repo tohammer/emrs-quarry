@@ -50,4 +50,5 @@ exec "${EMACS:-emacs}" --batch --module-assertions \
     -L "$out" -L "$emrs_el" "$@" \
     -l "$root/tests/quarry-tests.el" \
     -l "$root/tests/quarry-consult-tests.el" \
+    -l "$root/tests/quarry-grep-tests.el" \
     --eval "(ert-run-tests-batch-and-exit (or (getenv \"ERT_SELECTOR\") t))"
