@@ -5,7 +5,7 @@
 ;; Run with tests/run-ert.sh, which loads tests/quarry-tests.el first;
 ;; its helpers are used here.  The tests load the module, so their names
 ;; start with `quarry-test-grep-' to sort after
-;; `quarry-test-build-async-installs' (docs/backlog.md).
+;; `quarry-test-build-async-installs' (docs/backlog/project.md).
 ;;
 ;; The result buffer is read through its text properties, never by
 ;; column or by a regexp on its layout (docs/decisions/0012).

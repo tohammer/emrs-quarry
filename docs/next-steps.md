@@ -5,7 +5,7 @@ architecture.md or an ADR.
 
 ## Next
 
-- Use quarry-grep daily and do its manual checks (backlog, "Grep: manual
+- Use quarry-grep daily and do its manual checks (grep backlog, "Manual
   checks not done yet").
 - Next grep feature: context lines before and after a match (backlog).
 
