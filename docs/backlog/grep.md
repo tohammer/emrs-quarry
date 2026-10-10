@@ -64,3 +64,19 @@ the line cap before the NUL byte is read, those lines are delivered.
 Origin: task 4 of the grep spec (2026-10-10); accepted because the
 search has stopped at that point anyway. Revisit if binary lines show up
 in capped results.
+
+## A menu to make the keys discoverable
+
+Check whether the result buffer should get a transient menu, or
+something like it, that shows the available commands. The buffer has
+some forty keys, several behind the `-` and `+` prefixes and several
+that only work on a filter line; nothing in the buffer shows them. rg.el
+has such a menu (`rg-menu`, on `m`), built on transient. To weigh: a
+transient menu (a dependency, though transient ships with Emacs since
+28) against lighter means such as `which-key` descriptions for the
+prefix maps, a menu-bar and context menu, or a short key summary in the
+buffer or on `?`; whether the menu only lists commands or also holds the
+toggles (case, ignore files, hidden) as switches; and how it shows the
+commands that depend on point. Origin: requested by the author on
+2026-10-10, after the first use of quarry-grep. Revisit together with
+the manual checks, when the keys have been used for a while.
