@@ -293,6 +293,16 @@ then.  Point is only moved while it is still at START.")
 (defvar-local quarry-grep--return-block nil
   "Start of the file block `quarry-grep--return' waits for, once inserted.")
 
+(defvar-local quarry-grep--editing nil
+  "Non-nil while the buffer is in wgrep's edit mode, as far as known.
+See `quarry-grep--edit-sync'.")
+
+(defvar-local quarry-grep--edited nil
+  "Non-nil when edits were committed from this buffer since the search.")
+
+(defvar-local quarry-grep--edit-properties nil
+  "The per-file text properties put on for wgrep, to be removed again.")
+
 (defvar-local quarry-grep--status-marker nil
   "Marker at the start of the status line.  File blocks go before it.")
 
@@ -314,6 +324,7 @@ then.  Point is only moved while it is still at START.")
 ;;                        the file's line.
 ;; `quarry-grep-prefix'   t on the line number and the space after it;
 ;;                        the rest of the line is the line's text.
+;; `quarry-grep-separator' t on the empty line that ends a file block.
 ;; `quarry-grep-status'   t on the status line.
 ;;
 ;; The properties of a line cover its newline, so the line at point is
@@ -425,7 +436,7 @@ ITEM is the plist of a file item of the service."
             (put-text-property (+ text-start (car span)) (+ text-start (cadr span))
                                'face 'quarry-grep-match-secondary)))))
     (put-text-property start (point) 'quarry-grep-file path)
-    (insert "\n")
+    (insert (propertize "\n" 'quarry-grep-separator t))
     (cl-incf quarry-grep--files)
     (cl-incf quarry-grep--lines (length lines))))
 
@@ -437,6 +448,13 @@ ITEM is the plist of a file item of the service."
 
 (defun quarry-grep--status-text ()
   "Return the text of the status line for the buffer's state."
+  (concat (quarry-grep--search-status-text)
+          (if quarry-grep--edited
+              "\nThe results were edited; g searches again"
+            "")))
+
+(defun quarry-grep--search-status-text ()
+  "Return what the status line says about the search."
   (pcase quarry-grep--state
     ('running "Searching…")
     ('cancelled (format "Search cancelled: %s so far" (quarry-grep--counts-text)))
@@ -518,6 +536,8 @@ is set so that the results bring it back."
          (path (get-text-property bol 'quarry-grep-file))
          (line (get-text-property bol 'quarry-grep-line)))
     (remove-overlays (point-min) (point-max) 'quarry-grep-fold t)
+    ;; What a commit with wgrep left on the edited lines.
+    (remove-overlays (point-min) (point-max) 'wgrep t)
     (erase-buffer)
     (dolist (filter filters)
       (quarry-grep--insert-filter filter (alist-get filter roles)))
@@ -642,6 +662,7 @@ Items of a search that BUFFER does not wait for any more are dropped."
   "Make SEARCH the search of the current result buffer and run it.
 A running search is cancelled.  Unless KEEP-HISTORY, the search shown
 so far becomes a history entry when SEARCH differs from it."
+  (quarry-grep--check-not-editing)
   ;; First, so that a missing module leaves the buffer as it is.
   (let ((instance (quarry-grep--ensure-instance))
         (buffer (current-buffer))
@@ -662,7 +683,8 @@ so far becomes a history entry when SEARCH differs from it."
           quarry-grep--summary nil
           quarry-grep--error nil
           quarry-grep--error-filter nil
-          quarry-grep--dead-instance nil)
+          quarry-grep--dead-instance nil
+          quarry-grep--edited nil)
     (unless quarry-grep--status-marker
       (setq quarry-grep--status-marker (make-marker)))
     ;; As `compilation-start' does: `next-error' now means these results.
@@ -682,7 +704,9 @@ so far becomes a history entry when SEARCH differs from it."
                             instance)))))
 
 (defun quarry-grep--current ()
-  "Return the search of the current buffer or signal a `user-error'."
+  "Return the search of the current buffer or signal a `user-error'.
+That is also signalled while the results are being edited."
+  (quarry-grep--check-not-editing)
   (or (and (derived-mode-p 'quarry-grep-mode) quarry-grep--current)
       (user-error "This buffer has no quarry-grep search")))
 
@@ -1238,34 +1262,60 @@ The prompt says whether it will EXCLUDE and whether it is a REGEXP."
 
 (defun quarry-grep-exclude-path (&optional regexp)
   "Add a filter that drops the files whose path contains a string.
-With a prefix argument REGEXP, the pattern is a regexp.  The path is
-matched as a slash followed by the path relative to the search
-directory, so `/test/' names a directory at any depth."
-  (interactive "P" quarry-grep-mode)
+From Lisp, a non-nil REGEXP makes the pattern a regexp; that is the
+command `quarry-grep-exclude-path-regexp'.  The path is matched as a
+slash followed by the path relative to the search directory, so
+`/test/' names a directory at any depth."
+  (interactive nil quarry-grep-mode)
   (quarry-grep--current)
   (quarry-grep--add-filter 'path t (quarry-grep--read-filter 'path t regexp) regexp))
 
 (defun quarry-grep-include-path (&optional regexp)
   "Add a filter that keeps only the files whose path contains a string.
-With a prefix argument REGEXP, the pattern is a regexp.  See
+From Lisp, a non-nil REGEXP makes the pattern a regexp; that is the
+command `quarry-grep-include-path-regexp'.  See
 `quarry-grep-exclude-path' for what the path is."
-  (interactive "P" quarry-grep-mode)
+  (interactive nil quarry-grep-mode)
   (quarry-grep--current)
   (quarry-grep--add-filter 'path nil (quarry-grep--read-filter 'path nil regexp) regexp))
 
 (defun quarry-grep-exclude-line (&optional regexp)
   "Add a filter that drops the lines that contain a string.
-With a prefix argument REGEXP, the pattern is a regexp."
-  (interactive "P" quarry-grep-mode)
+From Lisp, a non-nil REGEXP makes the pattern a regexp; that is the
+command `quarry-grep-exclude-line-regexp'."
+  (interactive nil quarry-grep-mode)
   (quarry-grep--current)
   (quarry-grep--add-filter 'line t (quarry-grep--read-filter 'line t regexp) regexp))
 
 (defun quarry-grep-include-line (&optional regexp)
   "Add a filter that keeps only the lines that also contain a string.
-With a prefix argument REGEXP, the pattern is a regexp."
-  (interactive "P" quarry-grep-mode)
+From Lisp, a non-nil REGEXP makes the pattern a regexp; that is the
+command `quarry-grep-include-line-regexp'."
+  (interactive nil quarry-grep-mode)
   (quarry-grep--current)
   (quarry-grep--add-filter 'line nil (quarry-grep--read-filter 'line nil regexp) regexp))
+
+(defun quarry-grep-exclude-path-regexp ()
+  "Add a filter that drops the files whose path matches a regexp.
+See `quarry-grep-exclude-path' for what the path is."
+  (interactive nil quarry-grep-mode)
+  (quarry-grep-exclude-path t))
+
+(defun quarry-grep-include-path-regexp ()
+  "Add a filter that keeps only the files whose path matches a regexp.
+See `quarry-grep-exclude-path' for what the path is."
+  (interactive nil quarry-grep-mode)
+  (quarry-grep-include-path t))
+
+(defun quarry-grep-exclude-line-regexp ()
+  "Add a filter that drops the lines that match a regexp."
+  (interactive nil quarry-grep-mode)
+  (quarry-grep-exclude-line t))
+
+(defun quarry-grep-include-line-regexp ()
+  "Add a filter that keeps only the lines that also match a regexp."
+  (interactive nil quarry-grep-mode)
+  (quarry-grep-include-line t))
 
 (defun quarry-grep--file-at-point ()
   "Return the path of the file block at point or signal a `user-error'."
@@ -1340,6 +1390,210 @@ A filter that is off stays in the list and is not applied."
     (unless (cdr (quarry-grep--search-filters search))
       (user-error "The search has no other filters"))
     (quarry-grep--set-filters (list primary))))
+
+;;;; Editing with wgrep
+
+;; wgrep is optional (docs/decisions/0013): nothing here loads it except
+;; `quarry-grep-edit'.  wgrep is told what the lines are by two functions
+;; that translate the properties above into its own; no text is parsed.
+
+(defvar wgrep-mode-map)
+(defvar wgrep-prepared)
+(defvar wgrep-original-mode-map)
+(defvar wgrep-header&footer-parser)
+(defvar wgrep-results-parser)
+(declare-function wgrep-change-to-wgrep-mode "ext:wgrep" ())
+(declare-function wgrep-construct-filename-property "ext:wgrep" (filename))
+
+(defconst quarry-grep--link-properties '(mouse-face highlight follow-link t)
+  "The properties that make a line respond to the mouse.")
+
+(defun quarry-grep--in-edit-mode-p ()
+  "Return non-nil when the buffer's keys are those of wgrep's edit mode."
+  (and (boundp 'wgrep-mode-map)
+       (eq (current-local-map) wgrep-mode-map)))
+
+(defun quarry-grep--edit-sync ()
+  "Make the buffer a result buffer again when wgrep's edit mode has ended.
+wgrep has no hook for that, so this runs after each command while the
+buffer is edited (`post-command-hook') and before the commands of
+this file look at the buffer."
+  (when (and quarry-grep--editing (not (quarry-grep--in-edit-mode-p)))
+    (quarry-grep--edit-restore)))
+
+(defun quarry-grep--check-not-editing ()
+  "Signal a `user-error' while the results are being edited."
+  (quarry-grep--edit-sync)
+  (when quarry-grep--editing
+    (user-error "The results are being edited; finish with C-c C-c or abort with C-c C-k first")))
+
+(defun quarry-grep--edit-header-and-footer ()
+  "Mark the header and the footer for wgrep.
+The value of `wgrep-header&footer-parser' in a result buffer.  The
+header is everything before the first file block, the footer the
+status line."
+  (let ((first (or (text-property-any (point-min) (point-max) 'quarry-grep-heading t)
+                   (point-max)))
+        (status (or (text-property-any (point-min) (point-max) 'quarry-grep-status t)
+                    (point-max))))
+    (add-text-properties (point-min) first '(read-only t wgrep-header t))
+    ;; `read-only' does not keep text from being put before it, and
+    ;; nothing stands before the first character.
+    (put-text-property (point-min) (min (1+ (point-min)) first) 'front-sticky '(read-only))
+    (add-text-properties status (point-max) '(read-only t wgrep-footer t))
+    ;; A click with mouse-1 must set point while editing, not follow a
+    ;; link to a key that the edit mode does not have.
+    (remove-list-of-text-properties (point-min) (point-max) '(mouse-face follow-link))))
+
+(defun quarry-grep--edit-results ()
+  "Tell wgrep what the lines between header and footer are.
+The value of `wgrep-results-parser' in a result buffer; wgrep calls it
+with the buffer narrowed to that part.  A result line gets its file and
+line number on its prefix, so the rest of it can be edited.  File
+headings, separators and the lines whose text is not exactly the
+file's line (`quarry-grep-inexact') are marked to be left alone."
+  (goto-char (point-min))
+  (setq quarry-grep--edit-properties nil)
+  (while (not (eobp))
+    (let* ((bol (point))
+           (path (get-text-property bol 'quarry-grep-file))
+           ;; Not `expand-file-name': a path like "~/x" must stay below
+           ;; the search directory.
+           (file (and path (concat default-directory path)))
+           (text (and (get-text-property bol 'quarry-grep-line)
+                      (not (get-text-property bol 'quarry-grep-inexact))
+                      (next-single-property-change bol 'quarry-grep-prefix nil
+                                                   (pos-eol)))))
+      (cond (text
+             (add-text-properties bol text
+                                  (list 'wgrep-line-filename file
+                                        'wgrep-line-number
+                                        (get-text-property bol 'quarry-grep-line))))
+            (t
+             ;; With its newline: wgrep makes the newline before such a
+             ;; run read-only, and an empty line would otherwise be no
+             ;; run at all and leave the line above it open at its end.
+             (put-text-property bol (min (1+ (pos-eol)) (point-max)) 'wgrep-ignore t)
+             (when (get-text-property bol 'quarry-grep-heading)
+               ;; wgrep looks for a file's lines from this property on.
+               (let ((property (wgrep-construct-filename-property file)))
+                 (push property quarry-grep--edit-properties)
+                 (put-text-property bol (pos-eol) property file))))))
+    (forward-line 1)))
+
+(defun quarry-grep--edit-restore ()
+  "Make the buffer a result buffer again after wgrep's edit mode.
+Remove wgrep's text properties, give the lines back what an edit or an
+abort took from them, find the status line again, and say in it when
+changes were committed."
+  (with-silent-modifications
+    (remove-list-of-text-properties
+     (point-min) (point-max)
+     (append '(read-only rear-nonsticky front-sticky wgrep-header wgrep-footer wgrep-ignore
+                         wgrep-line-filename wgrep-line-number)
+             quarry-grep--edit-properties))
+    (save-excursion
+      (goto-char (point-min))
+      (let ((path nil) (block nil) (status nil))
+        (while (and (not status) (not (eobp)))
+          (let ((bol (point)) (eol (pos-eol)))
+            (cond
+             ((get-text-property bol 'quarry-grep-status)
+              (setq status bol))
+             ((get-text-property bol 'quarry-grep-filter)
+              (add-text-properties bol eol quarry-grep--link-properties))
+             ((get-text-property bol 'quarry-grep-heading)
+              (setq path (get-text-property bol 'quarry-grep-file)
+                    block bol)
+              (add-text-properties bol eol quarry-grep--link-properties))
+             ((get-text-property bol 'quarry-grep-separator)
+              ;; Typed text does not inherit the block's property.
+              (when path
+                (put-text-property block bol 'quarry-grep-file path))
+              (setq path nil))
+             ((and path (get-text-property bol 'quarry-grep-line))
+              (add-text-properties
+               bol (min (1+ eol) (point-max))
+               (list 'quarry-grep-line (get-text-property bol 'quarry-grep-line)
+                     'quarry-grep-column (get-text-property bol 'quarry-grep-column)))
+              (add-text-properties bol eol quarry-grep--link-properties))))
+          (forward-line 1))
+        (when path
+          (put-text-property block (or status (point-max)) 'quarry-grep-file path))
+        ;; An abort replaces the whole text, which takes the marker along.
+        (set-marker quarry-grep--status-marker (or status (point-max))))))
+  (remove-hook 'post-command-hook #'quarry-grep--edit-sync t)
+  (buffer-disable-undo)
+  (setq buffer-read-only t
+        quarry-grep--editing nil
+        quarry-grep--edit-properties nil)
+  (when (cl-some (lambda (overlay) (overlay-get overlay 'wgrep-result))
+                 (overlays-in (point-min) (point-max)))
+    (setq quarry-grep--edited t))
+  (quarry-grep--update-status))
+
+(defun quarry-grep--file-mtime (file)
+  "Return the modification time of FILE in milliseconds, rounded down.
+That is how the service reports it.  Nil when FILE does not exist."
+  (when-let* ((attributes (file-attributes file)))
+    (car (time-convert (file-attribute-modification-time attributes) 1000))))
+
+(defun quarry-grep--stale-files ()
+  "Return the result files that are not as the search saw them.
+Those are the files that are gone, whose modification time differs
+from the one the search reported, or that a modified buffer visits.  A
+file whose time the search did not learn counts as unchanged."
+  (let ((stale nil))
+    (dolist (block (quarry-grep--blocks))
+      (let* ((path (get-text-property (car block) 'quarry-grep-file))
+             (seen (get-text-property (car block) 'quarry-grep-mtime))
+             (file (concat default-directory path))
+             (now (quarry-grep--file-mtime file))
+             (buffer (get-file-buffer file)))
+        (when (or (null now)
+                  (and seen (/= seen now))
+                  (and buffer (buffer-modified-p buffer)))
+          (push path stale))))
+    (nreverse stale)))
+
+(defun quarry-grep-edit ()
+  "Edit the results with wgrep.
+In wgrep's edit mode the text of the result lines can be changed;
+\\<wgrep-mode-map>\\[wgrep-finish-edit] applies the changes to the buffers of the files and
+\\[wgrep-abort-changes] discards them.  Lines that are shown cut or that hold bytes
+that are not valid UTF-8 cannot be edited.  When a result file changed
+since the search, ask whether to search again first; after that search,
+run this command again."
+  (interactive nil quarry-grep-mode)
+  (quarry-grep--current)
+  (when (eq quarry-grep--state 'running)
+    (user-error "A search is running; wait for it or cancel it with C-c C-k"))
+  (when (zerop quarry-grep--lines)
+    (user-error "There are no results to edit"))
+  (unless (require 'wgrep nil t)
+    (user-error "Editing the results needs the package wgrep; install it and try again"))
+  (let ((stale (quarry-grep--stale-files)))
+    (if (and stale
+             (y-or-n-p (format "%s changed since the search (%s%s); search again first? "
+                               (quarry-grep--plural (length stale) "result file")
+                               (car stale)
+                               (if (cdr stale) ", ..." ""))))
+        (progn
+          (quarry-grep-rerun)
+          (message "Searching again; press e when the search is done"))
+      ;; An edit in hidden text would be a trap.
+      (remove-overlays (point-min) (point-max) 'quarry-grep-fold t)
+      (remove-overlays (point-min) (point-max) 'wgrep t)
+      (setq-local wgrep-header&footer-parser #'quarry-grep--edit-header-and-footer
+                  wgrep-results-parser #'quarry-grep--edit-results
+                  ;; The map wgrep goes back to.  `wgrep-setup-internal'
+                  ;; would set it too, and bind a key in it.
+                  wgrep-original-mode-map (current-local-map)
+                  ;; The properties of an earlier edit are gone.
+                  wgrep-prepared nil)
+      (setq quarry-grep--editing t)
+      (add-hook 'post-command-hook #'quarry-grep--edit-sync nil t)
+      (wgrep-change-to-wgrep-mode))))
 
 ;;;; History
 
@@ -1447,6 +1701,10 @@ With COMMAND, a click on VALUE runs it and HELP is its tooltip."
   "+ p" #'quarry-grep-include-path
   "- l" #'quarry-grep-exclude-line
   "+ l" #'quarry-grep-include-line
+  "- P" #'quarry-grep-exclude-path-regexp
+  "+ P" #'quarry-grep-include-path-regexp
+  "- L" #'quarry-grep-exclude-line-regexp
+  "+ L" #'quarry-grep-include-line-regexp
   "- f" #'quarry-grep-exclude-file
   "- d" #'quarry-grep-exclude-directory
   "+ d" #'quarry-grep-include-directory
@@ -1461,7 +1719,8 @@ With COMMAND, a click on VALUE runs it and HELP is its tooltip."
   "H" #'quarry-grep-toggle-hidden
   "C-c <" #'quarry-grep-history-back
   "C-c >" #'quarry-grep-history-forward
-  "C-c C-k" #'quarry-grep-cancel)
+  "C-c C-k" #'quarry-grep-cancel
+  "e" #'quarry-grep-edit)
 
 (define-derived-mode quarry-grep-mode special-mode "quarry-grep"
   "Major mode of the result buffer of `quarry-grep'.

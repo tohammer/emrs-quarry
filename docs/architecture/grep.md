@@ -3,8 +3,7 @@
 The interactive grep: first the Rust service (threads, messages, what is
 searched, order, cap and cancellation), then the Elisp side
 (`lisp/quarry-grep.el`). Part of [the architecture](../architecture.md).
-The wgrep integration is not written yet (spec `2026-10-10-grep.md`,
-task 7).
+Results are edited through wgrep (ADR 0013), described at the end.
 
 ## Threads
 
@@ -205,6 +204,7 @@ first character.
 | `quarry-grep-column` | a result line | character offset of the first primary match in the text, or nil when the match was cut off |
 | `quarry-grep-inexact` | a result line | t when the text is not exactly the file's line |
 | `quarry-grep-prefix` | the line number and the space after it | t; what follows on the line is exactly the item's `:text` |
+| `quarry-grep-separator` | the empty line that ends a file block | t |
 | `quarry-grep-status` | the status line | t |
 
 Faces are put on with the `face` property; the mode has no font-lock
@@ -248,8 +248,11 @@ commands need no rule of their own for which filter is primary:
 whatever list results, and `r`, `t` and `K` use it.
 
 - `quarry-grep--add-filter` (behind `- p`, `+ p`, `- l`, `+ l`, `- f`,
-  `- d`, `+ d`) appends a literal filter, or a regexp one with a prefix
-  argument. A filter equal to an existing one in target, direction,
+  `- d`, `+ d`) appends a literal filter. The four add commands take an
+  optional REGEXP argument from Lisp; `- P`, `+ P`, `- L` and `+ L` are
+  thin commands that call them with it. A prefix argument is not used:
+  after a bare `C-u`, Emacs takes `-` as the sign of the argument, so
+  `C-u - p` could never reach a command. A filter equal to an existing one in target, direction,
   pattern and syntax is not added: an enabled one is a `user-error`, a
   disabled one is replaced by the enabled filter in its place.
 - The three commands that read the result at point take the path from
@@ -259,9 +262,6 @@ whatever list results, and `r`, `t` and `K` use it.
 - `k`, `x`, `!` and `%` replace or drop the filter object of the line at
   point (`quarry-grep-filter` property). `%` cannot break the primary
   rule and goes through `quarry-grep--replace-filter`.
-
-After a bare `C-u`, Emacs takes `-` as the sign of the prefix argument,
-so the `-` commands get their prefix argument as `C-u 1 - p`.
 
 ### Point after a search
 
@@ -313,3 +313,84 @@ and empties the future when the new search is not `equal` to it; `g`
 therefore adds nothing. Back and forward move the current search to the
 other list, pop theirs, and run it with history left alone. The history
 belongs to the buffer and survives a new command that reuses it.
+
+### Editing with wgrep
+
+wgrep is optional: `quarry-grep.el` declares its variables and functions
+and loads it only in `quarry-grep-edit` (`e`), with `(require 'wgrep nil
+t)`; when that fails the command names the package. The command is
+refused while a search runs and without result lines.
+
+**Stale check.** `quarry-grep--stale-files` goes over the file blocks and
+lists the paths whose file is gone, whose modification time (`time-convert`
+to milliseconds, which rounds down as the service does) differs from the
+heading's `quarry-grep-mtime`, or that a modified buffer visits. A nil
+`quarry-grep-mtime` is unknown and does not count. With such files `e`
+asks (`y-or-n-p`); yes runs the search again and does not enter edit mode.
+
+**Entering.** Fold overlays and wgrep overlays of an earlier commit are
+removed. Buffer-locally, `wgrep-header&footer-parser` and
+`wgrep-results-parser` are set to the two functions below,
+`wgrep-prepared` to nil (the properties of an earlier edit are gone) and
+`wgrep-original-mode-map` to the mode's map; then
+`wgrep-change-to-wgrep-mode` runs. `wgrep-setup-internal` is not called:
+it would bind `wgrep-enable-key` in the mode's map, to a command that
+skips the checks above. wgrep replaces the local map with
+`wgrep-mode-map`, which has no parent, so none of the mode's keys is
+active while editing and `C-c C-k` is wgrep's abort.
+
+**Property translation.** No text is parsed.
+
+- `quarry-grep--edit-header-and-footer`: everything before the first
+  `quarry-grep-heading` gets `wgrep-header` and `read-only`, the
+  `quarry-grep-status` line `wgrep-footer` and `read-only`. The first
+  character also gets `front-sticky (read-only)`. `mouse-face` and
+  `follow-link` are removed from the whole buffer, since a `mouse-1`
+  click would otherwise become `mouse-2`, which is a yank in edit mode.
+- `quarry-grep--edit-results` (called with the buffer narrowed to the
+  part between header and footer): a result line that is not
+  `quarry-grep-inexact` gets `wgrep-line-filename` (the absolute name,
+  `default-directory` plus `quarry-grep-file`) and `wgrep-line-number`
+  on its `quarry-grep-prefix`; wgrep makes that prefix read-only and
+  treats the rest of the line as the file's line. Every other line
+  (headings, separators, inexact result lines) gets `wgrep-ignore`,
+  newline included. A heading also gets the property
+  `wgrep-construct-filename-property` makes for its file, from which
+  wgrep starts looking for the file's lines. An inexact line has no file
+  for wgrep, so it is read-only and cannot be written back even after
+  wgrep's `C-c C-p` has made everything editable.
+
+**While editing.** `quarry-grep--editing` is set. `quarry-grep--run` and
+`quarry-grep--current` (the first call of every command that changes the
+search, including the clicks on the header line) signal a `user-error`,
+so no search can replace the text under an edit.
+
+**Leaving.** wgrep has no hook for the end of its edit mode.
+`quarry-grep--edit-sync` runs from a buffer-local `post-command-hook`
+and at the start of the two functions above; when
+`quarry-grep--editing` is set but the local map is no longer
+`wgrep-mode-map`, it calls `quarry-grep--edit-restore`. That works for
+commit, abort, `wgrep-exit` and `M-x`, without advice. The restore:
+
+- removes `read-only`, `rear-nonsticky`, `front-sticky` and wgrep's
+  properties, including the per-file ones it recorded;
+- walks the lines once and puts `mouse-face` and `follow-link` back on
+  filter lines, headings and result lines; re-applies
+  `quarry-grep-line` and `quarry-grep-column` over each result line from
+  its first character; and re-applies `quarry-grep-file` over each block
+  from its heading to its `quarry-grep-separator`. Text typed in edit
+  mode has no properties (wgrep makes the end of the prefix
+  `rear-nonsticky`), which would split a block for folding. A line added
+  by a newline typed into a result belongs to the block and has no line
+  number;
+- sets `quarry-grep--status-marker` to the status line again: an abort
+  erases the buffer and inserts wgrep's copy, which collapses markers;
+- switches undo off again and makes the buffer read-only;
+- sets `quarry-grep--edited` when wgrep left result overlays, that is
+  after a commit that applied or rejected something; the status line
+  then has a second line that says so until the next search.
+
+wgrep's overlays on the committed lines (applied or rejected, with the
+reason shown at point) stay until the next search or the next `e`. The
+buffer is not searched again after a commit: the changes are in file
+buffers, not on disk, so a search would show the old text.

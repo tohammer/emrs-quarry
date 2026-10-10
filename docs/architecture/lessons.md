@@ -58,3 +58,29 @@ Part of [the architecture](../architecture.md).
   suite. The grep tests call the function behind the `:eval`
   (`quarry-grep--header`) directly; that it renders in a real frame was
   checked by hand in a terminal Emacs.
+- **`C-u -` never reaches a key sequence that starts with `-`.** After a
+  bare `C-u`, `universal-argument-map` takes `-` as the sign of the
+  argument. The regexp variants of the grep filter commands therefore
+  have their own keys (`- P`, `+ L`, ...) and no prefix argument.
+- **wgrep has no hook for leaving its edit mode,** and it leaves its
+  `read-only` and `wgrep-*` text properties behind. quarry-grep notices
+  the end from a buffer-local `post-command-hook` (the local map is no
+  longer `wgrep-mode-map`) and cleans up there.
+- **wgrep's abort replaces the whole buffer text** with a copy taken on
+  entry (`erase-buffer`, then the copy). Text properties come back,
+  markers and overlays do not: the status line's marker must be found
+  again.
+- **Text typed in wgrep's edit mode has no text properties.** wgrep makes
+  the last character of a line's prefix `rear-nonsticky`, so nothing is
+  inherited at the start of the text. Code that follows a property over
+  a block (folding) must re-apply it after a commit.
+- **`read-only` text does not stop an insertion in front of it,** so the
+  first character of the buffer needs `front-sticky (read-only)`; and
+  `wgrep-ignore` on an empty line from its start to its end is no text
+  at all. wgrep makes the newline before an ignored run read-only, so
+  the run must include the empty line's newline, or the line above can
+  be joined with it.
+- **`wgrep-setup-internal` binds `wgrep-enable-key` in the mode's own
+  map.** A mode that needs checks before edit mode sets
+  `wgrep-original-mode-map` itself and calls
+  `wgrep-change-to-wgrep-mode` from its own command.

@@ -529,7 +529,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
                     (nth 2 (quarry-grep--search-filters second))))))))
 
 (ert-deftest quarry-test-grep-keymap ()
-  "The keys of the mode are bound; the one of the wgrep task is not."
+  "The keys of the mode are bound."
   (pcase-dolist (`(,key . ,command)
                  '(("RET" . quarry-grep-visit)
                    ("<mouse-2>" . quarry-grep-mouse-visit)
@@ -564,11 +564,13 @@ Each is (PROMPT . INITIAL-CONTENTS)."
                    ("x" . quarry-grep-toggle-filter)
                    ("!" . quarry-grep-flip-filter)
                    ("K" . quarry-grep-remove-other-filters)
+                   ("- P" . quarry-grep-exclude-path-regexp)
+                   ("+ P" . quarry-grep-include-path-regexp)
+                   ("- L" . quarry-grep-exclude-line-regexp)
+                   ("+ L" . quarry-grep-include-line-regexp)
+                   ("e" . quarry-grep-edit)
                    ("q" . quit-window)))
     (should (eq (keymap-lookup quarry-grep-mode-map key) command)))
-  (dolist (key '("e"))
-    (should-not (string-prefix-p "quarry-grep"
-                                 (format "%s" (keymap-lookup quarry-grep-mode-map key)))))
   (should (eq (get 'quarry-grep-mode 'derived-mode-parent) 'special-mode)))
 
 ;;;; Visiting
@@ -1405,9 +1407,9 @@ Each is (PROMPT . INITIAL-CONTENTS)."
       (should (equal (quarry-test-grep--filter-lines)
                      '(("+" "line/re" "needle" nil) ("-" "path" "sub" nil))))
       (should (equal (quarry-test-grep--headings) '(".hidden.txt" "notes.txt" "src/a.rs")))
-      ;; With a prefix argument the pattern is a regexp.
+      ;; The uppercase keys take a regexp.
       (let ((prompts (quarry-test-grep--prompts
-                      (lambda () (quarry-test-grep--keys "C-u + p \\.(rs|md)$ RET")))))
+                      (lambda () (quarry-test-grep--keys "+ P \\.(rs|md)$ RET")))))
         (should (equal prompts '(("Keep only paths matching regexp: " . "")))))
       (should (equal (nth 2 (quarry-test-grep--sent)) '(:path nil "\\.(rs|md)$" t)))
       (should (equal (quarry-test-grep--headings) '("src/a.rs")))
@@ -1420,11 +1422,16 @@ Each is (PROMPT . INITIAL-CONTENTS)."
                       (lambda () (quarry-test-grep--keys "+ l = SPC 1 RET")))))
         (should (equal prompts '(("Keep only lines containing: " . "")))))
       (should (equal (nth 4 (quarry-test-grep--sent)) '(:line nil "= 1" nil)))
-      ;; After a bare C-u the key - is the minus sign of the argument, so
-      ;; the - commands need a digit.
-      (quarry-test-grep--keys "C-u 1 - l ^\\s*// RET")
-      (quarry-test-grep--keys "C-u + l let\\s RET")
-      (quarry-test-grep--keys "C-u 1 - p \\.org$ RET")
+      (let ((prompts (quarry-test-grep--prompts
+                      (lambda () (quarry-test-grep--keys "- L ^\\s*// RET")))))
+        (should (equal prompts '(("Exclude lines matching regexp: " . "")))))
+      (quarry-test-grep--keys "+ L let\\s RET")
+      (quarry-test-grep--keys "- P \\.org$ RET")
+      ;; A prefix argument does not make a regexp of it.
+      (quarry-test-grep--keys "C-u + l needle RET")
+      (should (equal (car (last (quarry-test-grep--sent))) '(:line nil "needle" nil)))
+      (goto-char (quarry-test-grep--filter-pos 8))
+      (quarry-test-grep--keys "k")
       (should (equal (quarry-test-grep--sent)
                      '((:line nil "needle" t) (:path t "sub" nil)
                        (:path nil "\\.(rs|md)$" t) (:line t "again" nil)
@@ -1438,16 +1445,17 @@ Each is (PROMPT . INITIAL-CONTENTS)."
       (should (equal (quarry-test-grep--results) '(("src/a.rs" 2 "    let needle = 1;"))))
       ;; Each kind has its history.
       (should (equal quarry-grep-path-filter-history '("\\.org$" "\\.(rs|md)$" "sub")))
-      (should (equal quarry-grep-line-filter-history '("let\\s" "^\\s*//" "= 1" "again")))
+      (should (equal quarry-grep-line-filter-history
+                     '("needle" "let\\s" "^\\s*//" "= 1" "again")))
       ;; An empty pattern.
       (quarry-test-grep--refused "pattern is empty" (execute-kbd-macro (kbd "- p RET")))
-      (quarry-test-grep--refused "pattern is empty" (execute-kbd-macro (kbd "C-u + l RET")))
+      (quarry-test-grep--refused "pattern is empty" (execute-kbd-macro (kbd "+ L RET")))
       ;; A filter the search has is not added again; the same pattern in
       ;; another direction or syntax is a different filter.
       (quarry-test-grep--refused "already has the filter - path sub"
         (execute-kbd-macro (kbd "- p sub RET")))
       (quarry-test-grep--refused "already has the filter \\+ line/re let"
-        (execute-kbd-macro (kbd "C-u + l let\\s RET")))
+        (execute-kbd-macro (kbd "+ L let\\s RET")))
       ;; One that is switched off is switched on instead.
       (goto-char (quarry-test-grep--filter-pos 1))
       (quarry-test-grep--keys "x")
@@ -1675,7 +1683,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
       (quarry-test-grep--keys "+ l again RET")
       (quarry-test-grep--keys "+ l Needle SPC a RET")
       (quarry-test-grep--keys "+ p rc/ RET")
-      (quarry-test-grep--keys "C-u + p \\.rs$ RET")
+      (quarry-test-grep--keys "+ P \\.rs$ RET")
       (quarry-test-grep--keys "- l zzz RET")
       (should (equal (quarry-test-grep--results) '(("src/a.rs" 4 "// Needle again, needle"))))
       (should (equal (faces) "---PPPPPPSSSSSS--PPPPPP"))

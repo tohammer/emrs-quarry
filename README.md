@@ -34,6 +34,9 @@ no prebuilt binaries.
 - Optional: [consult](https://github.com/minad/consult) 2.0 or later for
   the consult front end (see "consult front end"). quarry does not depend
   on it and never loads it.
+- Optional: [wgrep](https://github.com/mhayashi1120/Emacs-wgrep) to edit
+  grep results (see "Editing results"). quarry loads it only when you
+  press `e` in a result buffer.
 
 ## Installation
 
@@ -400,12 +403,14 @@ longer one shows the files in the order they are found.
 | `i`, `H` | Switch ignore files on or off; hidden files |
 | `- p`, `+ p` | Add a path filter, excluding or keeping only what matches |
 | `- l`, `+ l` | Add a line filter, excluding or keeping only what matches |
+| `- P`, `+ P`, `- L`, `+ L` | The same, with the pattern as a regexp |
 | `- f` | Exclude the file at point |
 | `- d`, `+ d` | Exclude, or search only, the directory of the file at point |
 | `k`, `x`, `!`, `%` | On a filter line: remove it; switch it off or on; flip it between including and excluding; switch it between string and regexp |
 | `K` | Remove all filters except the primary one |
 | `C-c <`, `C-c >` | Go back or forward in the buffer's search history |
 | `C-c C-k` | Cancel the running search |
+| `e` | Edit the results with wgrep (see "Editing results") |
 | `q` | Quit the window |
 
 `next-error` and `previous-error` (`M-g n`, `M-g p`) walk the results from
@@ -446,12 +451,11 @@ others. Every change to the filters runs the search again.
   file match every `+` filter and no `-` filter, so each added filter can
   only narrow the result. For "either of two", write one regexp filter,
   such as `/(audio|video)/` for two directories or `foo|bar` for two
-  words (`C-u + p`, or `%` on the filter's line).
+  words (`+ P`, `+ L`, or `%` on the filter's line).
 
 `- p`, `+ p`, `- l` and `+ l` ask for a string and add the filter at the
-end of the list. With a prefix argument the input is a regexp: `C-u + p`,
-but `C-u 1 - p`, because Emacs reads `-` after a bare `C-u` as the sign
-of the argument. `%` on the new filter's line does the same afterwards.
+end of the list. The same keys with an uppercase letter, `- P`, `+ P`,
+`- L` and `+ L`, ask for a regexp.
 
 `- f`, `- d` and `+ d` take the pattern from the result at point. `- f`
 excludes that file at once. `- d` and `+ d` put the file's directory into
@@ -489,6 +493,42 @@ face of its matches, so you can see which colour belongs to which filter.
 `quarry-grep-highlight-include-filters` and
 `quarry-grep-highlight-path-filters` switch the second and the third face
 off; the primary matches are always highlighted.
+
+### Editing results
+
+`e` makes the result lines editable, with the
+[wgrep](https://github.com/mhayashi1120/Emacs-wgrep) package, which must
+be installed; quarry does not depend on it, and without it `e` says so.
+Change the text of result lines, then press `C-c C-c` to apply the
+changes or `C-c C-k` to discard them. Both return to the result buffer as
+it was, with its keys. The other keys of wgrep's edit mode work too, for
+example `C-c C-d` to mark a line for deletion. While the buffer is being
+edited the keys of the result buffer are off and no search can be started
+in it.
+
+- Committed changes land in the buffers of the files, which are opened
+  for that; they are not saved. Save them with `M-x
+  wgrep-save-all-buffers` or `C-x s`, or set `wgrep-auto-save-buffer` to
+  have wgrep save on commit.
+- Only the text of result lines can be changed. The filter block, file
+  headings, line numbers and the status line are read-only.
+- A line that is shown cut (longer than `quarry-grep-max-columns`) or
+  that holds bytes that are not valid UTF-8 is read-only too: what the
+  buffer shows is not the file's line, so writing it back would damage
+  the file. Raise `quarry-grep-max-columns` and search again to edit a
+  long line.
+- Line numbers are those of the search. Before entering, `e` compares
+  each result file's modification time with the one the search saw, and
+  looks for unsaved changes in a buffer visiting it. If a file changed or
+  is gone, it asks whether to search again first. Yes runs the search;
+  press `e` again when it is done. No edits the results as they are;
+  wgrep then refuses each change whose line in the file is no longer the
+  text the search found.
+- Folded files are unfolded on entering, and `e` is refused while a
+  search runs.
+- After a commit the result lines show the edited text and the status
+  line says that the results were edited; `g` searches again, which
+  shows what is on disk.
 
 ### Options and faces
 
@@ -529,7 +569,8 @@ Faces: `quarry-grep-match`, `quarry-grep-match-secondary`,
 - `~/.ripgreprc`, PCRE2 and compressed files are not supported.
 - The result buffer is not a `compilation-mode` buffer
   (`docs/decisions/0012`), so commands made for those, such as
-  `grep-edit-mode`, do not work in it.
+  `grep-edit-mode`, do not work in it; results are edited through wgrep
+  (`docs/decisions/0013`).
 
 ## Options
 
@@ -684,6 +725,10 @@ QUARRY_TEST_LOAD_PATH=~/.emacs.d/straight/build/consult:~/.emacs.d/straight/buil
 ```
 
 The grep tests (`tests/quarry-grep-tests.el`) need nothing extra. The
+tests of editing grep results (`tests/quarry-grep-wgrep-tests.el`) need
+wgrep: add its directory to `QUARRY_TEST_LOAD_PATH` as well. Without it
+the script says so and those tests are skipped, except the one for the
+refusals of `e`. The
 consult front end tests (`tests/quarry-consult-tests.el`) need consult
 2.0 or later and its dependency compat. `QUARRY_TEST_LOAD_PATH`
 is a colon-separated list of directories that the script adds to
