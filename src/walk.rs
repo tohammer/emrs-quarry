@@ -168,7 +168,6 @@ fn make_builder(config: &WalkConfig, start: &Path, extra: Gitignore, on_dir: Opt
 }
 
 /// Options of a walk for callers other than the index (see [`walker`]).
-#[allow(dead_code)] // the grep service is the coming user
 pub struct WalkOptions {
     /// Absolute directory to walk. Extra `ignores` are relative to it.
     pub root: PathBuf,
@@ -184,7 +183,6 @@ pub struct WalkOptions {
 
 /// Decides for an entry whether to keep it: called with the root-relative path (`/`-separated, no leading `./`
 /// or `/`) and whether it is a directory. Returning false for a directory means it is not entered.
-#[allow(dead_code)] // the grep service is the coming user
 pub type EntryFilter = Arc<dyn Fn(&str, bool) -> bool + Send + Sync>;
 
 /// A parallel walker over `options.root` with the rules of the index's walk (VCS directories never entered,
@@ -196,7 +194,6 @@ pub type EntryFilter = Arc<dyn Fn(&str, bool) -> bool + Send + Sync>;
 /// decides what to do with it (use [`rel_string`], which returns `None` for it).
 ///
 /// Errors: an invalid `ignores` line (the message of [`check_ignores`]).
-#[allow(dead_code)] // the grep service is the coming user
 pub fn walker(options: &WalkOptions, filter: Option<EntryFilter>) -> Result<ignore::WalkParallel, String> {
     let extra = build_extra_lines(&options.root, &options.ignores)?;
     let rules = Rules {

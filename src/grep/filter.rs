@@ -6,11 +6,17 @@
 //! searcher as it is ([`Filters::primary`]).
 //!
 //! Line filters:
-//! - They are matched against the text of one line without its terminator. The matchers are built with
-//!   `line_terminator(Some(b'\n'))`, as ripgrep does for the pattern it scans with: a pattern that names `\n`
-//!   is rejected as an invalid filter, and classes such as `\s` or `[^a]` never match `\n`, so a match cannot
-//!   run across lines.
-//! - `^` and `$` mean the start and the end of the line (the matchers are in multi-line mode, as in ripgrep).
+//! - They are matched against the text of one line without its terminator, which is `\n` or `\r\n`. The
+//!   matchers are built with `crlf(true)`, as ripgrep does with `--crlf` for the pattern it scans with: a
+//!   pattern that names `\n` or `\r` is rejected as an invalid filter, and classes such as `\s`, `.` or `[^a]`
+//!   never match either of them, so a match cannot run across lines or into a terminator. The primary filter,
+//!   which the searcher runs on the file's bytes with the terminators in place, therefore decides as the other
+//!   line filters do on the line without its terminator.
+//! - `^` and `$` mean the start and the end of the line (the matchers are in multi-line mode, as in ripgrep);
+//!   `$` matches before `\n` and before `\r\n`, never between the two.
+//! - The price is a carriage return that is not part of a line end: no line filter can match it, and `^` and
+//!   `$` also match after and before it. The search needs `grep_matcher::LineTerminator::crlf()` on its
+//!   searcher, which refuses a matcher whose terminator differs from its own.
 //! - The search's [`Case`] applies to each of them. `Smart` is decided per filter by the matcher builder: the
 //!   filter is case-insensitive unless its own pattern has an uppercase letter (for a regexp, escapes such as
 //!   `\W` or `\S` do not count).
@@ -31,14 +37,13 @@
 
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::fmt;
 
 /// What a filter is matched against.
 ///
 /// Decoded from the bare keywords `:line` and `:path`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[allow(dead_code)] // the grep service is the coming user
 pub enum Target {
     Line,
     Path,
@@ -48,7 +53,6 @@ pub enum Target {
 ///
 /// Decoded from the bare keywords `:smart`, `:sensitive` and `:insensitive`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
-#[allow(dead_code)] // the grep service is the coming user
 pub enum Case {
     /// Case-insensitive unless the filter's pattern contains an uppercase letter.
     #[default]
@@ -61,7 +65,6 @@ pub enum Case {
 ///
 /// `:exclude` and `:regexp` may be left out (nil). `:target` and `:pattern` are required.
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)] // the grep service is the coming user
 pub struct FilterSpec {
     pub target: Target,
     #[serde(default)]
@@ -74,7 +77,6 @@ pub struct FilterSpec {
 
 /// A filter list that cannot be used.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // the grep service is the coming user
 pub struct FilterError {
     /// 0-based index in the list given to [`Filters::compile`]; `None` for the list as a whole (no include
     /// line filter).
@@ -93,11 +95,9 @@ impl fmt::Display for FilterError {
     }
 }
 
-/// A highlighted range of a line: character offsets, `end` exclusive.
-///
-/// Serializes as the plist `(:start 3 :end 5 :secondary nil)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[allow(dead_code)] // the grep service is the coming user
+/// A highlighted range of a line: character offsets, `end` exclusive. The result of [`Filters::line_spans`];
+/// it is not sent to Emacs in this form (the search splits the ranges into two lists).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Span {
     pub start: u32,
     pub end: u32,
@@ -107,7 +107,6 @@ pub struct Span {
 
 /// The compiled filters of one search. Cheap to clone, shared by the search threads.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // the grep service is the coming user
 pub struct Filters {
     primary: RegexMatcher,
     /// Include line filters other than the primary one, in list order.
@@ -126,7 +125,8 @@ fn build(spec: &FilterSpec, line: bool, case: Case) -> Result<RegexMatcher, Stri
             Case::Insensitive => builder.case_insensitive(true),
             Case::Sensitive => &mut builder,
         };
-        builder.multi_line(true).line_terminator(Some(b'\n'));
+        // Sets the line terminator to `\r\n` and makes `^`, `$` and `.` treat `\r` like `\n`.
+        builder.multi_line(true).crlf(true);
     } else {
         builder.case_smart(true);
     }
@@ -197,7 +197,6 @@ impl CharOffsets {
     }
 }
 
-#[allow(dead_code)] // the grep service is the coming user
 impl Filters {
     /// Compiles the enabled filters, in the buffer's order, for the case rule of the search.
     ///
@@ -479,6 +478,34 @@ mod tests {
         let f = compile(&[line("a\\s+b", true)]);
         assert!(!is_match(f.primary(), b"a\nb"));
         assert!(primary_matches(&f, "a  b"));
+    }
+
+    #[test]
+    fn line_matchers_treat_crlf_as_one_terminator() {
+        // The primary filter sees the file's bytes, the other line filters the line without its terminator.
+        let f = compile(&[line("foo$", true), line("o$", true), not_line("x$", true)]);
+        for haystack in ["foo\r\n", "foo\n", "foo"] {
+            assert!(primary_matches(&f, haystack), "{haystack:?}");
+        }
+        assert!(!primary_matches(&f, "foo \r\n"));
+        assert!(f.keep_line(b"foo"));
+        assert!(!f.keep_line(b"foox"));
+        let f = compile(&[line("^bar", true)]);
+        assert!(primary_matches(&f, "foo\r\nbar\r\n"));
+        // Nothing matches a carriage return: not a class, not `.`, and a pattern that names it is refused.
+        for pattern in ["foo\\s", "foo.", "foo[^x]", "foo\\s*$x"] {
+            let f = compile(&[line(pattern, true)]);
+            assert!(!primary_matches(&f, "foo\r\n"), "{pattern}");
+            assert!(!primary_matches(&f, "foo\rbar\n"), "{pattern}");
+        }
+        assert_eq!(Filters::compile(&[line("a\\rb", true)], Case::Smart).unwrap_err().index, Some(0));
+        assert_eq!(Filters::compile(&[line("a\rb", false)], Case::Smart).unwrap_err().index, Some(0));
+        // A carriage return inside a line is a line end for the anchors.
+        let f = compile(&[line("foo$", true)]);
+        assert!(primary_matches(&f, "foo\rbar\n"));
+        // Path filters are not line matchers.
+        let f = compile(&[line("x", false), path("a\rb", false)]);
+        assert!(f.keep_file("a\rb"));
     }
 
     #[test]

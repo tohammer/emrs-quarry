@@ -128,3 +128,17 @@ reason: emrs fails open calls before it runs `on-exit`, where
 a `run-at-time 0` timer, after `on-exit` ran. Origin: review of the
 consult spec (2026-10-09); deferred because the warning already carries
 the reason. Revisit if users find the message confusing.
+
+## Grep: delivery of very large results is slower than the search
+
+A search for `defun` in a tree of 19,900 files finds 33,800 lines in
+about 100 ms inside the service, but takes 270 to 420 ms until the last
+item has reached Lisp: emrs converts one plist per line on the Emacs
+thread, and the search waits for it at the stream's capacity. Inserting
+the lines costs about as much again. Ordinary searches (hundreds of
+lines) are not affected. Option: send each file's lines as one string
+with parallel integer lists for line numbers and match positions, so
+the conversion cost is per file, not per line; this changes the item
+shape. Origin: task 4 of the grep spec (2026-10-10), measurement by the
+implementer. Revisit when the result buffer is in daily use and large
+searches feel slow.
