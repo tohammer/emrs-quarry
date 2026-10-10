@@ -26,7 +26,28 @@ for ext in so dylib dll; do
         fi
     done
 done
+# Extra load-path directories, colon-separated, e.g. for consult and
+# compat.  They become the positional parameters, as -L arguments.
+set --
+if [ -n "${PROJDEX_TEST_LOAD_PATH:-}" ]; then
+    set -f
+    old_ifs=$IFS
+    IFS=:
+    for dir in $PROJDEX_TEST_LOAD_PATH; do
+        if [ -n "$dir" ]; then
+            set -- "$@" -L "$dir"
+        fi
+    done
+    IFS=$old_ifs
+    set +f
+fi
+if ! "${EMACS:-emacs}" --batch "$@" --eval \
+     "(kill-emacs (if (and (require 'consult nil t) (fboundp 'consult--async-pipeline)) 0 1))" \
+     >/dev/null 2>&1; then
+    echo "run-ert.sh: consult 2.0 or later not found; the tests that need consult are skipped (see PROJDEX_TEST_LOAD_PATH)"
+fi
 exec "${EMACS:-emacs}" --batch --module-assertions \
-    -L "$out" -L "$emrs_el" \
+    -L "$out" -L "$emrs_el" "$@" \
     -l "$root/tests/projdex-tests.el" \
+    -l "$root/tests/projdex-consult-tests.el" \
     --eval "(ert-run-tests-batch-and-exit (or (getenv \"ERT_SELECTOR\") t))"

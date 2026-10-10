@@ -9,6 +9,14 @@
 (require 'ert)
 (require 'projdex)
 
+;; `project-current' with MAYBE-PROMPT records the project in
+;; `project-list-file'.  Keep the user's file out of the tests (parallel
+;; runs would also collide on its lock); projdex-consult-tests.el loads
+;; this file and shares the setting.
+(setq project-list-file (make-temp-file "projdex-test-projects" nil ".eld" "()\n"))
+(add-hook 'kill-emacs-hook
+          (lambda () (ignore-errors (delete-file project-list-file))))
+
 (ert-deftest projdex-test-loads ()
   "projdex.el and emrs.el load."
   (should (featurep 'projdex))
@@ -999,6 +1007,37 @@ Wait for WAIT seconds at most (default 10)."
           (should (eq (command-remapping 'project-find-file) 'projdex-find-file))
           (projdex-mode -1)
           (should-not (eq (command-remapping 'project-find-file) 'projdex-find-file)))
+      (projdex-mode (if was 1 -1)))))
+
+(ert-deftest projdex-test-mode-remap-option ()
+  "The remap follows `projdex-find-file-command' without a mode restart.
+`where-is' finds the key of the command it remaps to."
+  (let ((was projdex-mode)
+        (old-key (keymap-lookup global-map "C-x p f")))
+    (unwind-protect
+        (progn
+          (keymap-global-set "C-x p f" #'project-find-file)
+          (let ((projdex-find-file-command 'projdex-find-file))
+            (projdex-mode 1)
+            (should (eq (command-remapping 'project-find-file) 'projdex-find-file))
+            (should (where-is-internal 'projdex-find-file))
+            (setq projdex-find-file-command 'projdex-consult-find-file)
+            (should (eq (command-remapping 'project-find-file)
+                        'projdex-consult-find-file))
+            (should (where-is-internal 'projdex-consult-find-file))
+            (should-not (where-is-internal 'projdex-find-file))
+            (setq projdex-find-file-command 'projdex-find-file)
+            (should (eq (command-remapping 'project-find-file) 'projdex-find-file))
+            (projdex-mode -1)
+            ;; Set while the mode is off, the option applies when enabled.
+            (setq projdex-find-file-command 'projdex-consult-find-file)
+            (projdex-mode 1)
+            (should (eq (command-remapping 'project-find-file)
+                        'projdex-consult-find-file)))
+          ;; Leaving the `let' restores the binding with the value.
+          (should (eq (command-remapping 'project-find-file)
+                      projdex-find-file-command)))
+      (keymap-global-set "C-x p f" old-key)
       (projdex-mode (if was 1 -1)))))
 
 ;;;; project-files

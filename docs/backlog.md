@@ -3,19 +3,6 @@
 Open points only. Delete an item when it is done; git keeps the history.
 Deferred review findings name their origin, the reason and when to revisit.
 
-## consult async source
-
-An optional `projdex-consult.el` that adapts the asynchronous core to
-consult: debounced queries, one cancellable stream per query, results shown
-while indexing runs. Deferred by ADR 0001. Revisit after version 1 works.
-
-When the module is missing, `projdex--start` asks whether to build it, from
-whatever caller started the instance: also `projdex-query-async` or a
-completion table inside the minibuffer. `projdex-find-file` probes before
-its prompt and is not affected. A consult source must start or probe the
-instance before its prompt too, or the question should move to the
-commands. Origin: review of the install-from-GitHub spec (2026-10-09).
-
 ## Continuous integration
 
 No CI yet. The emrs repository had to disable GitHub Actions for lack of
@@ -120,3 +107,24 @@ spellings gets two instances and two sets of watches. Using
 `project-files` must keep returning paths under the project's own
 spelling. Origin: v1 review (Elisp), 2026-10-09; deferred as rare.
 Revisit on a report.
+
+## Order-dependent ERT test
+
+`projdex-test-build-async-installs` passes only while no projdex module is
+loaded: with one loaded, the message gains "; restart Emacs to use it".
+ERT runs tests alphabetically, so a test that loads the module and sorts
+before it breaks it; the consult tests are named `projdex-test-consult-*`
+to sort after it. Origin: task 2 of the consult spec (2026-10-09).
+Revisit when the next test that loads the module is added, or fix the
+test to accept both messages.
+
+## Generic message when an instance dies during a consult prompt
+
+When the instance exits while `projdex-consult-find-file` waits for a
+reply, the step reports "projdex: The instance terminated" instead of the
+reason: emrs fails open calls before it runs `on-exit`, where
+`projdex--on-exit` records the reason in `projdex--failures`. The
+`display-warning` from `on-exit` still shows the reason. Fix: report from
+a `run-at-time 0` timer, after `on-exit` ran. Origin: review of the
+consult spec (2026-10-09); deferred because the warning already carries
+the reason. Revisit if users find the message confusing.

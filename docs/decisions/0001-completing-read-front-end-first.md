@@ -42,4 +42,5 @@ be added later as an optional file without changing the core.
 - Superseded queries are cancelled only when the UI abandons the call
   non-locally (for example icomplete's `while-no-input`); there is no
   stream per query in version 1.
-- The consult adapter is in the backlog.
+- The consult adapter followed in ADR 0008 (2026-10-09). (Corrected
+  2026-10-09; the first version of this ADR said it was in the backlog.)
