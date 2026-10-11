@@ -80,3 +80,30 @@ toggles (case, ignore files, hidden) as switches; and how it shows the
 commands that depend on point. Origin: requested by the author on
 2026-10-10, after the first use of quarry-grep. Revisit together with
 the manual checks, when the keys have been used for a while.
+
+## A colour of its own for each additional include line filter
+
+Today the primary filter's matches have one face and all other include
+line filters share a second one. Give each additional filter its own
+colour, at least while there are not too many, so that a line shows
+which filter matched where; beyond the number of faces provided, reuse
+them in turn or fall back to the shared face. To settle:
+
+- The faces must be customizable: a list of faces as an option, in the
+  manner of `quarry-match-faces` of the file finder, with the faces
+  themselves defined by `defface`.
+- Whether non-primary filters are coloured at all stays the user's
+  choice. `quarry-grep-highlight-include-filters` switches it off today;
+  check that it still covers this, or fold both into one option (off,
+  one shared colour, one colour per filter).
+- The filter block shows each pattern in its filter's colour, as it does
+  now for the two faces.
+- The service reports only whether a match is primary or not. It has to
+  say which filter each match belongs to, which changes the item shape
+  (`:secondary` becomes positions with a filter number); overlaps
+  between two additional filters then need a rule.
+
+Origin: requested by the author on 2026-10-11, after trying the
+highlighting. Revisit with the next change to the item shape (context
+lines, or the delivery cost of large results), so the format changes
+once.
