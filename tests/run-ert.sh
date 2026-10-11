@@ -26,8 +26,8 @@ for ext in so dylib dll; do
         fi
     done
 done
-# Extra load-path directories, colon-separated, e.g. for consult and
-# compat.  They become the positional parameters, as -L arguments.
+# Extra load-path directories, colon-separated, e.g. for consult,
+# compat and wgrep.  They become the positional parameters, as -L arguments.
 set --
 if [ -n "${QUARRY_TEST_LOAD_PATH:-}" ]; then
     set -f
@@ -46,8 +46,15 @@ if ! "${EMACS:-emacs}" --batch "$@" --eval \
      >/dev/null 2>&1; then
     echo "run-ert.sh: consult 2.0 or later not found; the tests that need consult are skipped (see QUARRY_TEST_LOAD_PATH)"
 fi
+if ! "${EMACS:-emacs}" --batch "$@" --eval \
+     "(kill-emacs (if (require 'wgrep nil t) 0 1))" \
+     >/dev/null 2>&1; then
+    echo "run-ert.sh: wgrep not found; the tests that need wgrep are skipped (see QUARRY_TEST_LOAD_PATH)"
+fi
 exec "${EMACS:-emacs}" --batch --module-assertions \
     -L "$out" -L "$emrs_el" "$@" \
     -l "$root/tests/quarry-tests.el" \
     -l "$root/tests/quarry-consult-tests.el" \
+    -l "$root/tests/quarry-grep-tests.el" \
+    -l "$root/tests/quarry-grep-wgrep-tests.el" \
     --eval "(ert-run-tests-batch-and-exit (or (getenv \"ERT_SELECTOR\") t))"

@@ -5,8 +5,9 @@ architecture.md or an ADR.
 
 ## Next
 
-- Write the spec for the grep tool (ADR 0010). The evaluation is
-  `GREP-EVALUATION.md` in the emrs repository.
+- Use quarry-grep daily and do its manual checks (grep backlog, "Manual
+  checks not done yet").
+- Next grep feature: context lines before and after a match (backlog).
 
 ## Watch out for
 
@@ -24,8 +25,11 @@ architecture.md or an ADR.
 - Development mode (Doom, `:local-repo` with `:build (:not compile)`, README
   "Development"): Elisp edits need no `doom sync`, only `eval-buffer` or a
   restart; Rust changes need `M-x quarry-build-module` and a restart; a
-  new file in `lisp/` needs `doom sync` once. The module is loaded from
-  `lisp/quarry-module.so` in the checkout.
+  new file in `lisp/` needs the package's build directory removed and
+  then a `doom sync`, before Emacs is restarted. The module is loaded
+  from `lisp/quarry-module.so` in the checkout.
+- quarry-grep uses wgrep internals (ADR 0013). After a wgrep upgrade,
+  rerun `tests/run-ert.sh` with wgrep on `QUARRY_TEST_LOAD_PATH`.
 - The consult front end uses consult internals (`consult--async-pipeline`
   and its steps, ADR 0008). After a consult upgrade, rerun
   `tests/run-ert.sh` with `QUARRY_TEST_LOAD_PATH` pointing at it (and at
