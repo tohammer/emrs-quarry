@@ -1,6 +1,7 @@
 //! One search of the grep service: walk a directory, search each file for the primary filter, collect the kept
-//! lines with their match positions, and hand the results to an [`Output`] (spec `2026-10-10-grep.md`, "The
-//! service"). The engine is ripgrep's library crates (ADR 0011); this file has no emrs types in it.
+//! lines with their match positions and the context lines around them, and hand the results to an [`Output`]
+//! (specs `2026-10-10-grep.md`, "The service", and `2026-10-11-grep-context-lines.md`). The engine is ripgrep's
+//! library crates (ADR 0011); this file has no emrs types in it.
 //!
 //! **Threads.** [`Search::run`] blocks its caller while the `ignore` crate's parallel walker runs one thread per
 //! core. Each walker thread has its own `grep_searcher::Searcher` and its own clone of the [`Filters`], opens the
@@ -22,15 +23,29 @@
 //! and [`Filters::keep_line`] decides on the whole line. The text that is sent is the line as UTF-8, converted
 //! lossily when it is not valid, and cut after `max_columns` characters; either sets `inexact`. The matches are
 //! found on the whole line ([`Filters::line_spans`]) and reported as positions in the text that is sent: a
-//! match that crosses the cut ends at the cut, one beyond it is not reported.
+//! match that crosses the cut ends at the cut, one beyond it is not reported. A line that passes both is a
+//! *kept line*.
 //!
-//! **Cap.** A counter shared by all threads holds the lines of the finished files. A thread collects the lines of
-//! its file privately and stops reading the file when they and the counter together reach `max_lines`. When
-//! the file is done, it adds to the counter what still fits and keeps only that many of its lines, the first
-//! ones. So the counter never exceeds `max_lines`, and every counted line is delivered. The thread whose lines
+//! **Context.** With `before` or `after` above 0, a line that is not kept and lies at most `before` lines before
+//! or at most `after` lines after a kept line of its file is a *context line* (ADR 0014). It is sent in place
+//! among the kept lines, with its text made like theirs, without match positions and with `context` set; the
+//! line filters are not asked. The searcher is given the same two distances. It counts them from the matches
+//! of the primary filter, so what it reports besides the kept lines (its context lines, and the matches that
+//! [`Filters::keep_line`] drops) holds every line that can qualify and more. The sink decides by line number:
+//! such a line is taken when the last kept line is at most `after` lines back; otherwise it is held back, the
+//! last `before` of them, and taken when a kept line follows closely enough. So a dropped match can be the
+//! context of a kept line and has no context of its own, and every line is sent once. With both distances 0 the
+//! searcher reports matches only and nothing is held.
+//!
+//! **Cap.** The cap counts kept lines; context lines are not counted anywhere. A counter shared by all threads
+//! holds the kept lines of the finished files. A thread collects the lines of its file privately and stops
+//! reading the file when its kept lines and the counter together reach `max_lines`: the kept line at which it
+//! stops has its lines before and not its lines after. When the file is done, it adds to the counter what
+//! still fits and keeps only that many of its kept lines, the first ones, cutting its lines after the last of
+//! them. So the counter never exceeds `max_lines`, and every counted line is delivered. The thread whose lines
 //! bring the counter to `max_lines` sets `truncated` and the stop flag; every thread returns `WalkState::Quit`
-//! at its next entry and stops reading its current file at the next matching line. `truncated` therefore also
-//! is true when the tree holds exactly `max_lines` matching lines.
+//! at its next entry and stops reading its current file at the next line the searcher reports. `truncated`
+//! therefore also is true when the tree holds exactly `max_lines` kept lines.
 //!
 //! **Order.** Finished file items go into a buffer behind a mutex until `sort_budget` has passed since the
 //! search started. The first thread that notices the deadline (at a walk entry or when it has an item) sorts
@@ -48,10 +63,11 @@
 use crate::grep::filter::{Filters, Span};
 use crate::walk::{self, EntryFilter, WalkOptions};
 use grep_matcher::LineTerminator;
-use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkFinish, SinkMatch};
+use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch};
 use ignore::{WalkParallel, WalkState};
 use serde::Serialize;
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -70,17 +86,22 @@ pub struct Config {
     pub include_hidden: bool,
     /// Extra gitignore-syntax lines relative to `dir`.
     pub ignores: Vec<String>,
-    /// The search stops when this many lines have been collected.
+    /// The search stops when this many kept lines have been collected.
     pub max_lines: usize,
     /// Longer lines are cut after this many characters.
     pub max_columns: usize,
+    /// How many lines before each kept line are sent as context lines.
+    pub before: usize,
+    /// How many lines after each kept line are sent as context lines.
+    pub after: usize,
     /// How long file items are collected for sorting, counted from `started`.
     pub sort_budget: Duration,
     /// When the request arrived; `millis` in the summary counts from here.
     pub started: Instant,
 }
 
-/// One matching line of a file: `(:n 12 :text "let x = 1;" :spans ((4 5)) :secondary nil :inexact nil)`.
+/// One line of a file. A kept line: `(:n 12 :text "let x = 1;" :spans ((4 5)) :secondary nil :inexact nil)`.
+/// A context line: `(:n 11 :text "{" :spans nil :secondary nil :inexact nil :context t)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Line {
     /// Line number, counted from 1.
@@ -88,11 +109,16 @@ pub struct Line {
     /// The line without its terminator, possibly cut (see `inexact`).
     pub text: String,
     /// Matches of the primary filter: `(START END)` character offsets into `text`, `END` exclusive, ascending.
+    /// Empty for a context line, like `secondary`.
     pub spans: Vec<(u32, u32)>,
     /// Matches of the other include line filters outside the primary matches, in the same form.
     pub secondary: Vec<(u32, u32)>,
     /// `text` is not exactly the file's line: it was cut at `max_columns` characters or held invalid UTF-8.
     pub inexact: bool,
+    /// The line is not kept: it is shown because a kept line is near (module docs, "Context"). Left out of the
+    /// Lisp form when false, so a kept line has no `:context`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub context: bool,
 }
 
 /// A file with kept lines; sent as [`Item::File`].
@@ -119,7 +145,8 @@ pub struct Summary {
 /// A stream item. The Lisp shapes are in the module docs of `src/grep/service.rs`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Item {
-    /// A file and its kept lines, in ascending line number. There is no item for a file without kept lines.
+    /// A file and its kept lines, with their context lines, in ascending line number. There is no item for a
+    /// file without kept lines.
     File {
         /// Relative to the search directory, `/`-separated.
         path: String,
@@ -137,7 +164,7 @@ pub enum Item {
         files_searched: usize,
         /// File items sent.
         files_matched: usize,
-        /// Lines sent, over all file items.
+        /// Kept lines sent, over all file items.
         lines: usize,
         /// The line cap was reached and the search stopped there.
         truncated: bool,
@@ -210,6 +237,8 @@ impl Search {
             out,
             max_lines: config.max_lines,
             max_columns: config.max_columns,
+            before: config.before as u64,
+            after: config.after as u64,
             deadline: config.started.checked_add(config.sort_budget),
             lines: AtomicUsize::new(0),
             files_searched: AtomicUsize::new(0),
@@ -232,6 +261,9 @@ impl Search {
                     .binary_detection(BinaryDetection::quit(0))
                     .line_terminator(LineTerminator::crlf())
                     .line_number(true)
+                    // From the primary filter's matches; `LineSink` picks what is near a kept line.
+                    .before_context(config.before)
+                    .after_context(config.after)
                     .build(),
             };
             Box::new(move |entry| worker.visit(entry))
@@ -267,10 +299,13 @@ struct Shared<'a> {
     out: &'a dyn Output,
     max_lines: usize,
     max_columns: usize,
+    /// The context distances, as line numbers are counted.
+    before: u64,
+    after: u64,
     /// Until then file items are collected in `pending`.
     /// `None`: never (the budget is beyond what the clock can express).
     deadline: Option<Instant>,
-    /// Lines of the finished files; never more than `max_lines`.
+    /// Kept lines of the finished files; never more than `max_lines`.
     lines: AtomicUsize,
     files_searched: AtomicUsize,
     /// File items sent.
@@ -297,12 +332,12 @@ impl Shared<'_> {
         self.stop.store(true, Ordering::Relaxed);
     }
 
-    /// Whether a file that has `collected` lines may collect another one.
+    /// Whether a file that has `collected` kept lines may collect another one.
     fn has_room(&self, collected: usize) -> bool {
         self.lines.load(Ordering::Relaxed).saturating_add(collected) < self.max_lines
     }
 
-    /// Counts up to `wanted` lines of a finished file under the cap and returns how many of them fit. Ends the
+    /// Counts up to `wanted` kept lines of a finished file under the cap and returns how many of them fit. Ends the
     /// search when the cap is reached.
     fn reserve(&self, wanted: usize) -> usize {
         let max = self.max_lines;
@@ -417,17 +452,29 @@ impl Worker<'_> {
         };
         // Before the content is read: a change during the search then shows as a newer time on disk.
         let mtime = file.metadata().and_then(|meta| meta.modified()).ok().map(unix_millis);
-        let mut sink = LineSink { shared, filters: &self.filters, lines: Vec::new(), binary: false, full: false };
+        let mut sink = LineSink {
+            shared,
+            filters: &self.filters,
+            lines: Vec::new(),
+            kept: 0,
+            after_end: 0,
+            held: VecDeque::new(),
+            binary: false,
+            full: false,
+        };
         if self.searcher.search_file(self.filters.primary(), &file, &mut sink).is_err() {
             shared.skipped.fetch_add(1, Ordering::Relaxed);
             return;
         }
         shared.files_searched.fetch_add(1, Ordering::Relaxed);
-        let LineSink { mut lines, binary, full, .. } = sink;
-        if binary || (lines.is_empty() && !full) {
+        let LineSink { mut lines, kept, binary, full, .. } = sink;
+        if binary || (kept == 0 && !full) {
             return;
         }
-        lines.truncate(shared.reserve(lines.len()));
+        let granted = shared.reserve(kept);
+        if granted < kept {
+            truncate_kept(&mut lines, granted);
+        }
         if lines.is_empty() {
             return;
         }
@@ -445,15 +492,39 @@ impl Drop for Worker<'_> {
     }
 }
 
-/// Collects the kept lines of one file.
+/// Collects the kept lines of one file and the context lines around them.
 struct LineSink<'a> {
     shared: &'a Shared<'a>,
     filters: &'a Filters,
+    /// Kept and context lines, in ascending line number. Without a kept line there is none.
     lines: Vec<Line>,
+    /// How many of `lines` are kept lines.
+    kept: usize,
+    /// The number of the last line within reach after a kept line; 0 before the first kept line.
+    after_end: u64,
+    /// The last lines that are not kept and beyond `after_end`, at most `before` of them: context lines if a
+    /// kept line follows closely enough. Copies, since the searcher's buffer moves on.
+    held: VecDeque<Line>,
     /// The searcher met a NUL byte.
     binary: bool,
     /// A kept line was left out because of the cap.
     full: bool,
+}
+
+impl LineSink<'_> {
+    /// Takes line `n`, which is not kept, without its terminator: a context line when a kept line is at most
+    /// `after` lines back, otherwise held back for a kept line to come.
+    fn candidate(&mut self, n: u64, bytes: &[u8]) {
+        let shared = self.shared;
+        if n <= self.after_end {
+            self.lines.push(context_line(n, bytes, shared.max_columns));
+        } else if shared.before > 0 {
+            if self.held.len() as u64 >= shared.before {
+                self.held.pop_front();
+            }
+            self.held.push_back(context_line(n, bytes, shared.max_columns));
+        }
+    }
 }
 
 impl Sink for LineSink<'_> {
@@ -465,13 +536,20 @@ impl Sink for LineSink<'_> {
             return Ok(false);
         }
         let bytes = strip_terminator(found.bytes());
+        let n = found.line_number().unwrap_or(0);
         if !self.filters.keep_line(bytes) {
+            // An ordinary line from here on; the searcher still reports the lines around it.
+            self.candidate(n, bytes);
             return Ok(true);
         }
-        if !shared.has_room(self.lines.len()) {
+        if !shared.has_room(self.kept) {
             self.full = true;
             return Ok(false);
         }
+        // By line number, whatever the searcher reported. (As it reports the lines right before a match, the
+        // `before` lines held are in reach already.)
+        self.lines.extend(self.held.drain(..).filter(|held| n.saturating_sub(held.n) <= shared.before));
+        self.after_end = n.saturating_add(shared.after);
         let (whole, shown, inexact) = line_text(bytes, shared.max_columns);
         let (mut spans, mut secondary) = (Vec::new(), Vec::new());
         // On the whole line, so that a pattern sees what follows the cut; reported for the part that is sent.
@@ -479,8 +557,17 @@ impl Sink for LineSink<'_> {
             if other { &mut secondary } else { &mut spans }.push((start, end));
         }
         let text = whole[..shown].to_string();
-        self.lines.push(Line { n: found.line_number().unwrap_or(0), text, spans, secondary, inexact });
-        Ok(shared.has_room(self.lines.len()))
+        self.lines.push(Line { n, text, spans, secondary, inexact, context: false });
+        self.kept += 1;
+        Ok(shared.has_room(self.kept))
+    }
+
+    fn context(&mut self, _: &Searcher, context: &SinkContext<'_>) -> Result<bool, std::io::Error> {
+        if self.shared.stop.load(Ordering::Relaxed) {
+            return Ok(false);
+        }
+        self.candidate(context.line_number().unwrap_or(0), strip_terminator(context.bytes()));
+        Ok(true)
     }
 
     fn binary_data(&mut self, _: &Searcher, _: u64) -> Result<bool, std::io::Error> {
@@ -501,6 +588,26 @@ fn strip_terminator(line: &[u8]) -> &[u8] {
         Some(line) => line.strip_suffix(b"\r").unwrap_or(line),
         None => line,
     }
+}
+
+/// The context line `n` from its bytes without the terminator.
+fn context_line(n: u64, bytes: &[u8], max_columns: usize) -> Line {
+    let (whole, shown, inexact) = line_text(bytes, max_columns);
+    Line { n, text: whole[..shown].to_string(), spans: Vec::new(), secondary: Vec::new(), inexact, context: true }
+}
+
+/// Cuts `lines` after its `count`th kept line, so that exactly `count` kept lines remain, each with its context
+/// lines before. The context lines after the cut go too, also those within reach of the last kept line that
+/// remains: the cap was reached there.
+fn truncate_kept(lines: &mut Vec<Line>, count: usize) {
+    let end = match count.checked_sub(1) {
+        Some(last) => {
+            let mut kept = lines.iter().enumerate().filter(|(_, line)| !line.context);
+            kept.nth(last).map_or(lines.len(), |(at, _)| at + 1)
+        }
+        None => 0,
+    };
+    lines.truncate(end);
 }
 
 /// The text of a line: the whole line as UTF-8 (invalid bytes replaced), how many bytes of it are sent (the
@@ -1164,6 +1271,8 @@ mod tests {
                 ignores: Vec::new(),
                 max_lines: usize::MAX,
                 max_columns: 500,
+                before: 0,
+                after: 0,
                 sort_budget,
                 started: self.started,
             };
@@ -1394,5 +1503,389 @@ mod tests {
         let mut q = Query::new(t.path(), vec![line("absent")]);
         q.sort_budget_ms = 0;
         assert!(!run(q).summary.sorted);
+    }
+
+    /// A file of `total` lines: `needle N` on the lines in `hits`, `line N` on the others.
+    fn numbered(total: u64, hits: &[u64]) -> String {
+        (1..=total).map(|n| format!("{} {n}\n", if hits.contains(&n) { "needle" } else { "line" })).collect()
+    }
+
+    /// Searches `dir` for `needle` with context lines.
+    fn around(dir: &Path, before: usize, after: usize) -> Found {
+        let mut q = Query::new(dir, vec![line("needle")]);
+        (q.before, q.after) = (before, after);
+        run(q)
+    }
+
+    #[test]
+    fn context_lines_before_after_and_both() {
+        let t = tree(&[("a", &numbered(9, &[5]))]);
+        assert_eq!(around(t.path(), 2, 0).marks("a"), "3- 4- 5:");
+        assert_eq!(around(t.path(), 0, 2).marks("a"), "5: 6- 7-");
+        let found = around(t.path(), 1, 3);
+        assert_eq!(found.marks("a"), "4- 5: 6- 7- 8-");
+        assert_eq!(found.texts("a"), [(4, "line 4"), (5, "needle 5"), (6, "line 6"), (7, "line 7"), (8, "line 8")]);
+        let lines = found.lines("a");
+        assert_eq!(lines[1].spans, [(0, 6)]);
+        for l in lines.iter().filter(|l| l.context) {
+            assert!(l.spans.is_empty() && l.secondary.is_empty() && !l.inexact, "{l:?}");
+        }
+        // Context lines are not counted.
+        let s = found.summary;
+        assert_eq!((s.files_matched, s.lines, s.truncated), (1, 1, false));
+    }
+
+    #[test]
+    fn context_ends_at_the_start_and_the_end_of_a_file() {
+        let t = tree(&[("start", "needle\nx\n"), ("end", "x\ny\nneedle"), ("alone", "needle\n")]);
+        let found = around(t.path(), 3, 3);
+        assert_eq!(found.marks("start"), "1: 2-");
+        assert_eq!(found.marks("end"), "1- 2- 3:");
+        assert_eq!(found.marks("alone"), "1:");
+        assert_eq!(found.texts("end"), [(1, "x"), (2, "y"), (3, "needle")]);
+    }
+
+    #[test]
+    fn overlapping_and_touching_context_gives_each_line_once() {
+        let t = tree(&[("a", &numbered(12, &[3, 6])), ("b", &numbered(12, &[3, 4, 9]))]);
+        // Lines 4 and 5 are after the first hit and before the second.
+        let found = around(t.path(), 2, 2);
+        assert_eq!(found.marks("a"), "1- 2- 3: 4- 5- 6: 7- 8-");
+        // A kept line within reach of another one stays a kept line.
+        assert_eq!(found.marks("b"), "1- 2- 3: 4: 5- 6- 7- 8- 9: 10- 11-");
+        // The two groups touch.
+        let found = around(t.path(), 1, 1);
+        assert_eq!(found.marks("a"), "2- 3: 4- 5- 6: 7-");
+        assert_eq!(found.marks("b"), "2- 3: 4: 5- 8- 9: 10-");
+        // More context than there are lines between the hits and around them.
+        let found = around(t.path(), 50, 50);
+        for file in ["a", "b"] {
+            let numbers: Vec<u64> = found.lines(file).iter().map(|l| l.n).collect();
+            assert_eq!(numbers, (1..=12).collect::<Vec<_>>(), "{file}");
+        }
+        assert_eq!(found.summary.lines, 5);
+    }
+
+    #[test]
+    fn groups_apart_leave_a_jump_in_the_line_numbers() {
+        let t = tree(&[("a", &numbered(20, &[2, 9, 15]))]);
+        assert_eq!(around(t.path(), 1, 1).marks("a"), "1- 2: 3- 8- 9: 10- 14- 15: 16-");
+        assert_eq!(around(t.path(), 2, 0).marks("a"), "1- 2: 7- 8- 9: 13- 14- 15:");
+        assert_eq!(around(t.path(), 0, 2).marks("a"), "2: 3- 4- 9: 10- 11- 15: 16- 17-");
+    }
+
+    #[test]
+    fn a_dropped_match_is_context_and_has_none_of_its_own() {
+        let content = "one\nneedle skip\nneedle keep\nfour\nfive\nsix\nseven\nneedle skip\nnine\nten\n";
+        let t = tree(&[("a", content)]);
+        let search = |before: usize, after: usize| {
+            let mut q = Query::new(t.path(), vec![line("needle"), not_line("skip")]);
+            (q.before, q.after) = (before, after);
+            run(q)
+        };
+        let found = search(1, 1);
+        assert_eq!(found.marks("a"), "2- 3: 4-", "nothing around line 8");
+        let dropped = &found.lines("a")[0];
+        assert_eq!((dropped.text.as_str(), dropped.spans.is_empty()), ("needle skip", true));
+        assert_eq!(found.summary.lines, 1);
+        // After a kept line as well, and at the far end of the reach.
+        assert_eq!(search(0, 5).marks("a"), "3: 4- 5- 6- 7- 8-");
+        assert_eq!(search(0, 4).marks("a"), "3: 4- 5- 6- 7-");
+        // The searcher's context of a dropped match is counted from the kept line, not from that match.
+        let t = tree(&[("a", "one\ntwo\nneedle skip\nfour\nfive\nneedle keep\nseven\nneedle skip\nnine\nten\n")]);
+        let search = |before: usize, after: usize| {
+            let mut q = Query::new(t.path(), vec![line("needle"), not_line("skip")]);
+            (q.before, q.after) = (before, after);
+            run(q)
+        };
+        assert_eq!(search(2, 1).marks("a"), "4- 5- 6: 7-");
+        assert_eq!(search(3, 2).marks("a"), "3- 4- 5- 6: 7- 8-");
+        assert_eq!(search(4, 3).marks("a"), "2- 3- 4- 5- 6: 7- 8- 9-");
+    }
+
+    #[test]
+    fn a_file_whose_matches_are_all_dropped_gives_no_item_with_context() {
+        let t = tree(&[("dropped", "one\nneedle skip\nthree\nneedle skip\n"), ("kept", "one\nneedle\nthree\n")]);
+        let mut q = Query::new(t.path(), vec![line("needle"), not_line("skip")]);
+        (q.before, q.after) = (2, 2);
+        let found = run(q);
+        assert_eq!(found.paths(), ["kept"]);
+        let s = found.summary;
+        assert_eq!((s.files_searched, s.files_matched, s.lines), (2, 1, 1));
+    }
+
+    #[test]
+    fn context_lines_do_not_count_for_the_cap() {
+        let t = tree(&[("a", &numbered(14, &[2, 5, 8, 11]))]);
+        let search = |max_lines: usize| {
+            let mut q = Query::new(t.path(), vec![line("needle")]);
+            (q.before, q.after, q.max_lines) = (1, 1, max_lines);
+            run(q)
+        };
+        let found = search(5);
+        assert_eq!(found.marks("a"), "1- 2: 3- 4- 5: 6- 7- 8: 9- 10- 11: 12-");
+        assert_eq!((found.summary.lines, found.summary.truncated), (4, false));
+        // The search stops at the kept line that fills the cap: it has its line before, not its line after.
+        let found = search(2);
+        assert_eq!(found.marks("a"), "1- 2: 3- 4- 5:");
+        assert_eq!((found.summary.lines, found.summary.truncated), (2, true));
+        let found = search(1);
+        assert_eq!(found.marks("a"), "1- 2:");
+        assert_eq!((found.summary.lines, found.summary.truncated), (1, true));
+        let found = search(4);
+        assert_eq!(found.marks("a"), "1- 2: 3- 4- 5: 6- 7- 8: 9- 10- 11:");
+        assert_eq!((found.summary.lines, found.summary.truncated), (4, true));
+        let found = search(0);
+        assert!(found.files.is_empty());
+        assert_eq!((found.summary.lines, found.summary.truncated), (0, true));
+    }
+
+    #[test]
+    fn the_line_cap_is_exact_with_many_files_and_context() {
+        let t = TempDir::new().unwrap();
+        for d in 0..16 {
+            std::fs::create_dir(t.path().join(format!("d{d:02}"))).unwrap();
+        }
+        let hits = [3, 4, 9];
+        let content = numbered(12, &hits);
+        for i in 0..2000 {
+            std::fs::write(t.path().join(format!("d{:02}/f{i:04}", i % 16)), &content).unwrap();
+        }
+        let (before, after) = (2, 1);
+        for (max_lines, sort_budget_ms) in [(50, 0), (50, 60_000), (1, 0), (500, 0), (1000, 60_000)] {
+            let mut q = Query::new(t.path(), vec![line("needle")]);
+            (q.before, q.after, q.max_lines, q.sort_budget_ms) = (before, after, max_lines, sort_budget_ms);
+            let found = run(q);
+            let what = format!("max-lines {max_lines}, budget {sort_budget_ms}: {:?}", found.summary);
+            assert_eq!(found.total_kept(), max_lines, "{what}");
+            assert_eq!(found.summary.lines, max_lines, "{what}");
+            assert!(found.total_lines() > max_lines, "{what}");
+            assert!(found.summary.truncated, "{what}");
+            assert_eq!(found.summary.files_matched, found.files.len(), "{what}");
+            assert!(found.summary.files_searched < 2000, "the walk stops: {what}");
+            for file in &found.files {
+                let marks = found.marks(&file.path);
+                let kept: Vec<u64> = file.lines.iter().filter(|l| !l.context).map(|l| l.n).collect();
+                // A file that does not fit as a whole gives its first kept lines.
+                assert!(!kept.is_empty() && kept[..] == hits[..kept.len()], "{marks}: {what}");
+                assert!(file.lines.windows(2).all(|pair| pair[0].n < pair[1].n), "{marks}: {what}");
+                // Every kept line has its lines before, and no context line is out of reach of a kept line.
+                for k in &kept {
+                    assert!((k - 2..*k).all(|n| file.lines.iter().any(|l| l.n == n)), "{marks}: {what}");
+                }
+                for l in file.lines.iter().filter(|l| l.context) {
+                    let near = |k: &u64| (l.n < *k && k - l.n <= 2) || (l.n > *k && l.n - k <= 1);
+                    assert!(kept.iter().any(near), "line {} of {marks}: {what}", l.n);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lines_are_cut_after_the_last_kept_line_that_fits() {
+        let line = |n: u64, context: bool| Line {
+            n,
+            text: String::new(),
+            spans: Vec::new(),
+            secondary: Vec::new(),
+            inexact: false,
+            context,
+        };
+        // "1- 2: 3- 4- 5: 6: 7- 9- 10:"
+        let all: Vec<Line> = [(1, true), (2, false), (3, true), (4, true), (5, false), (6, false), (7, true)]
+            .into_iter()
+            .chain([(9, true), (10, false)])
+            .map(|(n, context)| line(n, context))
+            .collect();
+        let cut = |count: usize| {
+            let mut lines = all.clone();
+            truncate_kept(&mut lines, count);
+            lines.iter().map(|l| l.n).collect::<Vec<_>>()
+        };
+        assert_eq!(cut(0), [0u64; 0]);
+        assert_eq!(cut(1), [1, 2]);
+        assert_eq!(cut(2), [1, 2, 3, 4, 5]);
+        assert_eq!(cut(3), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(cut(4), [1, 2, 3, 4, 5, 6, 7, 9, 10]);
+        assert_eq!(cut(5).len(), all.len(), "more than there are");
+    }
+
+    #[test]
+    fn a_cut_context_line_is_inexact() {
+        let t = TempDir::new().unwrap();
+        write(t.path(), "a", "a long line before\nneedle\nshort\nbad \u{e4}".as_bytes());
+        write(t.path(), "b", b"needle\ncaf\xff\n");
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        (q.before, q.after, q.max_columns) = (1, 2, 6);
+        let found = run(q);
+        let lines = found.lines("a");
+        assert_eq!(found.marks("a"), "1- 2: 3- 4-");
+        assert_eq!((lines[0].text.as_str(), lines[0].inexact), ("a long", true));
+        assert_eq!((lines[1].text.as_str(), lines[1].inexact), ("needle", false));
+        assert_eq!((lines[2].text.as_str(), lines[2].inexact), ("short", false));
+        assert_eq!((lines[3].text.as_str(), lines[3].inexact), ("bad \u{e4}", false), "characters, not bytes");
+        // Invalid UTF-8 in a context line, as in a kept line.
+        let l = &found.lines("b")[1];
+        assert_eq!((l.text.as_str(), l.inexact, l.context), ("caf\u{fffd}", true, true));
+    }
+
+    #[test]
+    fn crlf_context_lines_come_without_carriage_return() {
+        let t = tree(&[("a", "first\r\nneedle\r\nthird\r\nlast\r")]);
+        let found = around(t.path(), 1, 2);
+        assert_eq!(found.marks("a"), "1- 2: 3- 4-");
+        assert_eq!(found.texts("a"), [(1, "first"), (2, "needle"), (3, "third"), (4, "last\r")]);
+        assert!(found.lines("a").iter().all(|l| !l.inexact));
+    }
+
+    #[test]
+    fn binary_files_are_skipped_with_context() {
+        let t = TempDir::new().unwrap();
+        write(t.path(), "text.txt", "one\nneedle\nthree\n");
+        // The NUL byte in a line before, in a line after, and far from every match.
+        write(t.path(), "before.bin", b"one\0\nneedle\nthree\n");
+        write(t.path(), "after.bin", b"one\nneedle\nthree\0\n");
+        write(t.path(), "far.bin", b"one\nneedle\nthree\nfour\nfive\nsix\0\n");
+        let found = around(t.path(), 1, 1);
+        assert_eq!(found.paths(), ["text.txt"]);
+        assert_eq!(found.marks("text.txt"), "1- 2: 3-");
+        let s = found.summary;
+        assert_eq!((s.files_searched, s.files_matched, s.lines, s.skipped), (4, 1, 1, 0));
+    }
+
+    #[test]
+    fn a_binary_file_gives_nothing_when_its_nul_byte_comes_after_collected_lines() {
+        let t = TempDir::new().unwrap();
+        // The NUL byte lies beyond the searcher's first buffer, so a hit and its context are collected before.
+        let mut late = b"one\nneedle\nthree\n".to_vec();
+        late.extend(std::iter::repeat_n(&b"filler line\n"[..], 30_000).flatten());
+        late.extend_from_slice(b"nul\0\n");
+        write(t.path(), "late.bin", &late);
+        for (before, after) in [(0, 0), (1, 1), (0, 3), (3, 0)] {
+            let found = around(t.path(), before, after);
+            assert!(found.paths().is_empty(), "{before}/{after}: {:?}", found.paths());
+            assert_eq!((found.summary.files_searched, found.summary.lines), (1, 0), "{before}/{after}");
+        }
+    }
+
+    #[test]
+    fn without_context_the_items_are_those_of_a_search_without_the_fields() {
+        let t = tree(&[("a", "one\nneedle skip\nneedle keep\nfour\nneedle two\n"), ("b", "x\nneedle\nx\n")]);
+        let query = || Query::new(t.path(), vec![line("needle"), not_line("skip")]);
+        // `Query::new` has the request's defaults.
+        assert_eq!((query().before, query().after), (0, 0));
+        let found = run(query());
+        let kept = |n: u64, text: &str| Line {
+            n,
+            text: text.to_string(),
+            spans: vec![(0, 6)],
+            secondary: Vec::new(),
+            inexact: false,
+            context: false,
+        };
+        assert_eq!(found.paths(), ["a", "b"]);
+        assert_eq!(found.lines("a"), [kept(3, "needle keep"), kept(5, "needle two")]);
+        assert_eq!(found.lines("b"), [kept(2, "needle")]);
+        assert_eq!((found.summary.lines, found.total_lines()), (3, 3));
+        // One side on adds context lines to the same kept lines.
+        let mut q = query();
+        q.after = 1;
+        let with = run(q);
+        assert_eq!(with.marks("a"), "3: 4- 5:");
+        for file in ["a", "b"] {
+            let kept: Vec<&Line> = with.lines(file).iter().filter(|l| !l.context).collect();
+            assert_eq!(kept, found.lines(file).iter().collect::<Vec<_>>(), "{file}");
+        }
+        assert_ne!(with.files, found.files);
+    }
+
+    #[test]
+    fn context_in_a_file_larger_than_the_searchers_buffer() {
+        // About 130 KiB, twice the buffer; hits near the start, in the middle and near the end.
+        let hits = [3, 6_500, 12_998];
+        let content = numbered(13_000, &hits);
+        assert!(content.len() > 2 * 64 * 1024, "{}", content.len());
+        let t = tree(&[("a", &content)]);
+        let found = around(t.path(), 2, 3);
+        assert_eq!(
+            found.marks("a"),
+            "1- 2- 3: 4- 5- 6- 6498- 6499- 6500: 6501- 6502- 6503- 12996- 12997- 12998: 12999- 13000-"
+        );
+        let text = |n: u64| found.lines("a").iter().find(|l| l.n == n).unwrap().text.clone();
+        assert_eq!(
+            (text(3).as_str(), text(6_499).as_str(), text(13_000).as_str()),
+            ("needle 3", "line 6499", "line 13000")
+        );
+        assert_eq!(found.summary.lines, 3);
+        // A hit on each side of the buffer boundary, with more context than lines between them.
+        let t = tree(&[("b", &numbered(13_000, &[6_553, 6_554]))]);
+        let found = around(t.path(), 1, 1);
+        assert_eq!(found.marks("b"), "6552- 6553: 6554: 6555-");
+    }
+
+    #[test]
+    fn the_cap_with_a_dropped_match_in_the_same_file() {
+        let content = "one\nneedle skip\nthree\nneedle a\nfive\nneedle skip\nneedle b\nneedle c\nnine\n";
+        let t = tree(&[("a", content)]);
+        let search = |max_lines: usize| {
+            let mut q = Query::new(t.path(), vec![line("needle"), not_line("skip")]);
+            (q.before, q.after, q.max_lines) = (2, 2, max_lines);
+            run(q)
+        };
+        // The dropped match 2 is context of the kept line 4; 5 and 6 are context of 4 and before 7.
+        let found = search(3);
+        assert_eq!(found.marks("a"), "2- 3- 4: 5- 6- 7: 8:");
+        assert_eq!((found.total_kept(), found.summary.lines, found.summary.truncated), (3, 3, true));
+        assert_eq!(found.lines("a")[0].text, "needle skip");
+        // Cut at the kept line 7: its lines before, none after, the dropped match 6 among the lines before.
+        let found = search(2);
+        assert_eq!(found.marks("a"), "2- 3- 4: 5- 6- 7:");
+        assert_eq!((found.total_kept(), found.summary.lines, found.summary.truncated), (2, 2, true));
+        // Cut at the first kept line: the dropped match before it is context, nothing after.
+        let found = search(1);
+        assert_eq!(found.marks("a"), "2- 3- 4:");
+        assert_eq!((found.total_kept(), found.summary.lines, found.summary.truncated), (1, 1, true));
+        // No cut.
+        let found = search(4);
+        assert_eq!(found.marks("a"), "2- 3- 4: 5- 6- 7: 8: 9-");
+        assert_eq!((found.summary.lines, found.summary.truncated), (3, false));
+    }
+
+    #[test]
+    fn a_last_line_without_terminator_as_hit_or_context() {
+        let t = tree(&[("hit", "one\ntwo\nneedle"), ("ctx", "needle\ntwo\nlast"), ("both", "needle\nneedle")]);
+        let found = around(t.path(), 1, 1);
+        assert_eq!(found.marks("hit"), "2- 3:");
+        assert_eq!(found.texts("hit"), [(2, "two"), (3, "needle")]);
+        assert_eq!(found.lines("hit")[1].spans, [(0, 6)]);
+        assert_eq!(found.marks("ctx"), "1: 2-");
+        let found = around(t.path(), 0, 2);
+        assert_eq!(found.marks("ctx"), "1: 2- 3-");
+        assert_eq!(found.texts("ctx")[2], (3, "last"));
+        assert!(found.lines("ctx").iter().all(|l| !l.inexact));
+        assert_eq!(found.marks("both"), "1: 2:");
+        // Combined with a cap.
+        let capped = |dir: &Path, max_lines: usize| {
+            let mut q = Query::new(dir, vec![line("needle")]);
+            (q.before, q.after, q.max_lines) = (1, 2, max_lines);
+            run(q)
+        };
+        let t = tree(&[("hit", "one\nneedle\nneedle")]);
+        let found = capped(t.path(), 2);
+        assert_eq!(found.marks("hit"), "1- 2: 3:");
+        assert_eq!(found.lines("hit")[2].text, "needle");
+        let found = capped(t.path(), 1);
+        assert_eq!((found.marks("hit"), found.summary.truncated), ("1- 2:".to_string(), true));
+        let t = tree(&[("ctx", "needle\ntwo\nlast")]);
+        // The cap is not reached, so the unterminated context line at the end of the file arrives.
+        let found = capped(t.path(), 2);
+        assert_eq!(found.marks("ctx"), "1: 2- 3-");
+        assert_eq!(found.texts("ctx")[2], (3, "last"));
+        // The cap is reached at the hit: no context after it.
+        assert_eq!(capped(t.path(), 1).marks("ctx"), "1:");
+        // The cut falls on the first hit of `hit`, whose last line is never reached.
+        let t = tree(&[("hit", "one\nneedle\nlast\nneedle")]);
+        assert_eq!(capped(t.path(), 1).marks("hit"), "1- 2:");
+        assert_eq!(capped(t.path(), 2).marks("hit"), "1- 2: 3- 4:");
     }
 }

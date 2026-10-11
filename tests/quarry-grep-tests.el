@@ -68,6 +68,8 @@ the options have their defaults, and the requests and calls of
             (quarry-grep-case 'smart)
             (quarry-grep-max-lines 50000)
             (quarry-grep-max-columns 500)
+            (quarry-grep-context-before 0)
+            (quarry-grep-context-after 0)
             (quarry-include-hidden t)
             (quarry-ignores nil)
             (project-find-functions nil))
@@ -262,7 +264,8 @@ Each is (PROMPT . INITIAL-CONTENTS)."
                          :case :smart
                          :file-type "rust"
                          :no-ignore nil :hidden t :ignores nil
-                         :max-lines 50000 :max-columns 500)))
+                         :max-lines 50000 :max-columns 500
+                         :before 0 :after 0)))
     (should (eq major-mode 'quarry-grep-mode))
     (should buffer-read-only)
     (should (equal default-directory (expand-file-name "src/" dir)))
@@ -392,7 +395,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
     (should (string-match-p "\\`Search finished: 5 lines in 4 files, [0-9]+ ms\\'"
                             (quarry-test-grep--status)))
     (should (equal (quarry-test-grep--header)
-                   (format " files: everything   dir: %s   case: smart   ign: on   hidden: on   hits: 5 in 4 files"
+                   (format " files: everything   dir: %s   case: smart   ign: on   hidden: on   ctx: 0   hits: 5 in 4 files"
                            (abbreviate-file-name dir))))
     ;; The filter block is the start of the buffer, the filter's line
     ;; holds the search's own filter object.
@@ -1322,7 +1325,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
           (setq pos end)))
       (setq parts (nreverse parts))
       (should (equal (mapcar #'car parts)
-                     (list "everything" (abbreviate-file-name dir) "smart" "on" "on")))
+                     (list "everything" (abbreviate-file-name dir) "smart" "on" "on" "0")))
       (dolist (part parts)
         (should (string-prefix-p "mouse-1: " (nth 1 part)))
         (should (commandp (nth 2 part)))
@@ -1349,10 +1352,13 @@ Each is (PROMPT . INITIAL-CONTENTS)."
           (cl-letf (((symbol-function 'quarry-grep-change-files)
                      (lambda () (interactive) (push 'files asked)))
                     ((symbol-function 'quarry-grep-change-directory)
-                     (lambda () (interactive) (push 'directory asked))))
+                     (lambda () (interactive) (push 'directory asked)))
+                    ((symbol-function 'quarry-grep-set-context)
+                     (lambda (&optional _) (interactive "P") (push 'context asked))))
             (funcall (nth 2 (nth 0 parts)) click)
-            (funcall (nth 2 (nth 1 parts)) click))
-          (should (equal asked '(directory files))))))))
+            (funcall (nth 2 (nth 1 parts)) click)
+            (funcall (nth 2 (nth 5 parts)) click))
+          (should (equal asked '(context directory files))))))))
 
 ;;;; Filters
 
@@ -1871,7 +1877,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
       (should (equal (quarry-test-grep--results) '(("%-x.txt" 1 "needle"))))
       ;; The string is a mode line format: %% stands for one %.
       (should (equal (quarry-test-grep--header)
-                     (format " files: %%%%-*.txt   dir: %s   case: smart   ign: on   hidden: on   hits: 1 in 1 file"
+                     (format " files: %%%%-*.txt   dir: %s   case: smart   ign: on   hidden: on   ctx: 0   hits: 1 in 1 file"
                              (string-replace "%" "%%" (abbreviate-file-name sub)))))
       (should (string-match-p "100%%b/" (quarry-test-grep--header)))
       (should-not (string-match-p "\\(?:\\`\\|[^%]\\)%\\(?:[^%]\\|\\'\\)"
@@ -2092,6 +2098,788 @@ Each is (PROMPT . INITIAL-CONTENTS)."
     (should (string-match-p "C-c C-c applies" doc))
     (should (string-match-p "C-c C-k" doc))
     (should-not (string-match-p "not currently defined\\|wgrep-mode-map" doc))))
+
+;;;; Context lines
+
+(defconst quarry-test-grep--context-files
+  '(("ctx.txt" . "l1\nl2\nl3 needle\nl4\nl5\nl6\nl7\nl8\nl9 needle\nl10\nl11\nl12\n")
+    ("two.txt" . "x\nneedle\ny\n"))
+  "A tree whose hits, ctx.txt:3 and :9, are six lines apart.
+With one line of context ctx.txt has a gap between 4 and 8, with two a
+gap between 5 and 7, with three none; two.txt has a hit at line 2.")
+
+(defun quarry-test-grep--layout (path)
+  "Return the lines of the block of PATH: (hit N), (context N) or `gap'."
+  (with-current-buffer (quarry-test-grep--buffer)
+    (let ((block (quarry-grep--block-at (quarry-test-grep--heading-pos path)))
+          (found nil))
+      (save-excursion
+        (goto-char (car block))
+        (forward-line 1)
+        (while (< (point) (cdr block))
+          (let ((bol (point)))
+            (push (cond ((get-text-property bol 'quarry-grep-gap) 'gap)
+                        ((get-text-property bol 'quarry-grep-context)
+                         (list 'context (get-text-property bol 'quarry-grep-line)))
+                        (t (list 'hit (get-text-property bol 'quarry-grep-line))))
+                  found))
+          (forward-line 1)))
+      (nreverse found))))
+
+(defun quarry-test-grep--line-text (bol)
+  "Return the text of the line that starts at BOL, without properties."
+  (save-excursion
+    (goto-char bol)
+    (buffer-substring-no-properties bol (pos-eol))))
+
+(ert-deftest quarry-test-grep-context-request-and-options ()
+  "The request carries the counts; a new search takes them from the options."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (should (eql (quarry-test-grep--request :before) 0))
+    (should (eql (quarry-test-grep--request :after) 0))
+    (let ((quarry-grep-context-before 2)
+          (quarry-grep-context-after 1))
+      (quarry-test-grep--search dir)
+      (should (eql (quarry-test-grep--request :before) 2))
+      (should (eql (quarry-test-grep--request :after) 1))
+      (quarry-grep-literal "needle" nil dir)
+      (quarry-test-grep--wait)
+      (should (eql (quarry-test-grep--request :before) 2))
+      (should (eql (quarry-test-grep--request :after) 1))
+      (quarry-grep-project "needle" nil)
+      (quarry-test-grep--wait)
+      (should (eql (quarry-test-grep--request :before) 2))
+      (quarry-test-grep--visit-file dir "ctx.txt" "needle")
+      (quarry-grep-dwim)
+      (quarry-test-grep--wait)
+      (should (equal (quarry-test-grep--request :filters)
+                     '((:target :line :exclude nil :pattern "needle" :regexp nil))))
+      (should (eql (quarry-test-grep--request :after) 1)))
+    ;; A command of the result buffer keeps the counts of its search,
+    ;; whatever the options say now.
+    (let ((quarry-grep-context-before 2)
+          (quarry-grep-context-after 1))
+      (quarry-test-grep--search dir))
+    (quarry-test-grep--keys "c")
+    (should (eql (quarry-test-grep--request :before) 2))
+    (should (eql (quarry-test-grep--request :after) 1))
+    (quarry-test-grep--keys "g")
+    (should (eql (quarry-test-grep--request :before) 2))
+    (should (eql (quarry-grep--search-after quarry-grep--current) 1))))
+
+(ert-deftest quarry-test-grep-context-commands ()
+  "C, B and A take a prefix or ask; 0 switches off; the default is the count."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (cl-flet ((counts () (list (quarry-grep--search-before quarry-grep--current)
+                               (quarry-grep--search-after quarry-grep--current)))
+              (sent () (list (quarry-test-grep--request :before)
+                             (quarry-test-grep--request :after))))
+      ;; A prefix is the count and nothing is asked.
+      (should-not (quarry-test-grep--prompts (lambda () (quarry-test-grep--keys "2 C"))))
+      (should (equal (counts) '(2 2)))
+      (should (equal (sent) '(2 2)))
+      (quarry-test-grep--keys "C-u 3 B")
+      (should (equal (sent) '(3 2)))
+      (quarry-test-grep--keys "0 A")
+      (should (equal (sent) '(3 0)))
+      (should (equal (quarry-grep--search-before quarry-grep--current) 3))
+      ;; Without a prefix the number is read; the default is the count,
+      ;; for C the larger one.
+      (let ((prompts (quarry-test-grep--prompts (lambda () (quarry-test-grep--keys "A 4 RET")))))
+        (should (string-match-p "default 0" (car (car prompts)))))
+      (should (equal (sent) '(3 4)))
+      (let ((prompts (quarry-test-grep--prompts (lambda () (quarry-test-grep--keys "B RET")))))
+        (should (string-match-p "default 3" (car (car prompts)))))
+      (should (equal (sent) '(3 4)))
+      (let ((prompts (quarry-test-grep--prompts (lambda () (quarry-test-grep--keys "C RET")))))
+        (should (string-match-p "default 4" (car (car prompts)))))
+      (should (equal (sent) '(4 4)))
+      (quarry-test-grep--keys "C 0 RET")
+      (should (equal (counts) '(0 0)))
+      ;; Negative: an error, and nothing changes.
+      (quarry-test-grep--keys "2 C")
+      (let ((requests (length quarry-test-grep--requests))
+            (search quarry-grep--current))
+        (dolist (keys '("C-u - 1 C" "C - 3 RET" "M-- 2 B" "B - 1 RET" "C-u - A"
+                        "A - 5 RET"))
+          (pop-to-buffer-same-window (quarry-test-grep--buffer))
+          (should-error (execute-kbd-macro (kbd keys)) :type 'user-error))
+        (should-error (quarry-grep-set-context -1) :type 'user-error)
+        (should-error (quarry-grep-set-context-after -1) :type 'user-error)
+        (should (= (length quarry-test-grep--requests) requests))
+        (should (eq quarry-grep--current search))
+        (should (equal (counts) '(2 2)))))))
+
+(ert-deftest quarry-test-grep-context-history ()
+  "A changed count is a history entry; the same count is none."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (should-not quarry-grep--past)
+    (quarry-test-grep--keys "0 C")
+    (should-not quarry-grep--past)
+    (quarry-test-grep--keys "2 C")
+    (should (= (length quarry-grep--past) 1))
+    (quarry-test-grep--keys "1 A")
+    (should (= (length quarry-grep--past) 2))
+    (should (equal (quarry-test-grep--layout "ctx.txt")
+                   '((context 1) (context 2) (hit 3) (context 4) gap
+                     (context 7) (context 8) (hit 9) (context 10))))
+    (quarry-test-grep--keys "C-c <")
+    (should (equal (list (quarry-grep--search-before quarry-grep--current)
+                         (quarry-grep--search-after quarry-grep--current))
+                   '(2 2)))
+    (should (equal (quarry-test-grep--layout "two.txt")
+                   '((context 1) (hit 2) (context 3))))
+    (quarry-test-grep--keys "C-c <")
+    (should (string-match-p "ctx: 0 " (quarry-test-grep--header)))
+    (should (equal (quarry-test-grep--layout "ctx.txt") '((hit 3) (hit 9))))
+    (quarry-test-grep--keys "C-c > C-c >")
+    (should (string-match-p "ctx: 2/1 " (quarry-test-grep--header)))))
+
+(ert-deftest quarry-test-grep-context-header ()
+  "The header shows the counts between hidden and hits; a click sets them."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (should (string-match-p "   hidden: on   ctx: 0   hits: 3 in 2 files\\'"
+                            (quarry-test-grep--header)))
+    (quarry-test-grep--keys "2 C")
+    (should (string-match-p "   hidden: on   ctx: 2   hits: " (quarry-test-grep--header)))
+    (quarry-test-grep--keys "1 B")
+    (quarry-test-grep--keys "3 A")
+    (should (string-match-p "   ctx: 1/3   hits: " (quarry-test-grep--header)))
+    ;; A click on the value runs the command.
+    (with-current-buffer (quarry-test-grep--buffer)
+      (let* ((header (quarry-grep--header))
+             (pos (string-search "1/3" header))
+             (map (get-text-property pos 'keymap header)))
+        (should (eq (lookup-key map [header-line mouse-1]) 
+                    (lookup-key (quarry-grep--header-map #'quarry-grep-set-context)
+                                [header-line mouse-1])))
+        (should (eq (cdr (assq #'quarry-grep-set-context quarry-grep--header-maps)) map))))))
+
+;; Sorts among the context tests.
+(ert-deftest quarry-test-grep-context-header-and-prompts-name-the-side ()
+  "B and A change one side; their prompts say which and show the other."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (quarry-test-grep--keys "2 C")
+    (let ((prompts nil))
+      (cl-letf (((symbol-function 'read-number)
+                 (lambda (prompt default)
+                   (push (cons prompt default) prompts)
+                   3)))
+        (with-current-buffer (quarry-test-grep--buffer)
+          (quarry-grep-set-context-before)
+          (quarry-test-grep--wait)
+          (should (equal (car prompts)
+                         '("Lines of context before each hit (after: 2): " . 2)))
+          (should (string-match-p "ctx: 3/2 " (quarry-test-grep--header)))
+          (quarry-grep-set-context-after)
+          (quarry-test-grep--wait)
+          (should (equal (car prompts)
+                         '("Lines of context after each hit (before: 3): " . 2)))
+          (should (string-match-p "ctx: 3   hits" (quarry-test-grep--header)))
+          (quarry-grep-set-context)
+          (should (equal (car prompts)
+                         '("Lines of context before and after each hit: " . 3))))))))
+
+(ert-deftest quarry-test-grep-context-lines ()
+  "Context lines carry the context property and face, hits do not."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (let ((quarry-grep-context-before 1)
+          (quarry-grep-context-after 1)
+          (items nil))
+      (advice-add 'quarry-grep--insert-file :before
+                  (lambda (item) (push item items))
+                  '((name . quarry-test-grep-items)))
+      (unwind-protect
+          (quarry-test-grep--search dir)
+        (advice-remove 'quarry-grep--insert-file 'quarry-test-grep-items))
+      ;; The shape of the service's items, as Emacs gets them.
+      (let ((lines (plist-get (cl-find "ctx.txt" items
+                                       :key (lambda (i) (plist-get i :path))
+                                       :test #'equal)
+                              :lines)))
+        (should (equal (nth 0 lines)
+                       '(:n 2 :text "l2" :spans nil :secondary nil :inexact nil
+                            :context t)))
+        (should (equal (nth 1 lines)
+                       '(:n 3 :text "l3 needle" :spans ((3 9)) :secondary nil
+                            :inexact nil))))
+      (should (equal (quarry-test-grep--layout "ctx.txt")
+                     '((context 2) (hit 3) (context 4) gap
+                       (context 8) (hit 9) (context 10))))
+      (with-current-buffer (quarry-test-grep--buffer)
+        (let ((hit (quarry-test-grep--line-pos "ctx.txt" 3))
+              (context (quarry-test-grep--line-pos "ctx.txt" 4)))
+          (should (equal (quarry-test-grep--line-text context) "    4 l4"))
+          (should (get-text-property context 'quarry-grep-context))
+          (should-not (get-text-property hit 'quarry-grep-context))
+          (should (eq (get-text-property (+ context 6) 'face) 'quarry-grep-context))
+          (should (eq (get-text-property (+ context 2) 'face) 'quarry-grep-line-number))
+          (should (get-text-property (+ context 2) 'quarry-grep-prefix))
+          (should-not (get-text-property (+ context 6) 'quarry-grep-prefix))
+          (should-not (get-text-property context 'quarry-grep-column))
+          (should-not (get-text-property context 'quarry-grep-inexact))
+          (should (eq (get-text-property context 'mouse-face) 'highlight))
+          (should (get-text-property context 'follow-link))
+          (should (equal (get-text-property context 'quarry-grep-file) "ctx.txt"))
+          ;; The hit keeps its faces.
+          (should-not (eq (get-text-property (+ hit 6) 'face) 'quarry-grep-context))
+          (should (eq (get-text-property (+ hit 9) 'face) 'quarry-grep-match)))
+        (should (eq (face-attribute 'quarry-grep-context :inherit) 'shadow))))))
+
+(ert-deftest quarry-test-grep-context-gaps ()
+  "A gap line stands where the line numbers jump, and only with context."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (should-not (quarry-test-grep--lines-with 'quarry-grep-gap))
+    (should-not (quarry-test-grep--lines-with 'quarry-grep-context))
+    (should (equal (quarry-test-grep--layout "ctx.txt") '((hit 3) (hit 9))))
+    (quarry-test-grep--keys "1 C")
+    (should (equal (quarry-test-grep--layout "ctx.txt")
+                   '((context 2) (hit 3) (context 4) gap
+                     (context 8) (hit 9) (context 10))))
+    (with-current-buffer (quarry-test-grep--buffer)
+      (let* ((gaps (quarry-test-grep--lines-with 'quarry-grep-gap))
+             (gap (car gaps)))
+        (should (= (length gaps) 1))
+        (should (equal (quarry-test-grep--line-text gap) "    ⋮"))
+        (should (eq (get-text-property gap 'face) 'quarry-grep-context))
+        (should (equal (get-text-property gap 'quarry-grep-file) "ctx.txt"))
+        (should-not (get-text-property gap 'quarry-grep-line))
+        (should-not (get-text-property gap 'quarry-grep-context))
+        (should-not (get-text-property gap 'mouse-face))
+        (should-not (get-text-property gap 'follow-link))
+        ;; In the block, so the file commands work from it.
+        (goto-char gap)
+        (should (equal (quarry-grep--file-at-point) "ctx.txt"))))
+    (quarry-test-grep--keys "2 C")
+    (should (equal (quarry-test-grep--layout "ctx.txt")
+                   '((context 1) (context 2) (hit 3) (context 4) (context 5) gap
+                     (context 7) (context 8) (hit 9) (context 10) (context 11))))
+    ;; Touching groups, and groups that overlap, have none.
+    (quarry-test-grep--keys "3 C")
+    (should-not (quarry-test-grep--lines-with 'quarry-grep-gap))
+    (should (equal (mapcar #'cadr (quarry-test-grep--layout "ctx.txt"))
+                   (number-sequence 1 12)))
+    ;; Only before, or only after: a search with context shows gaps.
+    (quarry-test-grep--keys "0 C")
+    (quarry-test-grep--keys "1 A")
+    (should (equal (quarry-test-grep--layout "ctx.txt")
+                   '((hit 3) (context 4) gap (hit 9) (context 10))))
+    (quarry-test-grep--keys "0 A")
+    (quarry-test-grep--keys "1 B")
+    (should (equal (quarry-test-grep--layout "ctx.txt")
+                   '((context 2) (hit 3) gap (context 8) (hit 9))))
+    ;; Hits that are apart without context have no gap line.
+    (quarry-test-grep--keys "0 B")
+    (should-not (quarry-test-grep--lines-with 'quarry-grep-gap))))
+
+(ert-deftest quarry-test-grep-context-counts ()
+  "Heading, `hits' part, status line and `quarry-grep--lines' count hits."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (quarry-test-grep--keys "2 C")
+    (with-current-buffer (quarry-test-grep--buffer)
+      (should (= quarry-grep--lines 3))
+      (should (= quarry-grep--files 2))
+      (should (string-suffix-p " (2)" (quarry-test-grep--line-text
+                                       (quarry-test-grep--heading-pos "ctx.txt"))))
+      (should (string-suffix-p " (1)" (quarry-test-grep--line-text
+                                       (quarry-test-grep--heading-pos "two.txt")))))
+    (should (string-suffix-p "hits: 3 in 2 files" (quarry-test-grep--header)))
+    (should (string-match-p "\\`Search finished: 3 lines in 2 files"
+                            (quarry-test-grep--status)))
+    ;; The cap counts hits too: a cap of 1 hit gives that hit with its
+    ;; lines before; the search stops there, so it has none after.
+    (let ((quarry-grep-max-lines 1))
+      (quarry-test-grep--keys "g"))
+    (with-current-buffer (quarry-test-grep--buffer)
+      (should (= quarry-grep--lines 1))
+      (should (= quarry-grep--files 1))
+      (let ((path (get-text-property (car (car (quarry-grep--blocks)))
+                                     'quarry-grep-file)))
+        (should (equal (quarry-test-grep--layout path)
+                       (if (equal path "ctx.txt")
+                           '((context 1) (context 2) (hit 3))
+                         '((context 1) (hit 2)))))))
+    (should (string-match-p "\\`Search stopped at 1 lines" (quarry-test-grep--status)))))
+
+(ert-deftest quarry-test-grep-context-next-error ()
+  "n, p and `next-error' go from hit to hit."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (quarry-test-grep--keys "1 C")
+    (let ((results (quarry-test-grep--buffer))
+          (hit3 (quarry-test-grep--line-pos "ctx.txt" 3))
+          (hit9 (quarry-test-grep--line-pos "ctx.txt" 9))
+          (hit2 (quarry-test-grep--line-pos "two.txt" 2)))
+      (delete-other-windows)
+      (goto-char (point-min))
+      (quarry-test-grep--keys "n")
+      (should (= (point) hit3))
+      ;; Over a context line, a gap line and another context line.
+      (quarry-test-grep--keys "n")
+      (should (= (point) hit9))
+      (quarry-test-grep--keys "n")
+      (should (= (point) hit2))
+      (should-error (quarry-grep-next-match) :type 'user-error)
+      (quarry-test-grep--keys "p")
+      (should (= (point) hit9))
+      (quarry-test-grep--keys "p")
+      (should (= (point) hit3))
+      (should-error (quarry-grep-previous-match) :type 'user-error)
+      ;; From a context line and from a gap line.
+      (goto-char (quarry-test-grep--line-pos "ctx.txt" 4))
+      (quarry-test-grep--keys "n")
+      (should (= (point) hit9))
+      (goto-char (car (quarry-test-grep--lines-with 'quarry-grep-gap)))
+      (quarry-test-grep--keys "p")
+      (should (= (point) hit3))
+      (goto-char (quarry-test-grep--line-pos "ctx.txt" 8))
+      (quarry-test-grep--keys "p")
+      (should (= (point) hit3))
+      ;; `next-error' from another buffer.
+      (switch-to-buffer (get-buffer-create "*quarry-grep-test-other*"))
+      (unwind-protect
+          (progn
+            (first-error)
+            (should (equal (quarry-test-grep--place) '("ctx.txt" 3)))
+            (next-error)
+            (should (equal (quarry-test-grep--place) '("ctx.txt" 9)))
+            (next-error)
+            (should (equal (quarry-test-grep--place) '("two.txt" 2)))
+            (should-error (next-error) :type 'user-error)
+            (previous-error 2)
+            (should (equal (quarry-test-grep--place) '("ctx.txt" 3)))
+            (should-error (previous-error) :type 'user-error)
+            (next-error 2)
+            (should (equal (quarry-test-grep--place) '("two.txt" 2)))
+            (first-error)
+            (should (equal (quarry-test-grep--place) '("ctx.txt" 3))))
+        (kill-buffer "*quarry-grep-test-other*"))
+      (should (buffer-live-p results)))))
+
+(ert-deftest quarry-test-grep-context-visit ()
+  "RET and a click on a context line visit its line; a gap line has none."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (quarry-test-grep--keys "1 C")
+    (let ((results (quarry-test-grep--buffer))
+          (file (expand-file-name "ctx.txt" dir)))
+      (pop-to-buffer-same-window results)
+      (goto-char (quarry-test-grep--line-pos "ctx.txt" 4))
+      (end-of-line)
+      (quarry-test-grep--keys "RET")
+      (should (equal (buffer-file-name (window-buffer)) file))
+      (with-current-buffer (window-buffer)
+        (should (= (line-number-at-pos) 4))
+        (should (= (current-column) 0))
+        (should (looking-at-p "l4")))
+      (pop-to-buffer-same-window results)
+      (let ((bol (quarry-test-grep--line-pos "ctx.txt" 8)))
+        (quarry-grep-mouse-visit
+         (list 'mouse-2 (list (selected-window) (+ bol 7) '(0 . 0) 0))))
+      (should (equal (buffer-file-name) file))
+      (should (= (line-number-at-pos) 8))
+      (should (= (current-column) 0))
+      ;; The hit still goes to its match.
+      (pop-to-buffer-same-window results)
+      (goto-char (quarry-test-grep--line-pos "ctx.txt" 9))
+      (quarry-grep-visit)
+      (should (= (line-number-at-pos) 9))
+      (should (= (current-column) 3))
+      ;; A gap line: nothing to visit, as on the empty line after a block.
+      (pop-to-buffer-same-window results)
+      (let ((separator (text-property-any (point-min) (point-max) 'quarry-grep-separator t)))
+        (goto-char separator)
+        (let ((expected (should-error (quarry-grep-visit) :type 'user-error)))
+          (goto-char (car (quarry-test-grep--lines-with 'quarry-grep-gap)))
+          (should (equal (should-error (quarry-grep-visit) :type 'user-error)
+                         expected)))))))
+
+(ert-deftest quarry-test-grep-context-file-commands ()
+  "The commands that read the file at point work from context and gap lines."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (quarry-test-grep--keys "1 C")
+    (let ((gap (car (quarry-test-grep--lines-with 'quarry-grep-gap))))
+      (dolist (place (list (quarry-test-grep--line-pos "ctx.txt" 4) gap))
+        (goto-char place)
+        (quarry-test-grep--keys "- f")
+        (should (equal (quarry-test-grep--headings) '("two.txt")))
+        (quarry-test-grep--keys "C-c <")
+        (should (equal (quarry-test-grep--headings) '("ctx.txt" "two.txt"))))
+      ;; Folding from a gap line, in and out.
+      (goto-char gap)
+      (quarry-test-grep--keys "TAB")
+      (should (invisible-p gap))
+      (should (quarry-test-grep--hidden-p "ctx.txt" 4))
+      (should (= (point) (quarry-test-grep--heading-pos "ctx.txt")))
+      (should-not (invisible-p (quarry-test-grep--heading-pos "two.txt")))
+      (quarry-test-grep--keys "TAB")
+      (should-not (invisible-p gap))
+      ;; { and } from them.
+      (goto-char gap)
+      (quarry-test-grep--keys "}")
+      (should (= (point) (quarry-test-grep--heading-pos "two.txt")))
+      (goto-char (quarry-test-grep--line-pos "ctx.txt" 8))
+      (quarry-test-grep--keys "{")
+      (should (= (point) (quarry-test-grep--heading-pos "ctx.txt")))
+      ;; - d from a gap line offers the directory of the file.
+      (goto-char (quarry-test-grep--line-pos "ctx.txt" 4))
+      (should (equal (quarry-grep--file-at-point) "ctx.txt")))))
+
+(ert-deftest quarry-test-grep-context-folding ()
+  "Folding hides the gap lines of a block, and the fold of all does too."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (quarry-test-grep--keys "1 C")
+    (let ((gap (car (quarry-test-grep--lines-with 'quarry-grep-gap))))
+      (should-not (invisible-p gap))
+      (quarry-test-grep--keys "<backtab>")
+      (should (invisible-p gap))
+      (should (invisible-p (save-excursion (goto-char gap) (1- (pos-eol)))))
+      (dolist (path (quarry-test-grep--headings))
+        (should-not (invisible-p (quarry-test-grep--heading-pos path))))
+      (quarry-test-grep--keys "<backtab>")
+      (should-not (invisible-p gap)))))
+
+(ert-deftest quarry-test-grep-context-point-returns ()
+  "Point returns to a context line after a new search, else to the heading."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (quarry-test-grep--keys "2 C")
+    (goto-char (quarry-test-grep--line-pos "ctx.txt" 7))
+    (quarry-test-grep--keys "g")
+    (should (= (point) (quarry-test-grep--line-pos "ctx.txt" 7)))
+    ;; Line 7 is shown with one line of context, line 6 is not.
+    (goto-char (quarry-test-grep--line-pos "ctx.txt" 5))
+    (quarry-test-grep--keys "1 C")
+    (should (= (point) (quarry-test-grep--heading-pos "ctx.txt")))
+    (quarry-test-grep--keys "2 C")
+    (goto-char (quarry-test-grep--line-pos "ctx.txt" 10))
+    (quarry-test-grep--keys "0 C")
+    (should (= (point) (quarry-test-grep--heading-pos "ctx.txt")))
+    ;; A hit stays a hit when context goes away, and a gap line returns
+    ;; to the heading.
+    (quarry-test-grep--keys "1 C")
+    (goto-char (quarry-test-grep--line-pos "ctx.txt" 9))
+    (quarry-test-grep--keys "0 C")
+    (should (= (point) (quarry-test-grep--line-pos "ctx.txt" 9)))
+    (quarry-test-grep--keys "1 C")
+    (goto-char (car (quarry-test-grep--lines-with 'quarry-grep-gap)))
+    (quarry-test-grep--keys "g")
+    (should (= (point) (quarry-test-grep--heading-pos "ctx.txt")))))
+
+;;;; Context lines: limits, the request, the stream
+
+(defun quarry-test-grep--messages (function)
+  "Call FUNCTION; return the messages it showed, oldest first."
+  (let ((seen nil))
+    (cl-letf (((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 ;; The echo of a prefix argument is an empty message.
+                 (when (and format-string (not (equal format-string "")))
+                   (push (apply #'format format-string args) seen)))))
+      (funcall function))
+    (nreverse seen)))
+
+(defconst quarry-test-grep--limit-message "Context is limited to 1000 lines")
+
+(defun quarry-test-grep--counts ()
+  "Return the counts of the result buffer's search and those sent last.
+That is ((BEFORE AFTER) (BEFORE AFTER))."
+  (list (list (quarry-grep--search-before quarry-grep--current)
+              (quarry-grep--search-after quarry-grep--current))
+        (list (quarry-test-grep--request :before)
+              (quarry-test-grep--request :after))))
+
+(ert-deftest quarry-test-grep-context-limit-commands ()
+  "C, B and A reduce a count above the limit to it and say so."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (should (= quarry-grep-max-context 1000))
+    (quarry-test-grep--search dir)
+    (let ((limited (list quarry-test-grep--limit-message)))
+      ;; C, with a prefix and typed.
+      (should (equal (quarry-test-grep--messages
+                      (lambda () (quarry-test-grep--keys "5 0 0 0 C")))
+                     limited))
+      (should (equal (quarry-test-grep--counts) '((1000 1000) (1000 1000))))
+      (should (string-match-p "ctx: 1000 " (quarry-test-grep--header)))
+      (quarry-test-grep--keys "0 C")
+      (should (equal (quarry-test-grep--messages
+                      (lambda () (quarry-test-grep--keys "C 1 0 0 1 RET")))
+                     limited))
+      (should (equal (quarry-test-grep--counts) '((1000 1000) (1000 1000))))
+      (quarry-test-grep--keys "0 C")
+      (should (equal (quarry-test-grep--messages
+                      (lambda () (quarry-test-grep--keys "C-u 2 0 0 0 0 C")))
+                     limited))
+      (should (equal (quarry-test-grep--counts) '((1000 1000) (1000 1000))))
+      ;; B and A change their side only.
+      (quarry-test-grep--keys "2 C")
+      (should (equal (quarry-test-grep--messages
+                      (lambda () (quarry-test-grep--keys "9 9 9 9 B")))
+                     limited))
+      (should (equal (quarry-test-grep--counts) '((1000 2) (1000 2))))
+      (should (equal (quarry-test-grep--messages
+                      (lambda () (quarry-test-grep--keys "A 1 2 3 4 5 RET")))
+                     limited))
+      (should (equal (quarry-test-grep--counts) '((1000 1000) (1000 1000))))
+      (quarry-test-grep--keys "3 C")
+      (should (equal (quarry-test-grep--messages
+                      (lambda () (quarry-test-grep--keys "B 1 0 0 1 RET")))
+                     limited))
+      (should (equal (quarry-test-grep--counts) '((1000 3) (1000 3))))
+      (should (equal (quarry-test-grep--messages
+                      (lambda () (quarry-test-grep--keys "5 0 0 0 A")))
+                     limited))
+      (should (equal (quarry-test-grep--counts) '((1000 1000) (1000 1000))))
+      ;; Exactly the limit, and below it: no message.
+      (quarry-test-grep--keys "0 C")
+      (should-not (quarry-test-grep--messages
+                   (lambda () (quarry-test-grep--keys "1 0 0 0 C"))))
+      (should (equal (quarry-test-grep--counts) '((1000 1000) (1000 1000))))
+      (should-not (quarry-test-grep--messages
+                   (lambda () (quarry-test-grep--keys "B 9 9 9 RET"))))
+      (should (equal (quarry-test-grep--counts) '((999 1000) (999 1000))))
+      (should-not (quarry-test-grep--messages
+                   (lambda () (quarry-test-grep--keys "A 1 0 0 0 RET"))))
+      (should (equal (quarry-test-grep--counts) '((999 1000) (999 1000)))))))
+
+(ert-deftest quarry-test-grep-context-limit-message-stays ()
+  "The message is the last thing in the echo area, shown after the start."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (let ((order nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (&rest _) (push 'message order))))
+        (advice-add 'quarry-grep--run :after (lambda (&rest _) (push 'run order))
+                    '((name . quarry-test-grep-order)))
+        (unwind-protect
+            (quarry-grep-set-context 5000)
+          (advice-remove 'quarry-grep--run 'quarry-test-grep-order)))
+      (should (equal order '(message run))))))
+
+(ert-deftest quarry-test-grep-context-limit-options ()
+  "A new search with an option above the limit starts with the limit."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (let ((quarry-grep-context-before 5000)
+          (quarry-grep-context-after 7))
+      (should (equal (quarry-test-grep--messages
+                      (lambda () (quarry-test-grep--search dir)))
+                     (list quarry-test-grep--limit-message)))
+      (should (equal (quarry-test-grep--counts) '((1000 7) (1000 7))))
+      (should (string-match-p "ctx: 1000/7 " (quarry-test-grep--header)))
+      ;; The options themselves are left as they are.
+      (should (= quarry-grep-context-before 5000)))
+    (let ((quarry-grep-context-before 2)
+          (quarry-grep-context-after 99999))
+      (should (equal (quarry-test-grep--messages
+                      (lambda () (quarry-grep-literal "needle" nil dir)))
+                     (list quarry-test-grep--limit-message)))
+      (quarry-test-grep--wait)
+      (should (equal (quarry-test-grep--counts) '((2 1000) (2 1000)))))
+    ;; Exactly the limit: no message.
+    (let ((quarry-grep-context-before 1000)
+          (quarry-grep-context-after 1000))
+      (should-not (quarry-test-grep--messages
+                   (lambda () (quarry-test-grep--search dir))))
+      (should (equal (quarry-test-grep--counts) '((1000 1000) (1000 1000)))))))
+
+(defun quarry-test-grep--raw (request)
+  "Send REQUEST to the real service; wait; return (STATUS ERROR ITEMS).
+A request that does not decode fails the call itself, as `quarry-grep--run'
+sees it: STATUS is `failed' and ERROR the `emrs-error' data."
+  (let ((items nil) (status nil) (error nil) (ended nil))
+    (condition-case err
+        (progn
+          (emrs-call-stream
+           (quarry-grep--ensure-instance) request
+           :on-batch (lambda (batch) (setq items (append items batch)))
+           :on-end (lambda (end-status err)
+                     (setq status end-status error err ended t)))
+          (should (quarry-test--wait (lambda () ended))))
+      (emrs-error (setq status 'failed error (cdr err))))
+    (list status error items)))
+
+(defun quarry-test-grep--raw-lines (items)
+  "Return the lines of the file items among ITEMS."
+  (cl-loop for item in items
+           when (eq (car item) :file)
+           append (plist-get (cdr item) :lines)))
+
+(ert-deftest quarry-test-grep-context-raw-request ()
+  "The service decodes :before and :after as Lisp sends them."
+  (quarry-test-grep--with-tree (dir '(("a.txt" . "x\ny\nneedle\nz\nw\n")))
+    (let ((base `(:search :dir ,dir
+                          :filters ((:target :line :pattern "needle")))))
+      ;; Without the fields: the defaults.
+      (pcase-let ((`(,status ,err ,items) (quarry-test-grep--raw base)))
+        (should (eq status 'done))
+        (should-not err)
+        (let ((lines (quarry-test-grep--raw-lines items)))
+          (should (equal (mapcar (lambda (line) (plist-get line :n)) lines) '(3)))
+          (should-not (cl-some (lambda (line) (plist-get line :context)) lines))))
+      ;; A negative count and a float fail the call.
+      (dolist (bad '(-1 1.5))
+        (dolist (field '(:before :after))
+          (pcase-let ((`(,status ,err ,items)
+                       (quarry-test-grep--raw (append base (list field bad)))))
+            (should (eq status 'failed))
+            (should err)
+            (should-not (cl-some (lambda (item) (eq (car item) :file)) items)))))
+      ;; Both fields: context lines carry :context t, hits none.
+      (pcase-let ((`(,status ,_ ,items)
+                   (quarry-test-grep--raw (append base '(:before 1 :after 1)))))
+        (should (eq status 'done))
+        (let ((lines (quarry-test-grep--raw-lines items)))
+          (should (equal (mapcar (lambda (line) (plist-get line :n)) lines) '(2 3 4)))
+          (should (equal (mapcar (lambda (line) (plist-get line :context)) lines)
+                         '(t nil t))))))))
+
+(defun quarry-test-grep--context-item (path &rest lines)
+  "Return a file item for PATH with LINES, each (N TEXT) or (N TEXT :context).
+A hit has the text `needle' and the match at its start."
+  (list :file :path path :path-spans nil :mtime 1760103296123
+        :lines (mapcar (lambda (line)
+                         (if (eq (nth 2 line) :context)
+                             (list :n (nth 0 line) :text (nth 1 line)
+                                   :spans nil :secondary nil :inexact nil
+                                   :context t)
+                           (list :n (nth 0 line) :text (nth 1 line)
+                                 :spans '((0 6)) :secondary nil :inexact nil)))
+                       lines)))
+
+(ert-deftest quarry-test-grep-context-cancelled-counts-hits ()
+  "The status of a cancelled search counts hits, not context lines."
+  (quarry-test-grep--with-tree (dir)
+    (let ((quarry-grep-context-before 1)
+          (quarry-grep-context-after 1))
+      (quarry-test-grep--with-fake-stream
+        (quarry-grep "needle" nil dir)
+        (funcall (nth 1 (car quarry-test-grep--fake))
+                 (list (quarry-test-grep--context-item
+                        "a.txt" '(1 "one" :context) '(2 "needle") '(3 "three" :context))
+                       (quarry-test-grep--context-item
+                        "b.txt" '(1 "needle") '(2 "two" :context))))
+        (funcall (nth 2 (car quarry-test-grep--fake)) 'cancelled nil)
+        (should (eq (quarry-test-grep--state) 'cancelled))
+        (should (equal (quarry-test-grep--status)
+                       "Search cancelled: 2 lines in 2 files so far"))
+        (should (string-suffix-p "hits: 2 in 2 files" (quarry-test-grep--header)))))))
+
+(ert-deftest quarry-test-grep-context-fractional-count ()
+  "1.5 typed at the prompt of C is a user-error and changes nothing."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (quarry-test-grep--keys "2 C")
+    (let ((requests (length quarry-test-grep--requests))
+          (search quarry-grep--current))
+      (dolist (keys '("C 1 . 5 RET" "B 2 . 5 RET" "A 0 . 5 RET"))
+        (pop-to-buffer-same-window (quarry-test-grep--buffer))
+        (should-error (execute-kbd-macro (kbd keys)) :type 'user-error))
+      (should (= (length quarry-test-grep--requests) requests))
+      (should (eq quarry-grep--current search))
+      (should (equal (quarry-test-grep--counts) '((2 2) (2 2)))))))
+
+(ert-deftest quarry-test-grep-context-bare-universal-argument ()
+  "C-u C without a number sets both counts to 4 and asks nothing."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (should-not (quarry-test-grep--prompts
+                 (lambda () (quarry-test-grep--keys "C-u C"))))
+    (should (equal (quarry-test-grep--counts) '((4 4) (4 4))))
+    (quarry-test-grep--keys "0 C")
+    (quarry-test-grep--keys "C-u B")
+    (should (equal (quarry-test-grep--counts) '((4 0) (4 0))))))
+
+(ert-deftest quarry-test-grep-context-directory-filters ()
+  "- d and + d from a context line and a gap line offer the block's directory."
+  (quarry-test-grep--with-tree
+      (dir '(("sub/ctx.txt" . "l1\nl2\nl3 needle\nl4\nl5\nl6\nl7\nl8\nl9 needle\nl10\n")
+             ("other/o.txt" . "needle\n")))
+    (quarry-test-grep--search dir)
+    (quarry-test-grep--keys "1 C")
+    (let ((places (list (cons "context" (quarry-test-grep--line-pos "sub/ctx.txt" 4))
+                        (cons "gap" (car (quarry-test-grep--lines-with
+                                          'quarry-grep-gap))))))
+      (should (= (length places) 2))
+      (dolist (place places)
+        (goto-char (cdr place))
+        (let ((prompts (quarry-test-grep--prompts
+                        (lambda () (quarry-test-grep--keys "- d RET")))))
+          (should (equal prompts '(("Exclude paths containing: " . "/sub/")))))
+        (should (equal (quarry-test-grep--headings) '("other/o.txt")))
+        (quarry-test-grep--keys "C-c <")
+        (goto-char (cdr place))
+        (let ((prompts (quarry-test-grep--prompts
+                        (lambda () (quarry-test-grep--keys "+ d RET")))))
+          (should (equal prompts '(("Keep only paths containing: " . "/sub/")))))
+        (should (equal (quarry-test-grep--headings) '("sub/ctx.txt")))
+        (quarry-test-grep--keys "C-c <")))))
+
+(ert-deftest quarry-test-grep-context-clone-buffer ()
+  "A clone of a result buffer with context has its layout; n passes context."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
+    (quarry-test-grep--search dir)
+    (quarry-test-grep--keys "1 C")
+    (let* ((layouts (mapcar (lambda (path) (cons path (quarry-test-grep--layout path)))
+                            '("ctx.txt" "two.txt")))
+           (clone (clone-buffer "*quarry-grep-test-clone*")))
+      (unwind-protect
+          (let ((quarry-grep-buffer-name (buffer-name clone)))
+            (should (equal (quarry-test-grep--layout "ctx.txt")
+                           '((context 2) (hit 3) (context 4) gap
+                             (context 8) (hit 9) (context 10))))
+            (dolist (layout layouts)
+              (should (equal (quarry-test-grep--layout (car layout)) (cdr layout))))
+            (should (= (length (quarry-test-grep--lines-with 'quarry-grep-gap)) 1))
+            (delete-other-windows)
+            (set-buffer clone)
+            (goto-char (quarry-test-grep--line-pos "ctx.txt" 3))
+            (quarry-test-grep--keys "n")
+            (should (= (point) (quarry-test-grep--line-pos "ctx.txt" 9)))
+            (quarry-test-grep--keys "n")
+            (should (= (point) (quarry-test-grep--line-pos "two.txt" 2)))
+            (quarry-test-grep--keys "p")
+            (should (= (point) (quarry-test-grep--line-pos "ctx.txt" 9)))
+            (should (equal (quarry-test-grep--counts) '((1 1) (1 1)))))
+        (kill-buffer clone)))))
+
+(ert-deftest quarry-test-grep-context-gaps-in-several-batches ()
+  "Each file item of its own batch gets its gap line where its numbers jump."
+  (quarry-test-grep--with-tree (dir)
+    (let ((quarry-grep-context-before 1)
+          (quarry-grep-context-after 1))
+      (quarry-test-grep--with-fake-stream
+        (quarry-grep "needle" nil dir)
+        (let ((on-batch (nth 1 (car quarry-test-grep--fake))))
+          (funcall on-batch
+                   (list (quarry-test-grep--context-item
+                          "a.txt" '(2 "two" :context) '(3 "needle") '(4 "four" :context)
+                          '(8 "eight" :context) '(9 "needle"))))
+          (should (equal (quarry-test-grep--layout "a.txt")
+                         '((context 2) (hit 3) (context 4) gap (context 8) (hit 9))))
+          (funcall on-batch
+                   (list (quarry-test-grep--context-item
+                          "b.txt" '(1 "needle") '(2 "two" :context)
+                          '(10 "ten" :context) '(11 "needle"))
+                         (quarry-test-grep--context-item
+                          "c.txt" '(5 "five" :context) '(6 "needle"))))
+          (funcall (nth 2 (car quarry-test-grep--fake)) 'done nil)
+          (should (equal (quarry-test-grep--layout "a.txt")
+                         '((context 2) (hit 3) (context 4) gap (context 8) (hit 9))))
+          (should (equal (quarry-test-grep--layout "b.txt")
+                         '((hit 1) (context 2) gap (context 10) (hit 11))))
+          (should (equal (quarry-test-grep--layout "c.txt") '((context 5) (hit 6))))
+          (should (= (length (quarry-test-grep--lines-with 'quarry-grep-gap)) 2))
+          (should (string-match-p "\\`Search finished: 5 lines in 3 files"
+                                  (quarry-test-grep--status))))))))
 
 ;;;; Loading
 

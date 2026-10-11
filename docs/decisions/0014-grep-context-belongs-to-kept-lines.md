@@ -41,7 +41,7 @@ hits.
 - A line that an exclude line filter removed can still appear, in the
   context face, next to a hit. That is what the file contains there, and
   it is not counted or visited as a hit.
-- The search stops at the hit that fills the cap. That hit comes with its
-  lines before, and without its lines after.
+- The search stops at the hit that fills the cap. The last hit of a file
+  can then come with its lines before and without its lines after.
 - A search without context configures the searcher as before and costs
   what it did.

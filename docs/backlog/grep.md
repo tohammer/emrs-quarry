@@ -10,26 +10,14 @@ item has reached Lisp (release build, batch Emacs, without inserting
 anything): emrs converts one plist per line on the Emacs thread, and the
 search waits for it at the stream's capacity. Inserting the lines into
 the buffer comes on top and was not measured with the real renderer. Ordinary searches (hundreds of
-lines) are not affected. Option: send each file's lines as one string
+lines) are not affected. Context lines multiply the lines of a result
+by up to `1 + before + after` and are not capped (ADR 0014), so a large
+search with context reaches this cost sooner. Option: send each file's lines as one string
 with parallel integer lists for line numbers and match positions, so
 the conversion cost is per file, not per line; this changes the item
 shape. Origin: task 4 of the grep spec (2026-10-10), measurement by the
 implementer. Revisit when the result buffer is in daily use and large
 searches feel slow.
-
-## Context lines before and after a match
-
-Let the user set how many lines are shown before and after each match,
-as `-B`, `-A` and `-C` do in grep and rg. `grep-searcher` supports it
-(`before_context`, `after_context`, `Sink::context`). To design: the
-request fields and the item shape for context lines; how they look in a
-file block (separator between groups, a different face); keys to change
-the counts from the result buffer; that context lines are not matches
-for `next-error` and the hit counts; whether line filters apply to them
-(they should not); and wgrep, where context lines could be editable like
-match lines. Origin: requested by the author on 2026-10-10, during the
-grep spec's implementation; the spec lists context lines as out of
-scope. Revisit as the next grep feature.
 
 ## Manual checks not done yet
 
@@ -40,8 +28,11 @@ the author's theme, point and scrolling with two windows on the result
 buffer during a slow search, the file type prompt under vertico, a
 search for a common word in a tree of 20,000 files compared by feel with
 `M-x rg`, and a search that reaches the line cap. Emacs 30 was not run
-at all. Origin: grep spec, Testing section, and its review
-(2026-10-10). Do these once quarry-grep is in daily use; turn what
+at all. From the context lines spec (2026-10-11): the context face and
+the gap line in the author's theme, in a GUI frame and in a terminal,
+and `2 C` on a result of a few hundred hits by feel. Origin: grep spec,
+Testing section, and its review (2026-10-10); context lines spec,
+Testing section. Do these once quarry-grep is in daily use; turn what
 fails into backlog items or fixes.
 
 ## wgrep on other line ends and encodings, and on huge results
@@ -104,9 +95,10 @@ them in turn or fall back to the shared face. To settle:
   between two additional filters then need a rule.
 
 Origin: requested by the author on 2026-10-11, after trying the
-highlighting. Revisit with the next change to the item shape (context
-lines, or the delivery cost of large results), so the format changes
-once.
+highlighting. Revisit with the next change to an existing field of the
+item shape (the delivery cost of large results), so the format changes
+once. Context lines (2026-10-11) only added a flag to line items and
+were done without it.
 
 ## Filters: editing in the buffer, file content, narrowing in memory
 

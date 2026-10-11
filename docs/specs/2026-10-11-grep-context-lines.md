@@ -1,6 +1,6 @@
 # Grep: context lines before and after a match
 
-Status: approved
+Status: implemented
 Date: 2026-10-11
 
 ## Purpose
@@ -34,6 +34,14 @@ Out:
   format change those two items wait for.
 - Highlighting of filter matches inside context lines.
 - A cap on context lines (ADR 0014).
+
+Changed after manual testing: the prompts of `B` and `A` name their
+side and show the other side's count.
+
+Changed after the review: the counts are limited to 1000 lines per side
+(ADR 0015). Where this spec says that nothing limits a count, that no
+longer holds: the service takes a larger count as 1000, and the commands
+and the two options reduce it and say so in the echo area.
 
 ## Design
 
@@ -74,7 +82,8 @@ What does not change: a file item exists only for a file with at least
 one kept line; `:max-lines`, the summary's `:lines` and `:truncated`
 count kept lines only; a binary file gives nothing; order, the sort
 budget and cancellation. The search stops at the kept line that fills
-the cap, so that line has its lines before and not its lines after.
+the cap, so the last kept line of a file can come with its lines before
+and without its lines after.
 
 With both fields 0 the searcher is configured as it is today and the
 items are those of today.
@@ -250,23 +259,23 @@ search record, the properties table, rendering, wgrep. Module docs of
 
 In order; none can run in parallel.
 
-- [ ] 1. Service: `:before` and `:after` in the request and in `Config`,
+- [x] 1. Service: `:before` and `:after` in the request and in `Config`,
   the searcher's context settings, `Sink::context` and the selection of
   context lines by distance to kept lines in `LineSink`, `:context` on
   line items, the module docs of both files. *Done when* the Rust tests
   of the Testing section exist and `cargo test` passes, with the
   existing tests unchanged.
-- [ ] 2. Elisp, search and buffer: the two slots, the two options, the
+- [x] 2. Elisp, search and buffer: the two slots, the two options, the
   request, the three commands and their keys, the header part, the face,
   context and gap lines with their properties, hit counts, `next-error`
   passing over them, visiting and point return; the README parts for
   all of this. *Done when* the ERT tests of the Testing section exist
   and `tests/run-ert.sh` passes.
-- [ ] 3. wgrep: context lines editable, gap lines ignored, the restore;
+- [x] 3. wgrep: context lines editable, gap lines ignored, the restore;
   the README's "Editing results". *Done when* the wgrep tests of the
   Testing section exist and `tests/run-ert.sh` passes with wgrep on
   `QUARRY_TEST_LOAD_PATH`.
-- [ ] 4. Docs: `docs/architecture/grep.md` as listed under
+- [x] 4. Docs: `docs/architecture/grep.md` as listed under
   Documentation; the backlog item "Context lines before and after a
   match" removed; the two backlog items that name context lines as their
   moment to revisit reworded (they now wait for the next format change

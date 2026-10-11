@@ -448,6 +448,229 @@ The line of long.txt is cut and the one of bytes.txt is not valid UTF-8.")
                      (buffer-string))
                    "apple cake\nno fruit\n"))))
 
+;;;; Context lines
+
+(defmacro quarry-test-grep-wgrep--with-context (dir &rest body)
+  "Search the tree of DIR for `needle' with one line of context; run BODY.
+The tree is `quarry-test-grep--context-files': ctx.txt has a gap."
+  (declare (indent 1))
+  `(quarry-test-grep--with-tree (,dir quarry-test-grep--context-files)
+     (let ((quarry-grep-context-before 1)
+           (quarry-grep-context-after 1)
+           (wgrep-auto-save-buffer nil))
+       (ignore wgrep-auto-save-buffer)
+       (quarry-test-grep--search ,dir)
+       (pop-to-buffer-same-window (quarry-test-grep--buffer))
+       ,@body)))
+
+(defun quarry-test-grep-wgrep--gap-pos ()
+  "Return the start of the gap line of ctx.txt."
+  (let ((gaps (quarry-test-grep--lines-with 'quarry-grep-gap)))
+    (should (= (length gaps) 1))
+    (car gaps)))
+
+(defun quarry-test-grep-wgrep--context-kept ()
+  "Check the context and gap lines of ctx.txt after edit mode."
+  (should (equal (quarry-test-grep--layout "ctx.txt")
+                 '((context 2) (hit 3) (context 4) gap
+                   (context 8) (hit 9) (context 10))))
+  (dolist (n '(2 4 8 10))
+    (let* ((bol (quarry-test-grep--line-pos "ctx.txt" n))
+           (eol (save-excursion (goto-char bol) (pos-eol)))
+           (text (next-single-property-change bol 'quarry-grep-prefix)))
+      (should (eq (get-text-property (1- eol) 'quarry-grep-context) t))
+      (should (get-text-property eol 'quarry-grep-context))
+      (should (eq (get-text-property text 'face) 'quarry-grep-context))
+      (should-not (get-text-property bol 'quarry-grep-column))))
+  (should-not (get-text-property (quarry-test-grep--line-pos "ctx.txt" 3)
+                                 'quarry-grep-context))
+  (let ((gap (quarry-test-grep-wgrep--gap-pos)))
+    (should (get-text-property gap 'quarry-grep-gap))
+    (should (equal (get-text-property gap 'quarry-grep-file) "ctx.txt"))
+    (should (eq (get-text-property (+ gap 4) 'face) 'quarry-grep-context))
+    (should-not (get-text-property gap 'mouse-face))
+    (should-not (get-text-property gap 'quarry-grep-line))
+    (should-not (get-text-property gap 'quarry-grep-context)))
+  ;; A pass with n over the hits does not stop at a context line.
+  (goto-char (point-min))
+  (let ((seen nil))
+    (condition-case nil
+        (while t
+          (quarry-grep-next-match)
+          (push (get-text-property (point) 'quarry-grep-line) seen))
+      (user-error nil))
+    (should (equal (nreverse seen) '(3 9 2)))))
+
+(ert-deftest quarry-test-grep-wgrep-context-commit ()
+  "An edited context line reaches the file; the gap and the context stay."
+  (skip-unless (quarry-test-grep-wgrep--p))
+  (quarry-test-grep-wgrep--with-context dir
+    (quarry-test-grep-wgrep--enter)
+    (quarry-test-grep-wgrep--replace "ctx.txt" 4 "l4" "four")
+    (quarry-test-grep-wgrep--replace "ctx.txt" 8 "l8" "eight")
+    (quarry-test-grep-wgrep--replace "ctx.txt" 9 "l9" "nine")
+    (execute-kbd-macro (kbd "C-c C-c"))
+    (quarry-test-grep-wgrep--working)
+    (should (equal (with-current-buffer
+                       (get-file-buffer (expand-file-name "ctx.txt" dir))
+                     (buffer-string))
+                   "l1\nl2\nl3 needle\nfour\nl5\nl6\nl7\neight\nnine needle\nl10\nl11\nl12\n"))
+    (should (equal (quarry-test-grep-wgrep--file dir "ctx.txt")
+                   (cdr (assoc "ctx.txt" quarry-test-grep--context-files))))
+    (should (equal (quarry-test-grep--line-text
+                    (quarry-test-grep--line-pos "ctx.txt" 4))
+                   "    4 four"))
+    (quarry-test-grep-wgrep--context-kept)))
+
+(ert-deftest quarry-test-grep-wgrep-context-abort ()
+  "After an abort the context and gap lines are as they were."
+  (skip-unless (quarry-test-grep-wgrep--p))
+  (quarry-test-grep-wgrep--with-context dir
+    (let ((before (buffer-string)))
+      (quarry-test-grep-wgrep--enter)
+      (quarry-test-grep-wgrep--replace "ctx.txt" 4 "l4" "four")
+      (quarry-test-grep-wgrep--replace "ctx.txt" 9 "l9" "nine")
+      (execute-kbd-macro (kbd "C-c C-k"))
+      (quarry-test-grep-wgrep--working)
+      (should (equal (buffer-string) before))
+      (quarry-test-grep-wgrep--context-kept)
+      (should (equal (quarry-test-grep-wgrep--file dir "ctx.txt")
+                     (cdr (assoc "ctx.txt" quarry-test-grep--context-files)))))))
+
+(ert-deftest quarry-test-grep-wgrep-gap-not-editable ()
+  "The gap line cannot be changed, nor joined to the lines around it."
+  (skip-unless (quarry-test-grep-wgrep--p))
+  (quarry-test-grep-wgrep--with-context dir
+    (quarry-test-grep-wgrep--enter)
+    (let ((before (buffer-string))
+          (gap (quarry-test-grep-wgrep--gap-pos)))
+      (dolist (place (list gap (+ gap 2) (+ gap 4) (+ gap 6)))
+        (goto-char place)
+        (should-error (insert "x") :type 'text-read-only)
+        (should-error (delete-char 1) :type 'text-read-only))
+      (goto-char (1- gap))
+      (should-error (delete-char 1) :type 'text-read-only)
+      (should (equal (buffer-string) before)))
+    (execute-kbd-macro (kbd "C-c C-c"))
+    (quarry-test-grep-wgrep--working)
+    (quarry-test-grep-wgrep--context-kept)
+    (should (equal (quarry-test-grep-wgrep--file dir "ctx.txt")
+                   (cdr (assoc "ctx.txt" quarry-test-grep--context-files))))
+    (let ((buffer (get-file-buffer (expand-file-name "ctx.txt" dir))))
+      (should-not (and buffer (buffer-modified-p buffer))))))
+
+(ert-deftest quarry-test-grep-wgrep-no-context-change-while-editing ()
+  "C changes the search, which cannot be done while editing."
+  (skip-unless (quarry-test-grep-wgrep--p))
+  (quarry-test-grep-wgrep--with-context dir
+    (quarry-test-grep-wgrep--enter)
+    (let ((text (buffer-string))
+          (sent (length quarry-test-grep--requests)))
+      (dolist (call (list (lambda () (quarry-grep-set-context 2))
+                          #'quarry-grep-set-context-before
+                          #'quarry-grep-set-context-after))
+        (let ((err (should-error (funcall call) :type 'user-error)))
+          (should (string-match-p "being edited" (cadr err)))))
+      (should (= (length quarry-test-grep--requests) sent))
+      (should (equal (buffer-string) text))
+      (should (eq (current-local-map) wgrep-mode-map)))
+    (execute-kbd-macro (kbd "C-c C-k"))
+    (quarry-test-grep-wgrep--working)))
+
+(ert-deftest quarry-test-grep-wgrep-inexact-context-not-editable ()
+  "A context line that was cut cannot be edited, and is intact after abort."
+  (skip-unless (quarry-test-grep-wgrep--p))
+  (quarry-test-grep--with-tree
+      (dir '(("x.txt" . "a long context line\nneedle\nshort\n")))
+    (let ((quarry-grep-max-columns 6)
+          (quarry-grep-context-before 1)
+          (quarry-grep-context-after 1)
+          (wgrep-auto-save-buffer nil))
+      (ignore wgrep-auto-save-buffer)
+      (quarry-test-grep--search dir)
+      (pop-to-buffer-same-window (quarry-test-grep--buffer))
+      (let* ((cut (quarry-test-grep--line-pos "x.txt" 1))
+             (before (buffer-string))
+             (file (quarry-test-grep-wgrep--file dir "x.txt"))
+             (text (next-single-property-change cut 'quarry-grep-prefix)))
+        (should (get-text-property cut 'quarry-grep-inexact))
+        (should (get-text-property cut 'quarry-grep-context))
+        (should (equal (quarry-test-grep--line-text cut) "    1 a long"))
+        (quarry-test-grep-wgrep--enter)
+        (should-not (get-text-property cut 'wgrep-line-filename))
+        (should (get-text-property (quarry-test-grep--line-pos "x.txt" 3)
+                                   'wgrep-line-filename))
+        (dolist (place (list text (+ text 3)
+                             (save-excursion (goto-char cut) (pos-eol))))
+          (goto-char place)
+          (should-error (insert "x") :type 'text-read-only)
+          (should-error (delete-char 1) :type 'text-read-only))
+        (should (equal (buffer-string) before))
+        ;; Even with everything opened for editing nothing is written back.
+        (execute-kbd-macro (kbd "C-c C-p"))
+        (quarry-test-grep-wgrep--replace "x.txt" 1 "long" "short")
+        (execute-kbd-macro (kbd "C-c C-k"))
+        (quarry-test-grep-wgrep--working)
+        (should (equal (buffer-string) before))
+        (should (get-text-property cut 'quarry-grep-inexact))
+        (should (eq (get-text-property
+                     (1- (save-excursion (goto-char cut) (pos-eol)))
+                     'quarry-grep-context)
+                    t))
+        (should (equal (quarry-test-grep-wgrep--file dir "x.txt") file))
+        (should-not (get-file-buffer (expand-file-name "x.txt" dir)))
+        ;; The same on commit.
+        (quarry-test-grep-wgrep--enter)
+        (execute-kbd-macro (kbd "C-c C-p"))
+        (quarry-test-grep-wgrep--replace "x.txt" 1 "long" "short")
+        (execute-kbd-macro (kbd "C-c C-c"))
+        (quarry-test-grep-wgrep--working)
+        (should (equal (quarry-test-grep-wgrep--file dir "x.txt") file))
+        (should-not (let ((buffer (get-file-buffer (expand-file-name "x.txt" dir))))
+                      (and buffer (buffer-modified-p buffer))))))))
+
+(ert-deftest quarry-test-grep-wgrep-added-line-in-context ()
+  "A line added by an edit of a context line belongs to the block."
+  (skip-unless (quarry-test-grep-wgrep--p))
+  (quarry-test-grep-wgrep--with-context dir
+    (quarry-test-grep-wgrep--enter)
+    (quarry-test-grep-wgrep--replace "ctx.txt" 4 "l4" "four\nextra")
+    (execute-kbd-macro (kbd "C-c C-c"))
+    (quarry-test-grep-wgrep--working)
+    (should (equal (with-current-buffer
+                       (get-file-buffer (expand-file-name "ctx.txt" dir))
+                     (buffer-string))
+                   "l1\nl2\nl3 needle\nfour\nextra\nl5\nl6\nl7\nl8\nl9 needle\nl10\nl11\nl12\n"))
+    ;; The new line is a line of the block, with the file and nothing else.
+    (should (= (length (quarry-grep--blocks)) 2))
+    (let* ((context (quarry-test-grep--line-pos "ctx.txt" 4))
+           (added (save-excursion (goto-char context) (forward-line 1) (point)))
+           (block (quarry-grep--block-at context)))
+      (should (equal (quarry-test-grep--line-text added) "extra"))
+      (should (equal (quarry-grep--block-at added) block))
+      (should (equal (quarry-grep--block-at (quarry-test-grep-wgrep--gap-pos))
+                     block))
+      (should (equal (get-text-property added 'quarry-grep-file) "ctx.txt"))
+      (should-not (get-text-property added 'quarry-grep-line))
+      (should (= (length (quarry-test-grep--lines-with 'quarry-grep-gap)) 1))
+      (should (= quarry-grep--status-marker
+                 (text-property-any (point-min) (point-max) 'quarry-grep-status t)))
+      ;; Folding covers the added line, and n passes over it.
+      (goto-char context)
+      (quarry-test-grep--keys "TAB")
+      (should (invisible-p added))
+      (should-not (quarry-test-grep--hidden-p "two.txt" 2))
+      (quarry-test-grep--keys "TAB")
+      (should-not (invisible-p added))
+      (goto-char (point-min))
+      (let ((seen nil))
+        (condition-case nil
+            (while t
+              (quarry-grep-next-match)
+              (push (get-text-property (point) 'quarry-grep-line) seen))
+          (user-error nil))
+        (should (equal (nreverse seen) '(3 9 2)))))))
+
 ;;;; The stale check
 
 (ert-deftest quarry-test-grep-wgrep-stale-check ()
