@@ -1184,10 +1184,15 @@ A narrowing is ignored."
               (overlay (quarry-grep--fold-overlay block)))
     (delete-overlay overlay)))
 
+(defun quarry-grep--block-at-point-p ()
+  "Return the file block at point as (START . END), or nil.
+Does not signal."
+  (quarry-grep--block-at (point)))
+
 (defun quarry-grep-toggle-fold ()
   "Hide or show the result lines of the file block at point."
   (interactive nil quarry-grep-mode)
-  (let ((block (quarry-grep--block-at (point))))
+  (let ((block (quarry-grep--block-at-point-p)))
     (unless block
       (user-error "No file block at point"))
     (let ((overlay (quarry-grep--fold-overlay block)))
@@ -1217,10 +1222,15 @@ A narrowing is ignored."
   (interactive nil quarry-grep-mode)
   (quarry-grep--run (quarry-grep--current)))
 
+(defun quarry-grep--running-p ()
+  "Return non-nil when the search of this buffer is running.
+Does not signal."
+  (eq quarry-grep--state 'running))
+
 (defun quarry-grep-cancel ()
   "Cancel the running search.  The results that arrived stay."
   (interactive nil quarry-grep-mode)
-  (unless quarry-grep--call
+  (unless (and (quarry-grep--running-p) quarry-grep--call)
     (user-error "No search is running"))
   ;; Its `:on-end' runs at once and shows the cancellation.
   (emrs-cancel quarry-grep--call))
@@ -1235,10 +1245,14 @@ The prompt says REGEXP or literal.  An empty pattern is a `user-error'."
                 (quarry-grep--filter-pattern filter)
                 'quarry-grep-pattern-history)))
 
+(defun quarry-grep--filter-at-point-p ()
+  "Return the filter of the line at point, or nil.  Does not signal."
+  (get-text-property (pos-bol) 'quarry-grep-filter))
+
 (defun quarry-grep--filter-at-point ()
   "Return the filter of the line at point or signal a `user-error'."
   (quarry-grep--current)
-  (or (get-text-property (pos-bol) 'quarry-grep-filter)
+  (or (quarry-grep--filter-at-point-p)
       (user-error "No filter at point")))
 
 (defun quarry-grep-edit-filter ()
@@ -1516,18 +1530,30 @@ See `quarry-grep-exclude-path' for what the path is."
   (interactive nil quarry-grep-mode)
   (quarry-grep-include-line t))
 
+(defun quarry-grep--file-at-point-p ()
+  "Return the path of the file block at point, or nil.  Does not signal."
+  (get-text-property (pos-bol) 'quarry-grep-file))
+
 (defun quarry-grep--file-at-point ()
   "Return the path of the file block at point or signal a `user-error'."
   (quarry-grep--current)
-  (or (get-text-property (pos-bol) 'quarry-grep-file)
+  (or (quarry-grep--file-at-point-p)
       (user-error "No file at point")))
+
+(defun quarry-grep--directory-at-point-p ()
+  "Return the directory of the file at point, or nil.
+That is the directory relative to the search directory.  There is none
+without a file at point and for a file in the search directory itself.
+Does not signal."
+  (when-let* ((path (quarry-grep--file-at-point-p)))
+    (file-name-directory path)))
 
 (defun quarry-grep--directory-at-point ()
   "Return the directory of the file at point as a path filter pattern.
 That is a slash, the directory relative to the search directory, and a
 slash.  Signal a `user-error' for a file in the search directory itself."
   (let ((path (quarry-grep--file-at-point)))
-    (concat "/" (or (file-name-directory path)
+    (concat "/" (or (quarry-grep--directory-at-point-p)
                     (user-error "%s is in the search directory itself" path)))))
 
 (defun quarry-grep--regexp-quote (string)
@@ -1594,13 +1620,22 @@ A filter that is off stays in the list and is not applied."
     (setf (quarry-grep--filter-exclude new) (not (quarry-grep--filter-exclude filter)))
     (quarry-grep--replace-filter-checked filter new)))
 
+(defun quarry-grep--other-filters-p ()
+  "Return non-nil when the search has a primary filter and other filters.
+That is when `quarry-grep-remove-other-filters' has something to remove.
+Does not signal."
+  (and quarry-grep--current
+       (quarry-grep--primary quarry-grep--current)
+       (cdr (quarry-grep--search-filters quarry-grep--current))
+       t))
+
 (defun quarry-grep-remove-other-filters ()
   "Remove all filters except the primary one, also those switched off."
   (interactive nil quarry-grep-mode)
   (let* ((search (quarry-grep--current))
          (primary (or (quarry-grep--primary search)
                       (user-error "The search has no primary filter"))))
-    (unless (cdr (quarry-grep--search-filters search))
+    (unless (quarry-grep--other-filters-p)
       (user-error "The search has no other filters"))
     (quarry-grep--set-filters (list primary))))
 
@@ -1790,6 +1825,23 @@ as unchanged."
             (push path stale)))))
     (nreverse stale)))
 
+(defun quarry-grep--has-results-p ()
+  "Return non-nil when the buffer has result lines.  Does not signal."
+  (not (zerop quarry-grep--lines)))
+
+(defun quarry-grep--wgrep-available-p ()
+  "Return non-nil when wgrep is loaded or can be loaded.
+Does not load it and does not signal."
+  (and (or (featurep 'wgrep) (locate-library "wgrep")) t))
+
+(defun quarry-grep--editable-p ()
+  "Return non-nil when `quarry-grep-edit' can start.
+That is when no search is running, there are results and wgrep is
+installed.  Does not signal."
+  (and (not (quarry-grep--running-p))
+       (quarry-grep--has-results-p)
+       (quarry-grep--wgrep-available-p)))
+
 (defun quarry-grep-edit ()
   "Edit the results with wgrep.
 In wgrep's edit mode the text of the result lines can be changed;
@@ -1800,9 +1852,9 @@ search, ask whether to search again first; after that search, run this
 command again.  Needs the package wgrep."
   (interactive nil quarry-grep-mode)
   (quarry-grep--current)
-  (when (eq quarry-grep--state 'running)
+  (when (quarry-grep--running-p)
     (user-error "A search is running; wait for it or cancel it with C-c C-k"))
-  (when (zerop quarry-grep--lines)
+  (unless (quarry-grep--has-results-p)
     (user-error "There are no results to edit"))
   (unless (require 'wgrep nil t)
     (user-error "Editing the results needs the package wgrep; install it and try again"))
@@ -1833,11 +1885,21 @@ command again.  Needs the package wgrep."
 
 ;;;; History
 
+(defun quarry-grep--earlier-search-p ()
+  "Return non-nil when the history has a search before the current one.
+Does not signal."
+  (and quarry-grep--past t))
+
+(defun quarry-grep--later-search-p ()
+  "Return non-nil when the history has a search after the current one.
+Does not signal."
+  (and quarry-grep--future t))
+
 (defun quarry-grep-history-back ()
   "Run the search that preceded the current one in this buffer."
   (interactive nil quarry-grep-mode)
   (quarry-grep--current)
-  (unless quarry-grep--past
+  (unless (quarry-grep--earlier-search-p)
     (user-error "No earlier search"))
   (quarry-grep--run (car quarry-grep--past) 'back))
 
@@ -1845,11 +1907,13 @@ command again.  Needs the package wgrep."
   "Run the search that `quarry-grep-history-back' went back from."
   (interactive nil quarry-grep-mode)
   (quarry-grep--current)
-  (unless quarry-grep--future
+  (unless (quarry-grep--later-search-p)
     (user-error "No later search"))
   (quarry-grep--run (car quarry-grep--future) 'forward))
 
 ;;;; Header line
+
+(autoload 'quarry-grep-menu "quarry-grep-menu" nil t)
 
 (defvar quarry-grep--header-maps nil
   "Alist from a command to the keymap that runs it on a header line click.")
@@ -1884,8 +1948,27 @@ a mode line format again."
                           'keymap (quarry-grep--header-map command))
             (propertize value 'face 'quarry-grep-header-value))))
 
+(defun quarry-grep--context-text (search)
+  "Return the lines of context of SEARCH as shown to the user.
+That is the count when both sides are equal, else \"BEFORE/AFTER\"."
+  (let ((before (quarry-grep--search-before search))
+        (after (quarry-grep--search-after search)))
+    (if (= before after)
+        (number-to-string before)
+      (format "%d/%d" before after))))
+
+(defun quarry-grep--header-hint ()
+  "Return the part of the header line that names the key of the menu.
+A click on it runs `quarry-grep-menu'."
+  (propertize (concat (propertize "?" 'face 'quarry-grep-header-value) " menu")
+              'mouse-face 'header-line-highlight
+              'help-echo "mouse-1: show all keys (?)"
+              'keymap (quarry-grep--header-map #'quarry-grep-menu)))
+
 (defun quarry-grep--header ()
-  "Return the header line of the result buffer."
+  "Return the header line of the result buffer.
+It ends with the hint for the menu, except while the results are
+being edited: `?' is text then."
   (let ((search quarry-grep--current))
     (if (null search)
         ""
@@ -1893,38 +1976,39 @@ a mode line format again."
        " "
        (mapconcat
         #'identity
-        (list
-         (quarry-grep--header-part
-          "files" (quarry-grep--files-text (quarry-grep--search-files search))
-          #'quarry-grep-change-files "change the file type (f)")
-         (quarry-grep--header-part
-          "dir" (abbreviate-file-name (quarry-grep--search-dir search))
-          #'quarry-grep-change-directory "change the directory (d)")
-         (quarry-grep--header-part
-          "case" (symbol-name (quarry-grep--search-case search))
-          #'quarry-grep-cycle-case "cycle smart, sensitive, insensitive (c)")
-         (quarry-grep--header-part
-          "ign" (if (quarry-grep--search-no-ignore search) "off" "on")
-          #'quarry-grep-toggle-ignore "switch ignore files on or off (i)")
-         (quarry-grep--header-part
-          "hidden" (if (quarry-grep--search-hidden search) "on" "off")
-          #'quarry-grep-toggle-hidden "switch hidden files on or off (H)")
-         (quarry-grep--header-part
-          "ctx" (let ((before (quarry-grep--search-before search))
-                      (after (quarry-grep--search-after search)))
-                  (if (= before after)
-                      (number-to-string before)
-                    (format "%d/%d" before after)))
-          #'quarry-grep-set-context "set the lines of context (C, B, A)")
-         (quarry-grep--header-part
-          "hits" (format "%d in %s" quarry-grep--lines
-                         (quarry-grep--plural quarry-grep--files "file"))))
-        "   ")))))
+        (delq
+         nil
+         (list
+          (quarry-grep--header-part
+           "files" (quarry-grep--files-text (quarry-grep--search-files search))
+           #'quarry-grep-change-files "change the file type (f)")
+          (quarry-grep--header-part
+           "dir" (abbreviate-file-name (quarry-grep--search-dir search))
+           #'quarry-grep-change-directory "change the directory (d)")
+          (quarry-grep--header-part
+           "case" (symbol-name (quarry-grep--search-case search))
+           #'quarry-grep-cycle-case "cycle smart, sensitive, insensitive (c)")
+          (quarry-grep--header-part
+           "ign" (if (quarry-grep--search-no-ignore search) "off" "on")
+           #'quarry-grep-toggle-ignore "switch ignore files on or off (i)")
+          (quarry-grep--header-part
+           "hidden" (if (quarry-grep--search-hidden search) "on" "off")
+           #'quarry-grep-toggle-hidden "switch hidden files on or off (H)")
+          (quarry-grep--header-part
+           "ctx" (quarry-grep--context-text search)
+           #'quarry-grep-set-context "set the lines of context (C, B, A)")
+          (quarry-grep--header-part
+           "hits" (format "%d in %s" quarry-grep--lines
+                          (quarry-grep--plural quarry-grep--files "file")))
+          (unless quarry-grep--editing
+            (quarry-grep--header-hint))))
+          "   ")))))
 
 ;;;; Mode
 
 (defvar-keymap quarry-grep-mode-map
   :doc "Keymap of `quarry-grep-mode'."
+  "?" #'quarry-grep-menu
   "RET" #'quarry-grep-visit
   ;; A click with mouse-1 on a line arrives as mouse-2: the lines have
   ;; the `follow-link' property.
@@ -1995,6 +2079,7 @@ here and goes on in the original."
 The buffer shows the filters of the search, one block per file with the
 matching lines, and a status line.  The header line shows the file
 type, the directory and the switches; its parts can be clicked.
+\\`?' shows a menu of all keys; \\`h' shows this help.
 
 \\{quarry-grep-mode-map}"
   :interactive nil

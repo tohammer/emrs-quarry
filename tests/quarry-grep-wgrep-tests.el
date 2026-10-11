@@ -96,6 +96,21 @@ The line of long.txt is cut and the one of bytes.txt is not valid UTF-8.")
     (should (get-text-property (car block) 'quarry-grep-heading))
     (should (get-text-property (cdr block) 'quarry-grep-separator))))
 
+(ert-deftest quarry-test-grep-wgrep-menu-and-hint ()
+  "The menu enters edit mode with e; the hint and the menu are gone while editing."
+  (skip-unless (quarry-test-grep-wgrep--p))
+  (quarry-test-grep-wgrep--with-results dir
+    (should (string-suffix-p "   ? menu" (quarry-test-grep--header)))
+    (execute-kbd-macro (kbd "? e"))
+    (should (eq (current-local-map) wgrep-mode-map))
+    (should-not transient-current-command)
+    (should-not (string-search "? menu" (quarry-test-grep--header)))
+    (should (string-prefix-p " files: " (quarry-test-grep--header)))
+    (should-error (quarry-grep-menu) :type 'user-error)
+    (execute-kbd-macro (kbd "C-c C-k"))
+    (quarry-test-grep-wgrep--working)
+    (should (string-suffix-p "   ? menu" (quarry-test-grep--header)))))
+
 ;;;; Without wgrep
 
 (ert-deftest quarry-test-grep-wgrep-refusals ()

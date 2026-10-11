@@ -7,11 +7,15 @@ architecture.md or an ADR.
 
 - Rebuild the module (`M-x quarry-build-module`) and restart Emacs:
   context lines need the new module, an older one shows none.
+- Development mode: `lisp/quarry-grep-menu.el` is a new file, so remove
+  the package's build directory and run `doom sync` before the restart
+  (see below); without that `?` cannot find the menu.
 - Use quarry-grep daily and do its manual checks (grep backlog, "Manual
-  checks not done yet"), now including context lines (`C`, `B`, `A`).
-- Next grep feature: pick from the grep backlog once the keys have been
-  used for a while; the menu to make them discoverable is the nearest
-  candidate.
+  checks not done yet"), now including context lines (`C`, `B`, `A`) and
+  the menu (`?`).
+- Next grep feature: pick from the grep backlog ("Further features
+  weighed before the spec"; regexp replace with preview is named there
+  as the strongest candidate).
 
 ## Watch out for
 
@@ -32,6 +36,10 @@ architecture.md or an ADR.
   new file in `lisp/` needs the package's build directory removed and
   then a `doom sync`, before Emacs is restarted. The module is loaded
   from `lisp/quarry-module.so` in the checkout.
+- The test that compares the menu with the mode map reads an internal of
+  transient (`transient--layout`). After a transient or Emacs upgrade,
+  rerun `tests/run-ert.sh`; a failure of
+  `quarry-test-grep-menu-matches-keymap` alone points at that reader.
 - quarry-grep uses wgrep internals (ADR 0013). After a wgrep upgrade,
   rerun `tests/run-ert.sh` with wgrep on `QUARRY_TEST_LOAD_PATH`.
 - The consult front end uses consult internals (`consult--async-pipeline`

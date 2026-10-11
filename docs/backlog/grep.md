@@ -30,9 +30,13 @@ search for a common word in a tree of 20,000 files compared by feel with
 `M-x rg`, and a search that reaches the line cap. Emacs 30 was not run
 at all. From the context lines spec (2026-10-11): the context face and
 the gap line in the author's theme, in a GUI frame and in a terminal,
-and `2 C` on a result of a few hundred hits by feel. Origin: grep spec,
-Testing section, and its review (2026-10-10); context lines spec,
-Testing section. Do these once quarry-grep is in daily use; turn what
+and `2 C` on a result of a few hundred hits by feel. From the keys menu
+spec (2026-10-11): the menu (`?`) in the author's Doom setup (evil,
+theme, GUI frame), and on Emacs 30.1 with its own transient 0.7.2, where
+only the tests of the menu were run against that transient's source
+loaded into Emacs 31.1. Origin: grep spec,
+Testing section, and its review (2026-10-10); context lines and keys
+menu specs, Testing sections. Do these once quarry-grep is in daily use; turn what
 fails into backlog items or fixes.
 
 ## wgrep on other line ends and encodings, and on huge results
@@ -55,22 +59,6 @@ the line cap before the NUL byte is read, those lines are delivered.
 Origin: task 4 of the grep spec (2026-10-10); accepted because the
 search has stopped at that point anyway. Revisit if binary lines show up
 in capped results.
-
-## A menu to make the keys discoverable
-
-Check whether the result buffer should get a transient menu, or
-something like it, that shows the available commands. The buffer has
-some forty keys, several behind the `-` and `+` prefixes and several
-that only work on a filter line; nothing in the buffer shows them. rg.el
-has such a menu (`rg-menu`, on `m`), built on transient. To weigh: a
-transient menu (a dependency, though transient ships with Emacs since
-28) against lighter means such as `which-key` descriptions for the
-prefix maps, a menu-bar and context menu, or a short key summary in the
-buffer or on `?`; whether the menu only lists commands or also holds the
-toggles (case, ignore files, hidden) as switches; and how it shows the
-commands that depend on point. Origin: requested by the author on
-2026-10-10, after the first use of quarry-grep. Revisit together with
-the manual checks, when the keys have been used for a while.
 
 ## A colour of its own for each additional include line filter
 

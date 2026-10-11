@@ -370,7 +370,7 @@ clone the buffer (`M-x clone-buffer`); the clone is a result buffer of
 its own, with its own searches and history.
 
 ```text
- files: rust   dir: ~/src/emacs-quarry/   case: smart   ign: on   hidden: on   ctx: 0   hits: 3 in 2 files
+ files: rust   dir: ~/src/emacs-quarry/   case: smart   ign: on   hidden: on   ctx: 0   hits: 3 in 2 files   ? menu
 + line/re  fn \w+
 + line     walk
 - line/re  ^\s*//
@@ -390,8 +390,11 @@ Search finished: 3 lines in 2 files, 61 ms
 - The header line shows the file type, the directory, the case rule,
   whether ignore files are used and hidden files searched, the lines of
   context (`ctx: 2`, or `ctx: 1/3` for 1 before and 3 after; see
-  "Context lines"), and the number of hits and files found so far. A
-  click with `mouse-1` on a part runs the command of its key below.
+  "Context lines"), and the number of hits and files found so far. It
+  ends with the hint `? menu`. A click with `mouse-1` on a part runs the
+  command of its key below; a click on the hint opens the menu (`?`).
+  The hint is not shown while the results are edited, since `?` is text
+  then.
 - The filter block has one line per filter, in the order they were added
   (see "Filters"). The first line is the pattern the command asked for.
 - Each file has a heading with the number of its hits, and one line per
@@ -436,7 +439,19 @@ rest follows in the order it is found.
 | `C-c <`, `C-c >` | Go back or forward in the buffer's search history |
 | `C-c C-k` | Cancel the running search |
 | `e` | Edit the results with wgrep (see "Editing results") |
+| `?` | Show a menu of all these keys with the current value of each switch (see below) |
+| `h`, `C-h m` | Show the help of the mode |
 | `q` | Quit the window |
+
+`?` opens `quarry-grep-menu`, a transient that lists all the keys above
+under their own keys, with the current value of each switch (`case:
+smart`, `context: 1/3`, ...). A key in the menu runs the command it has
+in the buffer and closes the menu; entries that do not apply at point
+or in the state of the search, such as `k` on a result line, are shown
+inactive. A numeric prefix argument typed before `?`, or `C-u` in the
+menu, goes to the command: `C-u 3 ? C` shows 3 lines of context. The
+menu needs the transient that ships with Emacs 30.1; it is loaded when
+`?` is first used. `C-g` closes the menu.
 
 `next-error` and `previous-error` (`M-g n`, `M-g p`) walk the results from
 any buffer, also through folded files. Every search that differs from the

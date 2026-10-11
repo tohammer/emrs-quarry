@@ -297,7 +297,9 @@ form returns as a mode line format again, so `quarry-grep--header-part`
 doubles each `%` in a value; otherwise a directory `100%b` would show the
 buffer name in its place. Each clickable part carries a keymap from
 `quarry-grep--header-map` that selects the clicked window and calls the
-part's command interactively, on `mouse-1` and on `mouse-2`.
+part's command interactively, on `mouse-1` and on `mouse-2`. The last
+part is the hint `? menu` (`quarry-grep--header-hint`), whose click opens
+the menu; it is left out while the results are edited, when `?` is text.
 
 A new search erases the buffer; where point goes is described under
 "Point after a search".
@@ -421,6 +423,40 @@ list and moves the current search to the other one. All of this happens
 in `quarry-grep--run` after the instance is there, so a search that
 cannot start (module missing) leaves both lists as they were. The history
 belongs to the buffer and survives a new command that reuses it.
+
+### The menu
+
+`quarry-grep-menu` (`lisp/quarry-grep-menu.el`), on `?`, is a transient
+that lists the keys of the mode map (ADR 0016). The rule: an entry is an
+existing command under the key it has in the buffer, and the menu closes
+when it runs; the menu holds no state and offers no other way to change
+a search. `quarry-grep.el` only autoloads the command, so transient is
+loaded on the first `?`.
+
+- A switch's description is a function that reads `quarry-grep--current`.
+  Transient calls descriptions and predicates with the buffer current
+  from which the menu was opened, so they see the result buffer and its
+  point.
+- An entry that does not apply is inactive (`:inapt-if-not`). The
+  predicates live in `quarry-grep.el` and end in `-p`
+  (`quarry-grep--filter-at-point-p`, `quarry-grep--editable-p`, ...);
+  they do not signal, and the commands use the same functions for their
+  `user-error` checks, so the menu and the commands cannot disagree.
+  `quarry-grep--wgrep-available-p` asks with `featurep` and
+  `locate-library` and does not load wgrep.
+- Transient passes on a prefix argument typed inside the menu, not one
+  typed before the prefix command. `quarry-grep-menu` therefore sets
+  `prefix-arg` from `current-prefix-arg` after `transient-setup`. With
+  such an argument the first `C-g` clears the argument and the second
+  closes the menu.
+- `quarry-test-grep-menu-matches-keymap` compares the menu with the mode
+  map: every key bound to a `quarry-grep-` command, except `?`, `M-N`,
+  `M-P` and the mouse binding, must have an entry with that command, and
+  the menu must have no other entry. It reads the layout from the symbol
+  property `transient--layout`, an internal of transient whose shape
+  differs between 0.7.2 and 0.13; the test handles both and is the place
+  to fix after a transient change.
+- Only what transient 0.7.2 has (Emacs 30.1) is used.
 
 ### Editing with wgrep
 
