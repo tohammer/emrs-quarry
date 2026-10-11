@@ -79,7 +79,8 @@ so other processes' filters and timers can run inside `project-files`.
 `emrs-call-sync` waits on the module pipe only, but that pipe is private
 to emrs. Origin: v1 review (Elisp), 2026-10-09; deferred because it needs
 a public helper in emrs (a synchronous stream collect, or access to the
-pipe). Revisit with the next emrs change.
+pipe). The emrs pinned on 2026-10-11 (`b824f9f`) still has none. Revisit
+when emrs gets one.
 
 ## Symlinked project roots get separate instances
 

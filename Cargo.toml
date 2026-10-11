@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # Pinned to a commit; bump deliberately (docs/next-steps.md).
-emrs = { git = "https://github.com/tohammer/emrs.git", rev = "9c47609f5c3273ed0cf1713824da6a5bc6e9d61e" }
+emrs = { git = "https://github.com/tohammer/emrs.git", rev = "b824f9fe402a5ce6e43ef2bb588f710b43388467" }
 serde = { version = "1", features = ["derive"] }
 ignore = "0.4"
 nucleo-matcher = { git = "https://github.com/helix-editor/nucleo.git", rev = "8c16d47cdfa9607d3e44df5f81c635c6f43c65ee" }

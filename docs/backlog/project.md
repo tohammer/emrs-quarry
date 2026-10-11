@@ -29,16 +29,3 @@ grep tests (`quarry-test-grep-*`) are named to sort after it; a new test
 file must follow the same rule. Origin: task 2 of the consult spec
 (2026-10-09); extended by the grep spec (2026-10-10). Fix the test to
 accept both messages when the naming rule first gets in the way.
-
-## Repin emrs
-
-`Cargo.toml` pins emrs to commit `9c47609`. Move the pin to the current
-head of emrs's default branch: only commits on that branch may be
-pinned, since users get `emrs.el` from it and it must not be older than
-the module's protocol (ADR 0007). After the bump run `cargo test` and
-`tests/run-ert.sh`, which picks up the matching `emrs.el`, and rebuild
-the module. Check on the way whether the new emrs brings what two other
-items wait for: a public way to wait on a stream synchronously (file
-finder backlog), and whether `emrs::testing::Host` can exercise the Lisp
-conversion (architecture, lessons). Origin: requested by the author on
-2026-10-11, during the context lines work.
