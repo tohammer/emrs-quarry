@@ -26,8 +26,8 @@ architecture.md or an ADR.
   "Development"): Elisp edits need no `doom sync`, only `eval-buffer` or a
   restart; Rust changes need `M-x quarry-build-module` and a restart; a
   new file in `lisp/` needs the package's build directory removed and
-  then a `doom sync`, before Emacs is restarted (README "Development"). The module is loaded from
-  `lisp/quarry-module.so` in the checkout.
+  then a `doom sync`, before Emacs is restarted. The module is loaded
+  from `lisp/quarry-module.so` in the checkout.
 - quarry-grep uses wgrep internals (ADR 0013). After a wgrep upgrade,
   rerun `tests/run-ert.sh` with wgrep on `QUARRY_TEST_LOAD_PATH`.
 - The consult front end uses consult internals (`consult--async-pipeline`
