@@ -370,7 +370,7 @@ clone the buffer (`M-x clone-buffer`); the clone is a result buffer of
 its own, with its own searches and history.
 
 ```text
- files: rust   dir: ~/src/emacs-quarry/   case: smart   ign: on   hidden: on   hits: 3 in 2 files
+ files: rust   dir: ~/src/emacs-quarry/   case: smart   ign: on   hidden: on   ctx: 0   hits: 3 in 2 files
 + line/re  fn \w+
 + line     walk
 - line/re  ^\s*//
@@ -388,14 +388,16 @@ Search finished: 3 lines in 2 files, 61 ms
 ```
 
 - The header line shows the file type, the directory, the case rule,
-  whether ignore files are used and hidden files searched, and the number
-  of lines and files found so far. A click with `mouse-1` on a part runs
-  the command of its key below.
+  whether ignore files are used and hidden files searched, the lines of
+  context (`ctx: 2`, or `ctx: 1/3` for 1 before and 3 after; see
+  "Context lines"), and the number of hits and files found so far. A
+  click with `mouse-1` on a part runs the command of its key below.
 - The filter block has one line per filter, in the order they were added
   (see "Filters"). The first line is the pattern the command asked for.
-- Each file has a heading with the number of its lines, and one line per
-  match with the line number and the text, with the matches highlighted
-  (see "Highlighting").
+- Each file has a heading with the number of its hits, and one line per
+  hit with the line number and the text, with the matches highlighted
+  (see "Highlighting"). With context switched on, the lines around each
+  hit are shown too (see "Context lines").
 - The last line says `Searching…` while results arrive, then how many
   lines were found in how many files and how long it took. It also names
   a search that stopped at the line cap, files that could not be read, a
@@ -413,7 +415,7 @@ rest follows in the order it is found.
 
 | Key | Action |
 |---|---|
-| `RET`, `mouse-1`, `mouse-2` | On a result line or its number: visit the file at that line, at the column of the first match of the primary filter. On a file heading: visit the file. On a filter line: edit its pattern in the minibuffer |
+| `RET`, `mouse-1`, `mouse-2` | On a result line or its number: visit the file at that line, at the column of the first match of the primary filter. On a context line: visit that line, at its first column. On a file heading: visit the file. On a filter line: edit its pattern in the minibuffer |
 | `n`, `p` | Show the next or previous match in another window without selecting it |
 | `}`, `{`, `M-N`, `M-P` | Move to the next or previous file heading |
 | `TAB` | Fold or unfold the file at point |
@@ -422,6 +424,7 @@ rest follows in the order it is found.
 | `r`, `t` | Edit the primary filter, as a regexp or as a literal |
 | `d`, `f` | Change the directory; the file type |
 | `c` | Cycle the case rule: smart, sensitive, insensitive |
+| `C`, `B`, `A` | Set the lines of context shown around each hit: both counts, the count before, the count after (see "Context lines") |
 | `i`, `H` | Switch ignore files on or off; hidden files |
 | `- p`, `+ p` | Add a path filter, excluding or including, with a literal as pattern |
 | `- l`, `+ l` | Add a line filter, excluding or including, with a literal as pattern |
@@ -521,6 +524,7 @@ and another `+ line` filter is on, that one becomes the primary filter.
 | `quarry-grep-match` (inherits `match`) | The matches of the primary filter in a result line |
 | `quarry-grep-match-secondary` (inherits `lazy-highlight`) | The matches of the other `+ line` filters, where they lie outside the primary matches |
 | `quarry-grep-path-match` (inherits `highlight`) | The parts of a file heading's path that `+ path` filters matched |
+| `quarry-grep-context` (inherits `shadow`) | The text of a context line, and the gap line between groups of lines |
 
 In the filter block each `+` filter that is on shows its pattern in the
 face of its matches, so you can see which colour belongs to which filter.
@@ -528,6 +532,61 @@ face of its matches, so you can see which colour belongs to which filter.
 `quarry-grep-highlight-include-filters` and
 `quarry-grep-highlight-path-filters` switch the second and the third face
 off; the primary matches are always highlighted.
+
+### Context lines
+
+`C`, `B` and `A` show the lines around each hit, as `-C`, `-B` and `-A`
+do in grep and rg: `C` sets the number of lines before and after, `B`
+only the number before, `A` only the number after. `B` and `A` leave
+the other side as it is: after `2 C`, `3 B` shows three lines before and
+two after, and the header line reads `ctx: 3/2`; `C` sets
+both sides again. A numeric prefix is
+the number and nothing is asked: `2 C` shows two lines before and after
+every hit. Without a prefix the number is read in the minibuffer; its
+default is the current count, for `C` the larger of the two. `0 C` gives
+the result buffer without context. A negative number is refused and
+changes nothing. Each is a new search and, when a count changed, an entry
+in the history.
+
+```text
+File: src/walk.rs (2)
+  167 /// Walks the tree.
+  168 #[inline]
+  169 pub fn walk(dir: &Path) {
+  170     let mut out = vec![];
+    ⋮
+  201     // second pass
+  202     walk(&sub);
+  203 }
+```
+
+- A context line has a line number like a hit and its text in the face
+  `quarry-grep-context`. `RET` or a click on it visits that line of the
+  file. Context lines are not highlighted.
+- Where two groups of lines do not touch, a gap line with `⋮` stands
+  between them. A search without context has no gap lines. A gap line
+  belongs to its file: it is folded with the file, and the commands that
+  read the file at point (`- f`, `- d`, `+ d`, `TAB`, `{`, `}`) work on
+  it.
+- Counts and `n`, `p` and `next-error` concern hits only: the number in
+  a file heading, `hits` in the header line and the status line do not
+  count context lines, and `n` and `p` go from hit to hit.
+- A line that a `- line` filter removed can appear as context next to a
+  hit. Line filters apply to hits, not to context lines.
+- `quarry-grep-max-lines` counts hits, so a result with context can be
+  several times as large as the same result without. The search stops at
+  the hit that fills the cap, so the last hit of a file can then come
+  with its lines before it and without its lines after it.
+- A new search starts with the counts of `quarry-grep-context-before` and
+  `quarry-grep-context-after`; the commands of the result buffer keep
+  the counts of the search they change.
+- At most 1000 lines per side. A larger count, typed, as a prefix or in
+  an option, is reduced to 1000 and the echo area says so.
+
+After updating quarry, rebuild the module (`M-x quarry-build-module`) and
+restart Emacs. A module loaded from before this change ignores the
+counts: the search works and shows no context lines, only gap lines
+between the hits.
 
 ### Editing results
 
@@ -547,6 +606,8 @@ in it.
   have wgrep save on commit.
 - Only the text of result lines can be changed. The filter block, file
   headings, line numbers and the status line are read-only.
+- Context lines can be edited like hits. The gap line (`⋮`) that stands
+  where lines are left out cannot.
 - A line that is shown cut (longer than `quarry-grep-max-columns`) or
   that holds bytes that are not valid UTF-8 is read-only too: what the
   buffer shows is not the file's line, so writing it back would damage
@@ -572,7 +633,9 @@ Customize group `quarry-grep`. They apply to the next search.
 | Option | Default | Meaning |
 |---|---|---|
 | `quarry-grep-case` | `smart` | Case rule a new search starts with: `smart`, `sensitive` or `insensitive`. |
-| `quarry-grep-max-lines` | `50000` | The search stops when this many lines are found, and the last line says so. |
+| `quarry-grep-context-before` | `0` | Lines shown before each hit that a new search starts with, at most 1000. |
+| `quarry-grep-context-after` | `0` | Lines shown after each hit that a new search starts with, at most 1000. |
+| `quarry-grep-max-lines` | `50000` | The search stops when this many hits are found, and the last line says so. |
 | `quarry-grep-max-columns` | `500` | Longer lines are shown cut after this many characters. |
 | `quarry-grep-buffer-name` | `*quarry-grep*` | Name of the result buffer. |
 | `quarry-grep-highlight-include-filters` | `t` | Highlight the matches of the `+ line` filters other than the primary one. |
@@ -582,7 +645,8 @@ Customize group `quarry-grep`. They apply to the next search.
 
 Faces: `quarry-grep-match`, `quarry-grep-match-secondary`,
 `quarry-grep-path-match`, `quarry-grep-file-heading`,
-`quarry-grep-line-number`, `quarry-grep-filter-include`,
+`quarry-grep-line-number`, `quarry-grep-context`,
+`quarry-grep-filter-include`,
 `quarry-grep-filter-exclude`, `quarry-grep-filter-kind`,
 `quarry-grep-filter-pattern`, `quarry-grep-filter-disabled`,
 `quarry-grep-status`, `quarry-grep-error` and `quarry-grep-header-value`.
@@ -596,7 +660,7 @@ Faces: `quarry-grep-match`, `quarry-grep-match-secondary`,
   not apply; a group is `(...)`, not `\(...\)`.
 - In line filters `\A`, `\z` and `(?-m)` are not supported: a pattern is
   matched line by line, so use `^` and `$`.
-- Matches are single lines; there are no context lines.
+- Matches are single lines; a pattern cannot match across a line end.
 - In files with `\r\n` line ends the `\r` is not part of the line: it is
   not shown, and `$` matches before it. Files are read as UTF-8; a
   UTF-16 file is searched when it starts with a byte order mark.
@@ -604,7 +668,7 @@ Faces: `quarry-grep-match`, `quarry-grep-match-secondary`,
   so a file is found once, under its real path. Version control
   directories (`.git`, `.hg`, `.svn`, `.jj`) are never searched, and files
   with a NUL byte are skipped as binary.
-- The search stops at `quarry-grep-max-lines` lines; narrow the search
+- The search stops at `quarry-grep-max-lines` hits; narrow the search
   or raise the option to see more.
 - `~/.ripgreprc`, PCRE2 and compressed files are not supported.
 - The result buffer is not a `compilation-mode` buffer

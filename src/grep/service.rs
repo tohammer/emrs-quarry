@@ -24,9 +24,17 @@
 //! | `:no-ignore` | non-nil: `.gitignore`, `.ignore` and the git exclude files are not applied | nil |
 //! | `:hidden` | search hidden files; say `:hidden nil` to leave out every file and directory whose name starts with a dot, whatever the file type or globs | t |
 //! | `:ignores` | list of strings: extra gitignore lines relative to `:dir` | nil |
-//! | `:max-lines` | integer: the search stops when this many lines are collected | 50000 |
+//! | `:max-lines` | integer: the search stops when this many kept lines are collected | 50000 |
 //! | `:max-columns` | integer: longer lines are cut after this many characters | 500 |
+//! | `:before` | integer ≥ 0: lines sent before each kept line as context lines, at most 1000 | 0 |
+//! | `:after` | integer ≥ 0: lines sent after each kept line as context lines, at most 1000 | 0 |
 //! | `:sort-budget-ms` | integer: how long results are collected to be sent sorted | 150 |
+//!
+//! A *kept line* is a line that the primary filter (the first include line filter) matched and the other line
+//! filters kept. A *context line* is a line of the same file that is not kept and lies at most `:before` lines
+//! before or at most `:after` lines after a kept line (ADR 0014). Line filters are not applied to context lines,
+//! so a line that an exclude line filter dropped can be one. Larger values of `:before` and `:after` are taken
+//! as 1000, without an error.
 //!
 //! The request is checked before anything is searched, and a request that fails a check fails the call (an
 //! `emrs-error` of kind `service`; for `emrs-call-stream`, `on-end` with status `failed`). The messages:
@@ -50,7 +58,8 @@
 //!
 //! ```elisp
 //! (:file :path "src/walk.rs" :path-spans ((4 8)) :mtime 1760103296123
-//!        :lines ((:n 169 :text "pub fn walk(" :spans ((4 11)) :secondary ((0 3)) :inexact nil)
+//!        :lines ((:n 168 :text "#[inline]" :spans nil :secondary nil :inexact nil :context t)
+//!                (:n 169 :text "pub fn walk(" :spans ((4 11)) :secondary ((0 3)) :inexact nil)
 //!                ...))
 //! ```
 //!
@@ -58,7 +67,12 @@
 //!   filters, sorted and merged; nil without such filters.
 //! - `:mtime` is the file's modification time in milliseconds since the Unix epoch, rounded down, as an integer
 //!   (nil if the file system did not tell). It is read when the file is opened, before its content.
-//! - `:lines` are in ascending line number. `:n` counts from 1. `:text` is the line without `\n` or `\r\n`.
+//! - `:lines` are the kept lines and their context lines, in ascending line number, each line once. `:n` counts
+//!   from 1. `:text` is the line without `\n` or `\r\n`. Gaps are not marked: two neighbours whose `:n` differ
+//!   by more than 1 have lines between them that were not sent.
+//! - `:context` is t on a context line; a kept line has no `:context`. A context line has `:n`, `:text` and
+//!   `:inexact` with the meaning they have for a kept line, and `:spans` and `:secondary` nil. Without `:before`
+//!   and `:after` there are no context lines.
 //! - `:spans` are the matches of the primary filter (the first include line filter), `:secondary` those of the
 //!   other include line filters where they lie outside the primary matches. Both are lists of `(START END)`,
 //!   character offsets into `:text` counted from 0, `END` exclusive, ascending and not overlapping; nil when
@@ -75,8 +89,10 @@
 //! ```
 //!
 //! - `:files-searched`: files opened and read (binary files included, they give no lines). `:files-matched`:
-//!   the number of file items. `:lines`: the lines in them, never more than `:max-lines`.
-//! - `:truncated`: `:lines` reached `:max-lines` and the search stopped there.
+//!   the number of file items. `:lines`: the kept lines in them, never more than `:max-lines`; context lines
+//!   are not counted, here or for `:max-lines`.
+//! - `:truncated`: `:lines` reached `:max-lines` and the search stopped there. The kept line that filled the cap
+//!   has its context lines before it; those after it may be missing.
 //! - `:sorted`: every file item came in order of its path (byte order). That is so when the search ended within
 //!   `:sort-budget-ms`. Otherwise the items found until then are sent sorted and the rest as they are found.
 //! - `:millis`: from the arrival of the request to the summary. `:skipped`: files that could not be opened or
@@ -97,6 +113,11 @@ use std::time::{Duration, Instant};
 
 /// Capacity of the `(:search)` stream, in items (files).
 const STREAM_CAPACITY: usize = 256;
+
+/// The most context lines per side that a search uses. The searcher keeps the last `before` lines of every file
+/// in its buffer, with or without a match, so a huge `:before` would buffer whole files, per thread. Larger
+/// `:before` and `:after` are clamped to this, not refused.
+const MAX_CONTEXT: usize = 1000;
 
 /// The name of the type built from `:globs`.
 const GLOB_TYPE: &str = "globs";
@@ -141,6 +162,10 @@ pub enum Request {
         max_lines: usize,
         #[serde(default = "default_max_columns")]
         max_columns: usize,
+        #[serde(default)]
+        before: usize,
+        #[serde(default)]
+        after: usize,
         #[serde(default = "default_sort_budget_ms")]
         sort_budget_ms: u64,
     },
@@ -267,6 +292,8 @@ impl Service for GrepService {
                 ignores,
                 max_lines,
                 max_columns,
+                before,
+                after,
                 sort_budget_ms,
             } => {
                 let dir = match search_dir(&dir) {
@@ -290,6 +317,8 @@ impl Service for GrepService {
                     ignores,
                     max_lines,
                     max_columns,
+                    before: before.min(MAX_CONTEXT),
+                    after: after.min(MAX_CONTEXT),
                     sort_budget: Duration::from_millis(sort_budget_ms),
                     started,
                 };
@@ -370,6 +399,8 @@ pub(crate) mod testing {
         pub ignores: Vec<String>,
         pub max_lines: usize,
         pub max_columns: usize,
+        pub before: usize,
+        pub after: usize,
         pub sort_budget_ms: u64,
     }
 
@@ -386,6 +417,8 @@ pub(crate) mod testing {
                 ignores: Vec::new(),
                 max_lines: default_max_lines(),
                 max_columns: default_max_columns(),
+                before: 0,
+                after: 0,
                 sort_budget_ms: 60_000,
             }
         }
@@ -402,6 +435,8 @@ pub(crate) mod testing {
                 ignores: self.ignores,
                 max_lines: self.max_lines,
                 max_columns: self.max_columns,
+                before: self.before,
+                after: self.after,
                 sort_budget_ms: self.sort_budget_ms,
             }
         }
@@ -459,8 +494,20 @@ pub(crate) mod testing {
             self.lines(path).iter().map(|l| (l.n, l.text.as_str())).collect()
         }
 
+        /// The lines of `path` as `grep` marks them: `"2- 3: 4-"` is the kept line 3 between two context lines.
+        pub(crate) fn marks(&self, path: &str) -> String {
+            let marks: Vec<String> =
+                self.lines(path).iter().map(|l| format!("{}{}", l.n, if l.context { '-' } else { ':' })).collect();
+            marks.join(" ")
+        }
+
         pub(crate) fn total_lines(&self) -> usize {
             self.files.iter().map(|f| f.lines.len()).sum()
+        }
+
+        /// The kept lines of all files.
+        pub(crate) fn total_kept(&self) -> usize {
+            self.files.iter().flat_map(|f| &f.lines).filter(|l| !l.context).count()
         }
     }
 
@@ -773,5 +820,64 @@ mod tests {
         let found = Found::from_stream(host.finish_stream::<Item>(call));
         assert_eq!(found.files.len(), count);
         assert_eq!(found.summary.lines, count);
+    }
+
+    #[test]
+    fn context_lines_come_with_the_context_flag() {
+        let t = tree(&[("a", "one\ntwo\nneedle\nfour\nfive\n")]);
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        (q.before, q.after) = (1, 2);
+        let result = host().call_stream::<Item>(q.request()).unwrap();
+        let [Item::File { path, lines, .. }, Item::Summary { lines: counted, truncated: false, .. }] =
+            &result.items[..]
+        else {
+            panic!("{:?}", result.items)
+        };
+        assert_eq!(path, "a");
+        let shape: Vec<(u64, &str, bool)> = lines.iter().map(|l| (l.n, l.text.as_str(), l.context)).collect();
+        assert_eq!(shape, [(2, "two", true), (3, "needle", false), (4, "four", true), (5, "five", true)]);
+        assert_eq!(lines[1].spans, [(0, 6)]);
+        assert!(lines.iter().filter(|l| l.context).all(|l| l.spans.is_empty() && l.secondary.is_empty()));
+        assert_eq!(*counted, 1, "the summary counts kept lines");
+    }
+
+    #[test]
+    fn a_request_without_context_returns_no_context_lines() {
+        let t = tree(&[("a", "one\ntwo\nneedle\nfour\nfive\n")]);
+        // `Query::new` sends 0 for both fields. The Host bypasses decoding, so the serde default for a request
+        // that leaves them out is covered by the Elisp tests.
+        let found = run(Query::new(t.path(), vec![line("needle")]));
+        assert_eq!(found.texts("a"), [(3, "needle")]);
+        assert!(found.files.iter().flat_map(|f| &f.lines).all(|l| !l.context));
+    }
+
+    #[test]
+    fn context_counts_above_the_limit_are_reduced_to_it() {
+        let numbered: String =
+            (1..=2500).map(|i| if i == 1250 { "needle\n".to_string() } else { format!("l{i}\n") }).collect();
+        let t = tree(&[("a", numbered.as_str())]);
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        (q.before, q.after) = (usize::MAX, usize::MAX);
+        let found = run(q);
+        let lines = found.lines("a");
+        assert_eq!(lines.len(), 2 * MAX_CONTEXT + 1);
+        assert_eq!(lines.iter().filter(|l| l.context && l.n < 1250).count(), MAX_CONTEXT);
+        assert_eq!(lines.iter().filter(|l| l.context && l.n > 1250).count(), MAX_CONTEXT);
+        assert_eq!((lines[0].n, lines[lines.len() - 1].n), (250, 2250));
+    }
+
+    #[test]
+    fn a_context_count_of_exactly_the_limit_is_not_reduced() {
+        let numbered: String =
+            (1..=2500).map(|i| if i == 1250 { "needle\n".to_string() } else { format!("l{i}\n") }).collect();
+        let t = tree(&[("a", numbered.as_str())]);
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        (q.before, q.after) = (MAX_CONTEXT, MAX_CONTEXT);
+        let found = run(q);
+        assert_eq!(found.lines("a").len(), 2 * MAX_CONTEXT + 1);
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        (q.before, q.after) = (999, 3);
+        let found = run(q);
+        assert_eq!(found.lines("a").len(), 999 + 3 + 1);
     }
 }

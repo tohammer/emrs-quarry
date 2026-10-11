@@ -74,6 +74,25 @@ decide alike for `^`, `$` and `\r\n` line ends. They do not for the text
 anchors `\A` and `\z` or with multi-line mode switched off (`(?-m)`):
 these are not supported in line filters; use `^` and `$`.
 
+A line that the primary filter matches and the other line filters keep
+is a *kept line*, a hit. With `:before` or `:after` above 0, a line that
+is not kept and lies at most that many lines before or after a kept line
+of its file is a *context line* (ADR 0014). The searcher is given the
+same two distances, but counts them from the primary filter's matches,
+so what it reports besides the kept lines (its context lines, and the
+matches another line filter dropped) holds every line that can qualify
+and more. The sink decides by line number: such a line is taken when the
+last kept line is at most `:after` lines back; otherwise it is held
+back, the last `:before` of them, and taken when a kept line follows. A
+dropped match can therefore be the context of a kept line and has no
+context of its own. Context lines travel in the file item's `:lines`, in
+place and once each, with `:context t`, their text made like a kept
+line's (terminator removed, cut at `max-columns`) and without match
+positions; the line filters are not asked. With both distances 0 the
+searcher reports matches only, as before. A distance above 1000 is taken
+as 1000 (`MAX_CONTEXT`, ADR 0015): the searcher holds that many lines of
+every file across the refills of its buffer, with or without a match.
+
 ## Order
 
 Finished file items go into a buffer behind a mutex until
@@ -92,13 +111,17 @@ instead of filling memory.
 
 ## Cap
 
-A counter shared by the threads holds the lines of the finished files. A
-thread stops reading its file when its own lines and the counter together
-reach `max-lines`; when the file is done it adds what still fits to the
-counter and keeps only that many lines. The thread that brings the counter
-to `max-lines` sets the stop flag, and every thread leaves the walk at its
-next entry. The lines delivered therefore never exceed `max-lines`, and
-equal it whenever the summary says `truncated`.
+The cap counts kept lines; context lines are not counted anywhere
+(ADR 0014). A counter shared by the threads holds the kept lines of the
+finished files. A thread stops reading its file when its own kept lines
+and the counter together reach `max-lines`; when the file is done it adds
+what still fits to the counter and keeps only that many kept lines,
+cutting its lines after the last of them. The thread that brings the
+counter to `max-lines` sets the stop flag, and every thread leaves the
+walk at its next entry. The kept lines delivered therefore never exceed
+`max-lines`, and equal it whenever the summary says `truncated`. The kept
+line at which a thread stops reading its file has its context lines
+before and not those after.
 
 ## Cancellation
 
@@ -150,9 +173,16 @@ user has typed anything.
 A search is a `quarry-grep--search` record: `dir` (absolute, with a
 trailing slash), `files` (nil for everything, a type name, or a list of
 globs), `case` (`smart`, `sensitive`, `insensitive`), `no-ignore`,
-`hidden`, and `filters`, an ordered list of `quarry-grep--filter` records
+`hidden`, `before` and `after` (the lines of context, 0 by default), and
+`filters`, an ordered list of `quarry-grep--filter` records
 (`target` `line` or `path`, `exclude`, `pattern`, `regexp`, `enabled`).
-The pattern a command asks for is the first filter.
+The pattern a command asks for is the first filter. A search of the four
+commands takes `before` and `after` from `quarry-grep-context-before` and
+`quarry-grep-context-after`; `C`, `B` and `A` change them through
+`quarry-grep--change`, so the counts are part of the value and of the
+history. A count above `quarry-grep-max-context` (1000, the service's
+limit, ADR 0015) is reduced to it before the search is built, with a
+message in the echo area.
 
 Searches and filters are values. A command that changes the search copies
 it (`quarry-grep--change`, `quarry-grep--replace-filter`), replaces what
@@ -165,14 +195,16 @@ enabled filters are sent, in order (`quarry-grep--sent-filters`); the list
 sent is kept in `quarry-grep--sent`, because the `(:filter INDEX)` of a
 filter error counts in that list, not in the search's. `:ignores` is
 `quarry-ignores`, and nil when ignore files are off. `:max-lines` and
-`:max-columns` come from the options at the time of the request. The
+`:max-columns` come from the options at the time of the request,
+`:before` and `:after` from the search. The
 primary filter (`quarry-grep--primary`) is the first enabled include line
 filter, as in the service.
 
 Buffer-local state: `quarry-grep--current` (the search shown),
 `quarry-grep--state` (`running`, `done`, `cancelled`, `failed`),
 `quarry-grep--call` (the open stream, or nil), `quarry-grep--serial`,
-the counts `quarry-grep--lines` and `quarry-grep--files`,
+the counts `quarry-grep--lines` (hits, without context lines) and
+`quarry-grep--files`,
 `quarry-grep--summary` (the summary item), `quarry-grep--error` and
 `quarry-grep--error-filter`, `quarry-grep--status-marker`, and the
 history lists.
@@ -220,7 +252,8 @@ search the same way.
 
 The buffer is, top to bottom: one line per filter, an empty line, one
 block per file (heading, result lines, an empty line), and the status
-line. `quarry-grep--status-marker` stands at the start of the status
+line. The result lines of a block are its hits and, with context on,
+their context lines and gap lines. `quarry-grep--status-marker` stands at the start of the status
 line; a batch of file items is inserted there and the marker is moved
 behind it, so blocks appear in arrival order and the status line stays
 last. `quarry-grep--keeping-positions` wraps every insertion and every
@@ -245,8 +278,10 @@ first character.
 | `quarry-grep-file` | a file block: heading and result lines | the path relative to `default-directory` |
 | `quarry-grep-heading` | a file heading | t |
 | `quarry-grep-mtime` | a file heading | the file's modification time at the search, milliseconds since the epoch, or nil |
-| `quarry-grep-line` | a result line | its line number in the file |
-| `quarry-grep-column` | a result line | character offset of the first primary match in the text, or nil when the match was cut off |
+| `quarry-grep-line` | a result line: a hit or a context line | its line number in the file |
+| `quarry-grep-context` | a context line | t |
+| `quarry-grep-gap` | a gap line | t; the line has `quarry-grep-file` and no `quarry-grep-line` |
+| `quarry-grep-column` | a result line | character offset of the first primary match in the text, or nil when the match was cut off and on a context line |
 | `quarry-grep-inexact` | a result line | t when the text is not exactly the file's line |
 | `quarry-grep-prefix` | the line number and the space after it | t; what follows on the line is exactly the item's `:text` |
 | `quarry-grep-separator` | the empty line that ends a file block | t |
@@ -266,6 +301,14 @@ part's command interactively, on `mouse-1` and on `mouse-2`.
 
 A new search erases the buffer; where point goes is described under
 "Point after a search".
+
+`quarry-grep--insert-file` counts the lines of an item without
+`:context` for the heading and for `quarry-grep--lines`. A context line
+is inserted like a hit, with the face `quarry-grep-context` on its text
+and the property of that name over the line. When the buffer's search
+has a count above 0, a gap line (`⋮` in the number column, same face)
+goes between two neighbouring lines whose numbers are not adjacent; the
+item does not mark gaps. A search without context has no gap lines.
 
 Highlighting is decided when lines are inserted. The item's `:spans` get
 `quarry-grep-match`; its `:secondary` spans get
@@ -361,7 +404,11 @@ outside the narrowing. From the result window the file is shown in
 another window; from elsewhere (`next-error` in a source buffer) in the
 selected window, as `compilation-mode` does. `quarry-grep--next-error`
 is the mode's `next-error-function`; `n` and `p` make the buffer
-`next-error-last-buffer` and call `next-error-no-select`.
+`next-error-last-buffer` and call `next-error-no-select`. It stops on
+hits only: lines with `quarry-grep-context` do not count, and gap lines
+have no `quarry-grep-line`. `RET` on a context line visits its line at
+the first column, since its `quarry-grep-column` is nil; on a gap line
+there is nothing to visit.
 
 ### History
 
@@ -421,7 +468,9 @@ active while editing and `C-c C-k` is wgrep's abort.
   (headings, separators, inexact result lines) gets `wgrep-ignore`,
   newline included. A heading also gets the property
   `wgrep-construct-filename-property` makes for its file, from which
-  wgrep starts looking for the file's lines. An inexact line has no file
+  wgrep starts looking for the file's lines. A context line is a result
+  line here and is editable like a hit; a gap line is ignored like a
+  separator. An inexact line has no file
   for wgrep, so it is read-only and cannot be written back even after
   wgrep's `C-c C-p` has made everything editable.
 
@@ -441,8 +490,9 @@ commit, abort, `wgrep-exit` and `M-x`, without advice. The restore:
   properties, including the per-file ones it recorded;
 - walks the lines once and puts `mouse-face` and `follow-link` back on
   filter lines, headings and result lines; re-applies
-  `quarry-grep-line` and `quarry-grep-column` over each result line from
-  its first character; and re-applies `quarry-grep-file` over each block
+  `quarry-grep-line`, `quarry-grep-column` and `quarry-grep-context`
+  over each result line from its first character; leaves gap lines as
+  they are; and re-applies `quarry-grep-file` over each block
   from its heading to its `quarry-grep-separator`. Text typed in edit
   mode has no properties (wgrep makes the end of the prefix
   `rear-nonsticky`), which would split a block for folding. A line added

@@ -84,3 +84,14 @@ Part of [the architecture](../architecture.md).
   map.** A mode that needs checks before edit mode sets
   `wgrep-original-mode-map` itself and calls
   `wgrep-change-to-wgrep-mode` from its own command.
+- **`emrs::testing::Host` hands requests and items over as Rust values.**
+  A Rust service test therefore proves nothing about the Lisp shape:
+  serde defaults of a request field, a field that fails to decode, and
+  `skip_serializing_if` on an item are exercised only by the ERT tests
+  that run the real module.
+- **`grep-searcher` counts context from its own matches, and keeps the
+  lines before in its buffer.** When a sink drops matches, context must
+  be chosen again in the sink, relative to what it keeps (ADR 0014). And
+  `before_context` makes the searcher hold that many lines of every
+  file across refills, with or without a match, so a huge count buffers
+  whole files; hence the limit on the counts (ADR 0015).

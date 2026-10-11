@@ -50,6 +50,27 @@ uppercase letter."
                  (const :tag "Sensitive" sensitive)
                  (const :tag "Insensitive" insensitive)))
 
+(defconst quarry-grep-max-context 1000
+  "The largest count of context lines per side.
+The service enforces the same limit.  The searcher keeps the lines
+before a possible hit of every file it reads, so a huge count would
+hold whole files in memory, for each file searched at the same time.
+A larger count is reduced to this one.")
+
+(defcustom quarry-grep-context-before 0
+  "Number of lines shown before each hit that a new search starts with.
+At most `quarry-grep-max-context'; a larger number is reduced to that.
+The commands of the result buffer keep the counts of the search they
+change; see `quarry-grep-set-context'."
+  :type 'natnum)
+
+(defcustom quarry-grep-context-after 0
+  "Number of lines shown after each hit that a new search starts with.
+At most `quarry-grep-max-context'; a larger number is reduced to that.
+The commands of the result buffer keep the counts of the search they
+change; see `quarry-grep-set-context'."
+  :type 'natnum)
+
 (defcustom quarry-grep-max-lines 50000
   "Number of matching lines after which a search stops."
   :type 'natnum)
@@ -95,6 +116,10 @@ See `quarry-grep-highlight-path-filters'.")
 
 (defface quarry-grep-line-number '((t :inherit shadow))
   "Face for the line number of a result line.")
+
+(defface quarry-grep-context '((t :inherit shadow))
+  "Face for a context line in a result block and for the gap line.
+A context line is a line before or after a hit, shown for its sake.")
 
 (defface quarry-grep-filter-include '((t :inherit success))
   "Face for the sign of an including filter.")
@@ -144,6 +169,8 @@ See `quarry-grep-highlight-path-filters'.")
   (case 'smart)                         ; `smart', `sensitive', `insensitive'
   no-ignore                             ; non-nil: ignore files are not used
   (hidden t)                            ; non-nil: hidden files are searched
+  (before 0)                            ; lines of context before each hit
+  (after 0)                             ; lines of context after each hit
   filters)                              ; list of `quarry-grep--filter'
 
 (defun quarry-grep--primary (search)
@@ -189,7 +216,9 @@ See the module docs of src/grep/service.rs for the fields."
            ;; version control directories, so the extra lines go too.
            :ignores (and (not no-ignore) quarry-ignores)
            :max-lines quarry-grep-max-lines
-           :max-columns quarry-grep-max-columns))))
+           :max-columns quarry-grep-max-columns
+           :before (quarry-grep--search-before search)
+           :after (quarry-grep--search-after search)))))
 
 ;;;; The instance
 
@@ -329,9 +358,16 @@ See `quarry-grep--edit-sync'.")
 ;; `quarry-grep-heading'  t on a file heading.
 ;; `quarry-grep-mtime'    on a file heading: the file's modification time
 ;;                        at the search, milliseconds since the epoch.
-;; `quarry-grep-line'     on a result line: its line number in the file.
+;; `quarry-grep-line'     on a result line, a hit or a context line: its
+;;                        line number in the file.
+;; `quarry-grep-context'  t on a context line.
+;; `quarry-grep-gap'      t on a gap line, which stands between two
+;;                        context blocks of a file whose lines are not
+;;                        adjacent.  It has `quarry-grep-file' and
+;;                        no `quarry-grep-line'.
 ;; `quarry-grep-column'   on a result line: the character offset of the
-;;                        first primary match in the line, or nil.
+;;                        first primary match in the line, or nil (always
+;;                        nil on a context line).
 ;; `quarry-grep-inexact'  t on a result line whose text is not exactly
 ;;                        the file's line.
 ;; `quarry-grep-prefix'   t on the line number and the space after it;
@@ -410,8 +446,14 @@ pattern is shown in it, so that the colours can be told apart."
 ITEM is the plist of a file item of the service."
   (let* ((path (plist-get item :path))
          (lines (plist-get item :lines))
+         ;; Context lines are not counted.
+         (hits (cl-count-if-not (lambda (line) (plist-get line :context))
+                                lines))
+         (gaps (or (> (quarry-grep--search-before quarry-grep--current) 0)
+                   (> (quarry-grep--search-after quarry-grep--current) 0)))
+         (previous nil)
          (start (point)))
-    (insert "File: " path (format " (%d)" (length lines)))
+    (insert "File: " path (format " (%d)" hits))
     (put-text-property (+ start 6) (+ start 6 (length path))
                        'face 'quarry-grep-file-heading)
     (when quarry-grep-highlight-path-filters
@@ -428,14 +470,25 @@ ITEM is the plist of a file item of the service."
     (dolist (line lines)
       (let* ((bol (point))
              (spans (plist-get line :spans))
+             (context (plist-get line :context))
              (prefix (format "%5d " (plist-get line :n)))
              (text-start (+ bol (length prefix))))
+        (when (and gaps previous (> (plist-get line :n) (1+ previous)))
+          (insert (propertize "    ⋮\n" 'face 'quarry-grep-context
+                              'quarry-grep-gap t))
+          (setq bol (point)
+                text-start (+ bol (length prefix))))
+        (setq previous (plist-get line :n))
         (insert prefix (plist-get line :text))
         (add-text-properties bol (point) '(mouse-face highlight follow-link t))
+        (when context
+          (put-text-property text-start (point) 'face 'quarry-grep-context))
         (insert "\n")
         (add-text-properties bol (point)
                              (list 'quarry-grep-line (plist-get line :n)
                                    'quarry-grep-column (car (car spans))))
+        (when context
+          (put-text-property bol (point) 'quarry-grep-context t))
         (when (plist-get line :inexact)
           (put-text-property bol (point) 'quarry-grep-inexact t))
         (add-text-properties bol text-start
@@ -450,7 +503,7 @@ ITEM is the plist of a file item of the service."
     (put-text-property start (point) 'quarry-grep-file path)
     (insert (propertize "\n" 'quarry-grep-separator t))
     (cl-incf quarry-grep--files)
-    (cl-incf quarry-grep--lines (length lines))))
+    (cl-incf quarry-grep--lines hits)))
 
 (defun quarry-grep--counts-text ()
   "Return the number of lines and files in the buffer as text."
@@ -890,6 +943,10 @@ is nil for all files, the name of a file type, or a list of globs."
                  :dir (quarry-grep--check-directory dir)
                  :files files
                  :case quarry-grep-case
+                 :before (min quarry-grep-context-before
+                              quarry-grep-max-context)
+                 :after (min quarry-grep-context-after
+                             quarry-grep-max-context)
                  :hidden (and quarry-include-hidden t)
                  :filters (list (quarry-grep--make-filter
                                  :pattern pattern :regexp (and regexp t))))))
@@ -901,7 +958,10 @@ is nil for all files, the name of a file type, or a list of globs."
           (quarry-grep-mode))
         (goto-char (point-min))
         (quarry-grep--run search))
-      (pop-to-buffer buffer))))
+      (pop-to-buffer buffer))
+    (when (> (max quarry-grep-context-before quarry-grep-context-after)
+             quarry-grep-max-context)
+      (quarry-grep--tell-context-limit))))
 
 ;;;###autoload
 (defun quarry-grep (regexp files dir)
@@ -961,27 +1021,32 @@ buffer's type, in the project's root or, outside a project, in
 
 ;;;; Visiting results
 
-(defun quarry-grep--nth-line (from n property)
+(defun quarry-grep--nth-line (from n property &optional except)
   "Return the start of the Nth line with PROPERTY after the line of FROM.
-A negative N counts backwards; 0 means the line of FROM itself.  Nil
-when there is no such line."
+A line with the property EXCEPT does not count.  A negative N counts
+backwards; 0 means the line of FROM itself.  Nil when there is no such
+line."
   (save-excursion
     (goto-char from)
     (forward-line 0)
-    (let ((step (if (< n 0) -1 1))
-          (left (abs n)))
-      (while (and (> left 0) (zerop (forward-line step)))
-        (when (get-text-property (point) property)
-          (cl-decf left)))
-      (and (zerop left)
-           (get-text-property (point) property)
-           (point)))))
+    (cl-flet ((counts ()
+                (and (get-text-property (point) property)
+                     (not (and except (get-text-property (point) except))))))
+      (let ((step (if (< n 0) -1 1))
+            (left (abs n)))
+        (while (and (> left 0) (zerop (forward-line step)))
+          (when (counts)
+            (cl-decf left)))
+        (and (zerop left)
+             (counts)
+             (point))))))
 
 (defun quarry-grep--visit (bol &optional found)
   "Visit the file of the result or heading line that starts at BOL.
 For a result line, go to its line and to the column of its first primary
-match.  The file is shown in another window when the result buffer's
-window is selected, else in the selected window; its window is selected.
+match; for a context line, to its first column.  The file is shown in
+another window when the result buffer's window is selected, else in the
+selected window; its window is selected.
 With FOUND, tell `next-error' about the visit."
   (let* ((results (current-buffer))
          (path (get-text-property bol 'quarry-grep-file))
@@ -1013,8 +1078,9 @@ With FOUND, tell `next-error' about the visit."
 (defun quarry-grep--next-error (n &optional reset)
   "Visit the Nth next result, the `next-error-function' of the mode.
 With RESET, count from the start of the buffer."
+  ;; Hits only: context lines are not results.
   (let ((pos (quarry-grep--nth-line (if reset (point-min) (point)) n
-                                    'quarry-grep-line)))
+                                    'quarry-grep-line 'quarry-grep-context)))
     (unless pos
       (user-error (if (< n 0) "No previous match" "No more matches")))
     (quarry-grep--unfold-at pos)
@@ -1024,12 +1090,15 @@ With RESET, count from the start of the buffer."
 (defun quarry-grep-visit ()
   "Visit the result at point, or edit the filter at point.
 On a result line, visit the file at that line, at the column of the
-first match of the primary filter.  On a file heading, visit the file.
-On a filter line, edit its pattern in the minibuffer."
+first match of the primary filter.  On a context line, visit the file
+at that line.  On a file heading, visit the file.  On a filter line,
+edit its pattern in the minibuffer."
   (interactive nil quarry-grep-mode)
   (let ((bol (pos-bol)))
     (cond ((get-text-property bol 'quarry-grep-filter)
            (quarry-grep-edit-filter))
+          ((get-text-property bol 'quarry-grep-gap)
+           (user-error "Nothing to visit on this line"))
           ((get-text-property bol 'quarry-grep-file)
            (quarry-grep--visit bol t))
           (t (user-error "Nothing to visit on this line")))))
@@ -1252,6 +1321,80 @@ Off, everything is searched except version control directories."
    (lambda (search)
      (setf (quarry-grep--search-hidden search)
            (not (quarry-grep--search-hidden search))))))
+
+;;;; Context
+
+(defun quarry-grep--read-count (prompt default prefix)
+  "Return the count of context lines: PREFIX, else read with DEFAULT.
+PROMPT says which side is asked for.  Signal a `user-error' when the
+count is negative or not a whole number."
+  (let ((n (if prefix
+               (prefix-numeric-value prefix)
+             (read-number prompt default))))
+    (unless (natnump n)
+      (user-error "The number of context lines must be a whole number"))
+    n))
+
+(defun quarry-grep--tell-context-limit ()
+  "Tell that a count of context lines was reduced to the limit."
+  (message "Context is limited to %d lines" quarry-grep-max-context))
+
+(defun quarry-grep--set-context (before after)
+  "Run the current search with BEFORE and AFTER lines of context.
+Either is nil to keep the count the search has.  A count above
+`quarry-grep-max-context' becomes that, and the user is told."
+  (let ((limited (or (and before (> before quarry-grep-max-context))
+                     (and after (> after quarry-grep-max-context)))))
+    (quarry-grep--change
+     (lambda (search)
+       (when before
+         (setf (quarry-grep--search-before search)
+               (min before quarry-grep-max-context)))
+       (when after
+         (setf (quarry-grep--search-after search)
+               (min after quarry-grep-max-context)))))
+    ;; After the search started: nothing else writes to the echo area.
+    (when limited
+      (quarry-grep--tell-context-limit))))
+
+(defun quarry-grep-set-context (&optional count)
+  "Show COUNT lines before and after each hit; 0 shows none.
+Interactively, a numeric prefix argument is COUNT; without one, read it,
+offering the larger of the two counts the search has.  A negative count
+is a `user-error'.  A count above `quarry-grep-max-context' becomes that
+and the echo area says so."
+  (interactive "P" quarry-grep-mode)
+  (let* ((search (quarry-grep--current))
+         (n (quarry-grep--read-count
+             "Lines of context before and after each hit: "
+             (max (quarry-grep--search-before search)
+                  (quarry-grep--search-after search))
+             count)))
+    (quarry-grep--set-context n n)))
+
+(defun quarry-grep-set-context-before (&optional count)
+  "Show COUNT lines before each hit; 0 shows none.
+The count of lines after each hit stays as it is.  Asks for COUNT as
+`quarry-grep-set-context' does."
+  (interactive "P" quarry-grep-mode)
+  (let* ((search (quarry-grep--current))
+         (n (quarry-grep--read-count
+             (format "Lines of context before each hit (after: %d): "
+                     (quarry-grep--search-after search))
+             (quarry-grep--search-before search) count)))
+    (quarry-grep--set-context n nil)))
+
+(defun quarry-grep-set-context-after (&optional count)
+  "Show COUNT lines after each hit; 0 shows none.
+The count of lines before each hit stays as it is.  Asks for COUNT as
+`quarry-grep-set-context' does."
+  (interactive "P" quarry-grep-mode)
+  (let* ((search (quarry-grep--current))
+         (n (quarry-grep--read-count
+             (format "Lines of context after each hit (before: %d): "
+                     (quarry-grep--search-before search))
+             (quarry-grep--search-after search) count)))
+    (quarry-grep--set-context nil n)))
 
 ;;;; Filters
 
@@ -1519,9 +1662,10 @@ status line."
   "Tell wgrep what the lines between header and footer are.
 The value of `wgrep-results-parser' in a result buffer; wgrep calls it
 with the buffer narrowed to that part.  A result line gets its file and
-line number on its prefix, so the rest of it can be edited.  File
-headings, separators and the lines whose text is not exactly the
-file's line (`quarry-grep-inexact') are marked to be left alone."
+line number on its prefix, so the rest of it can be edited; that holds
+for a context line as for a hit.  File headings, separators, gap lines
+and the lines whose text is not exactly the file's line
+(`quarry-grep-inexact') are marked to be left alone."
   (goto-char (point-min))
   (setq quarry-grep--edit-properties nil)
   (while (not (eobp))
@@ -1589,7 +1733,13 @@ changes were committed."
                bol (min (1+ eol) (point-max))
                (list 'quarry-grep-line (get-text-property bol 'quarry-grep-line)
                      'quarry-grep-column (get-text-property bol 'quarry-grep-column)))
-              (add-text-properties bol eol quarry-grep--link-properties))))
+              (add-text-properties bol eol quarry-grep--link-properties)
+              (when (get-text-property bol 'quarry-grep-context)
+                (put-text-property bol (min (1+ eol) (point-max))
+                                   'quarry-grep-context t)
+                (put-text-property
+                 (next-single-property-change bol 'quarry-grep-prefix nil eol)
+                 eol 'face 'quarry-grep-context)))))
           (forward-line 1))
         (when path
           (put-text-property block (or status (point-max)) 'quarry-grep-file path))
@@ -1760,6 +1910,13 @@ a mode line format again."
           "hidden" (if (quarry-grep--search-hidden search) "on" "off")
           #'quarry-grep-toggle-hidden "switch hidden files on or off (H)")
          (quarry-grep--header-part
+          "ctx" (let ((before (quarry-grep--search-before search))
+                      (after (quarry-grep--search-after search)))
+                  (if (= before after)
+                      (number-to-string before)
+                    (format "%d/%d" before after)))
+          #'quarry-grep-set-context "set the lines of context (C, B, A)")
+         (quarry-grep--header-part
           "hits" (format "%d in %s" quarry-grep--lines
                          (quarry-grep--plural quarry-grep--files "file"))))
         "   ")))))
@@ -1804,6 +1961,9 @@ a mode line format again."
   "c" #'quarry-grep-cycle-case
   "i" #'quarry-grep-toggle-ignore
   "H" #'quarry-grep-toggle-hidden
+  "C" #'quarry-grep-set-context
+  "B" #'quarry-grep-set-context-before
+  "A" #'quarry-grep-set-context-after
   "C-c <" #'quarry-grep-history-back
   "C-c >" #'quarry-grep-history-forward
   "C-c C-k" #'quarry-grep-cancel

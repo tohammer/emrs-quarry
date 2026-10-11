@@ -5,9 +5,13 @@ architecture.md or an ADR.
 
 ## Next
 
+- Rebuild the module (`M-x quarry-build-module`) and restart Emacs:
+  context lines need the new module, an older one shows none.
 - Use quarry-grep daily and do its manual checks (grep backlog, "Manual
-  checks not done yet").
-- Next grep feature: context lines before and after a match (backlog).
+  checks not done yet"), now including context lines (`C`, `B`, `A`).
+- Next grep feature: pick from the grep backlog once the keys have been
+  used for a while; the menu to make them discoverable is the nearest
+  candidate.
 
 ## Watch out for
 
