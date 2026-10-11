@@ -131,6 +131,45 @@ before the grep spec (2026-10-10); this is why both tools live in one
 module. Revisit when searches on a very large tree are measured and the
 walk is a real share of the time.
 
+## Live search commands like Doom's, and a survey of what else to make native
+
+Write a spec for commands in the manner of two Doom commands:
+
+- `+default/search-project`: search the current project as you type in
+  the minibuffer; with a prefix argument, choose another project first.
+- `+default/search-cwd`: the same from the current directory; with a
+  prefix argument, ask for the directory.
+
+In Doom both run ripgrep as a process through consult (or the other
+completion modules) and show the hits as candidates while the pattern is
+typed. For quarry this is the "consult front end" of the list below with
+its entry points settled: the grep service answers each change of the
+input, in the manner of `quarry-consult.el` for the file finder (ADR
+0008). To settle in the spec: how the commands are named and whether
+they replace the Doom bindings by a remap; the input syntax (Doom's
+consult setup splits the input into a pattern for rg and one that
+filters the candidates, and passes rg options after `--`); how a live
+search becomes a `*quarry-grep*` buffer (export, embark); cancellation
+of the search for the previous input; whether it needs consult or also
+works with plain `completing-read`.
+
+As part of the same work, survey which other find and grep features are
+worth moving into the module, because native code makes them faster or
+makes them possible on large trees. Candidates to look at: the rest of
+Doom's `SPC s` and `SPC f` commands and what they call (search another
+project, search the notes directory, search open buffers, search for the
+symbol at point, locate, find a file from here, recent files), the
+consult commands behind them (`consult-ripgrep`, `consult-find`,
+`consult-line-multi`, `consult-imenu-multi`), and symbol search across a
+project (the definitions of all files, as tags or imenu give them for
+one file). For each: what is slow or missing today on a large tree, and
+whether the index, the watcher or the grep service already has what it
+needs. The result is a ranked list in this backlog, not a design.
+
+Origin: requested by the author on 2026-10-11, after the keys menu.
+Revisit as the next grep feature; the survey can come first and decide
+the order.
+
 ## Further features weighed before the spec
 
 Candidates, each one line; none is designed.
@@ -139,7 +178,8 @@ Candidates, each one line; none is designed.
   candidate: the engine has the capture groups, and it complements
   wgrep for mechanical changes.
 - **consult front end**: the pattern as you type in the minibuffer, in
-  the manner of `quarry-consult.el`.
+  the manner of `quarry-consult.el`. Now part of the item above, "Live
+  search commands like Doom's".
 - **Saved and named searches**, and a list of search buffers, as rg.el
   has. Today there is one result buffer; `clone-buffer` keeps a result.
 - **Export to a plain `grep-mode` buffer**, as a bridge to embark and

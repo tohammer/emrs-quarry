@@ -13,9 +13,11 @@ architecture.md or an ADR.
 - Use quarry-grep daily and do its manual checks (grep backlog, "Manual
   checks not done yet"), now including context lines (`C`, `B`, `A`) and
   the menu (`?`).
-- Next grep feature: pick from the grep backlog ("Further features
-  weighed before the spec"; regexp replace with preview is named there
-  as the strongest candidate).
+- Next grep feature: the live search commands and the survey of what
+  else to make native (grep backlog, "Live search commands like Doom's,
+  and a survey of what else to make native"). After that, pick from
+  "Further features weighed before the spec"; regexp replace with
+  preview is named there as the strongest candidate.
 
 ## Watch out for
 
