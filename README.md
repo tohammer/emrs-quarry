@@ -729,15 +729,19 @@ variable name you like):
 
 With an absolute `:local-repo`, straight uses the checkout as the repository
 and never clones or pulls it. `:build (:not compile)` leaves no `.elc` that
-would shadow edits. With the switch on, any change in the checkout makes
-`doom sync` rebuild the package and so run cargo; that is incremental and
-does nothing when no Rust changed.
+would shadow edits. When `doom sync` rebuilds the package it also runs
+cargo; that is incremental and does nothing when no Rust changed. A
+change in the checkout alone does not make `doom sync` rebuild it: after
+new files were added to `lisp/` (2026-10-10, Emacs 31.1), `doom sync`
+left the old symlinks in place, and Emacs failed at startup with
+"Cannot open load file ... quarry-core". Removing the package's build
+directory first makes the next `doom sync` rebuild it.
 
 | Change | Do | Takes effect |
 |---|---|---|
 | Elisp in `lisp/` | `eval-buffer`, or restart | at once, no `doom sync` |
 | Rust in `src/` | `M-x quarry-build-module` | after restarting Emacs |
-| New file in `lisp/` | `doom sync` once | the build directory gets the symlink |
+| New file in `lisp/` | remove `.local/straight/build-<version>/quarry` in the Doom directory, then `doom sync`; do this before restarting Emacs | the build directory gets the symlink, and the module is rebuilt |
 | emrs too | the same pattern for the emrs recipe (`:local-repo` and `:build (:not compile)`, file `elisp/emrs.el`), and a patch in an uncommitted `.cargo/config.toml` (below) | as above |
 
 To build against a local emrs checkout, put this in `.cargo/config.toml`
