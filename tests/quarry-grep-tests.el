@@ -15,6 +15,7 @@
 (require 'ert)
 (require 'quarry-tests)
 (require 'quarry-grep)
+(require 'quarry-grep-menu)
 
 ;;;; Helpers
 
@@ -395,7 +396,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
     (should (string-match-p "\\`Search finished: 5 lines in 4 files, [0-9]+ ms\\'"
                             (quarry-test-grep--status)))
     (should (equal (quarry-test-grep--header)
-                   (format " files: everything   dir: %s   case: smart   ign: on   hidden: on   ctx: 0   hits: 5 in 4 files"
+                   (format " files: everything   dir: %s   case: smart   ign: on   hidden: on   ctx: 0   hits: 5 in 4 files   ? menu"
                            (abbreviate-file-name dir))))
     ;; The filter block is the start of the buffer, the filter's line
     ;; holds the search's own filter object.
@@ -446,7 +447,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
     (should-not (quarry-test-grep--results))
     (should (string-match-p "\\`Search finished: no matches in [0-9]+ files, [0-9]+ ms\\'"
                             (quarry-test-grep--status)))
-    (should (string-suffix-p "hits: 0 in 0 files" (quarry-test-grep--header)))))
+    (should (string-suffix-p "hits: 0 in 0 files   ? menu" (quarry-test-grep--header)))))
 
 (ert-deftest quarry-test-grep-caps ()
   "The line cap is named in the status line; a cut line is marked."
@@ -991,7 +992,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
         (should (eq window (selected-window)))
         (should (eq (quarry-test-grep--state) 'running))
         (should (equal (quarry-test-grep--status) "Searching…"))
-        (should (string-suffix-p "hits: 0 in 0 files" (quarry-test-grep--header)))
+        (should (string-suffix-p "hits: 0 in 0 files   ? menu" (quarry-test-grep--header)))
         (cl-flet ((feed ()
                     ;; From a process filter: any buffer may be current.
                     (with-temp-buffer
@@ -1031,7 +1032,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
         ;; In arrival order, and counted in the header as they arrive.
         (should (equal (quarry-test-grep--headings)
                        (cl-loop for i from 1 to n collect (format "f%d.txt" i))))
-        (should (string-suffix-p (format "hits: %d in %d files" (* 3 (/ n 2)) n)
+        (should (string-suffix-p (format "hits: %d in %d files   ? menu" (* 3 (/ n 2)) n)
                                  (quarry-test-grep--header)))
         (should (equal (seq-take (quarry-test-grep--results) 3)
                        '(("f1.txt" 1 "needle one") ("f1.txt" 7 "a needle")
@@ -1324,6 +1325,9 @@ Each is (PROMPT . INITIAL-CONTENTS)."
                 parts)
           (setq pos end)))
       (setq parts (nreverse parts))
+      ;; The hint for the menu comes last (see `quarry-test-grep-header-hint').
+      (should (equal (car (car (last parts))) "? menu"))
+      (setq parts (butlast parts))
       (should (equal (mapcar #'car parts)
                      (list "everything" (abbreviate-file-name dir) "smart" "on" "on" "0")))
       (dolist (part parts)
@@ -1877,7 +1881,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
       (should (equal (quarry-test-grep--results) '(("%-x.txt" 1 "needle"))))
       ;; The string is a mode line format: %% stands for one %.
       (should (equal (quarry-test-grep--header)
-                     (format " files: %%%%-*.txt   dir: %s   case: smart   ign: on   hidden: on   ctx: 0   hits: 1 in 1 file"
+                     (format " files: %%%%-*.txt   dir: %s   case: smart   ign: on   hidden: on   ctx: 0   hits: 1 in 1 file   ? menu"
                              (string-replace "%" "%%" (abbreviate-file-name sub)))))
       (should (string-match-p "100%%b/" (quarry-test-grep--header)))
       (should-not (string-match-p "\\(?:\\`\\|[^%]\\)%\\(?:[^%]\\|\\'\\)"
@@ -2242,7 +2246,7 @@ gap between 5 and 7, with three none; two.txt has a hit at line 2.")
   "The header shows the counts between hidden and hits; a click sets them."
   (quarry-test-grep--with-tree (dir quarry-test-grep--context-files)
     (quarry-test-grep--search dir)
-    (should (string-match-p "   hidden: on   ctx: 0   hits: 3 in 2 files\\'"
+    (should (string-match-p "   hidden: on   ctx: 0   hits: 3 in 2 files   \\? menu\\'"
                             (quarry-test-grep--header)))
     (quarry-test-grep--keys "2 C")
     (should (string-match-p "   hidden: on   ctx: 2   hits: " (quarry-test-grep--header)))
@@ -2390,7 +2394,7 @@ gap between 5 and 7, with three none; two.txt has a hit at line 2.")
                                        (quarry-test-grep--heading-pos "ctx.txt"))))
       (should (string-suffix-p " (1)" (quarry-test-grep--line-text
                                        (quarry-test-grep--heading-pos "two.txt")))))
-    (should (string-suffix-p "hits: 3 in 2 files" (quarry-test-grep--header)))
+    (should (string-suffix-p "hits: 3 in 2 files   ? menu" (quarry-test-grep--header)))
     (should (string-match-p "\\`Search finished: 3 lines in 2 files"
                             (quarry-test-grep--status)))
     ;; The cap counts hits too: a cap of 1 hit gives that hit with its
@@ -2771,7 +2775,7 @@ A hit has the text `needle' and the match at its start."
         (should (eq (quarry-test-grep--state) 'cancelled))
         (should (equal (quarry-test-grep--status)
                        "Search cancelled: 2 lines in 2 files so far"))
-        (should (string-suffix-p "hits: 2 in 2 files" (quarry-test-grep--header)))))))
+        (should (string-suffix-p "hits: 2 in 2 files   ? menu" (quarry-test-grep--header)))))))
 
 (ert-deftest quarry-test-grep-context-fractional-count ()
   "1.5 typed at the prompt of C is a user-error and changes nothing."
@@ -2916,6 +2920,411 @@ A hit has the text `needle' and the match at its start."
                          (list 0 (with-current-buffer out (buffer-string))))))
       (kill-buffer out)
       (delete-directory dir t))))
+
+;;;; Conditions for the commands
+
+(defmacro quarry-test-grep--with-wgrep (installed &rest body)
+  "Run BODY as if wgrep were not loaded and INSTALLED, a form, says if it is found.
+Nothing is loaded; the answers of `featurep' and `locate-library' for
+wgrep are replaced, so the test does not depend on the environment."
+  (declare (indent 1))
+  `(let ((real-featurep (symbol-function 'featurep))
+         (found ,installed))
+     (cl-letf (((symbol-function 'featurep)
+                (lambda (feature &rest args)
+                  (and (not (eq feature 'wgrep)) (apply real-featurep feature args))))
+               ((symbol-function 'locate-library)
+                (lambda (name &rest _) (and found (equal name "wgrep") "/x/wgrep.el"))))
+       ,@body)))
+
+(defconst quarry-test-grep--condition-predicates
+  '(quarry-grep--filter-at-point-p quarry-grep--file-at-point-p
+    quarry-grep--directory-at-point-p quarry-grep--block-at-point-p
+    quarry-grep--running-p quarry-grep--has-results-p
+    quarry-grep--wgrep-available-p quarry-grep--editable-p
+    quarry-grep--earlier-search-p quarry-grep--later-search-p
+    quarry-grep--other-filters-p)
+  "The functions that say whether a command applies; none signals.")
+
+(ert-deftest quarry-test-grep-condition-at-point ()
+  "The filter, file, directory and block conditions follow point."
+  (quarry-test-grep--with-tree (dir '(("top.txt" . "needle\n")
+                                      ("a/b/c.txt" . "needle\n")))
+    (quarry-test-grep--search dir)
+    (let ((filter (quarry-test-grep--filter-pos 0)))
+      (should filter)
+      ;; On a filter line.
+      (goto-char filter)
+      (should (quarry-grep--filter-at-point-p))
+      (should-not (quarry-grep--file-at-point-p))
+      (should-not (quarry-grep--directory-at-point-p))
+      (should-not (quarry-grep--block-at-point-p))
+      ;; On the status line and at the start of the buffer.
+      (dolist (pos (list (point-min) (point-max)))
+        (goto-char pos)
+        (should-not (quarry-grep--file-at-point-p))
+        (should-not (quarry-grep--directory-at-point-p))
+        (should-not (quarry-grep--block-at-point-p)))
+      (goto-char (point-max))
+      (should-not (quarry-grep--filter-at-point-p))
+      ;; On a result line and a heading of a file in a subdirectory.
+      (dolist (pos (list (quarry-test-grep--line-pos "a/b/c.txt" 1)
+                         (quarry-test-grep--heading-pos "a/b/c.txt")))
+        (goto-char pos)
+        (should-not (quarry-grep--filter-at-point-p))
+        (should (equal (quarry-grep--file-at-point-p) "a/b/c.txt"))
+        (should (equal (quarry-grep--directory-at-point-p) "a/b/"))
+        (should (consp (quarry-grep--block-at-point-p))))
+      ;; A file in the search directory itself has no directory.
+      (dolist (pos (list (quarry-test-grep--line-pos "top.txt" 1)
+                         (quarry-test-grep--heading-pos "top.txt")))
+        (goto-char pos)
+        (should (equal (quarry-grep--file-at-point-p) "top.txt"))
+        (should-not (quarry-grep--directory-at-point-p))
+        (should (quarry-grep--block-at-point-p))))))
+
+(ert-deftest quarry-test-grep-condition-running-and-results ()
+  "A running search, results, and whether the results can be edited."
+  (quarry-test-grep--with-tree (dir)
+    ;; Running: the fake stream never ends.
+    (quarry-test-grep--with-fake-stream
+      (quarry-grep "needle" nil dir)
+      (set-buffer (quarry-test-grep--buffer))
+      (should (quarry-grep--running-p))
+      (should-not (quarry-grep--has-results-p))
+      (should-not (quarry-grep--editable-p))
+      (funcall (nth 1 (car quarry-test-grep--fake))
+               (list (quarry-test-grep--item "notes.txt" '(1 "a needle in text" 2 8))))
+      (should (quarry-grep--running-p))
+      (should (quarry-grep--has-results-p))
+      ;; Results, but still running.
+      (quarry-test-grep--with-wgrep t
+        (should-not (quarry-grep--editable-p)))
+      (funcall (nth 2 (car quarry-test-grep--fake)) 'done nil)
+      (should-not (quarry-grep--running-p))
+      (should (quarry-grep--has-results-p))
+      (quarry-test-grep--with-wgrep t
+        (should (quarry-grep--editable-p)))
+      (quarry-test-grep--with-wgrep nil
+        (should-not (quarry-grep--editable-p))))
+    ;; Finished with no results.
+    (quarry-test-grep--search dir "nomatchatall")
+    (should-not (quarry-grep--running-p))
+    (should-not (quarry-grep--has-results-p))
+    (quarry-test-grep--with-wgrep t
+      (should-not (quarry-grep--editable-p)))
+    ;; Finished with results.
+    (quarry-test-grep--search dir)
+    (should (quarry-grep--has-results-p))
+    (quarry-test-grep--with-wgrep t
+      (should (quarry-grep--editable-p)))))
+
+(ert-deftest quarry-test-grep-condition-wgrep-available ()
+  "wgrep is available when it is loaded or found; asking does not load it."
+  (let ((loaded nil))
+    (cl-letf (((symbol-function 'require) (lambda (&rest args) (push args loaded) nil)))
+      (quarry-test-grep--with-wgrep nil
+        (should-not (quarry-grep--wgrep-available-p)))
+      (quarry-test-grep--with-wgrep t
+        (should (quarry-grep--wgrep-available-p)))
+      (should-not loaded)))
+  ;; Loaded, and not on the load path.
+  (cl-letf (((symbol-function 'featurep) (lambda (feature &rest _) (eq feature 'wgrep)))
+            ((symbol-function 'locate-library) #'ignore))
+    (should (quarry-grep--wgrep-available-p))))
+
+(ert-deftest quarry-test-grep-condition-history ()
+  "An earlier and a later search exist as the history says."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (should-not (quarry-grep--earlier-search-p))
+    (should-not (quarry-grep--later-search-p))
+    (quarry-test-grep--keys "c")
+    (should (quarry-grep--earlier-search-p))
+    (should-not (quarry-grep--later-search-p))
+    (quarry-test-grep--keys "C-c <")
+    (should-not (quarry-grep--earlier-search-p))
+    (should (quarry-grep--later-search-p))
+    (quarry-test-grep--keys "C-c >")
+    (should (quarry-grep--earlier-search-p))
+    (should-not (quarry-grep--later-search-p))))
+
+(ert-deftest quarry-test-grep-condition-other-filters ()
+  "Other filters exist with a second filter, and need a primary one."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (should-not (quarry-grep--other-filters-p))
+    (quarry-test-grep--run-filters '(:pattern "needle" :regexp t) '(:target path :exclude t :pattern "sub"))
+    (should (quarry-grep--other-filters-p))
+    (quarry-test-grep--run-filters '(:pattern "needle" :regexp t))
+    (should-not (quarry-grep--other-filters-p))
+    ;; Several filters, none of them primary: switched off.
+    (quarry-test-grep--run-filters '(:pattern "needle" :regexp t) '(:target path :exclude t :pattern "sub"))
+    (let ((search (quarry-grep--copy-search quarry-grep--current)))
+      (setf (quarry-grep--search-filters search)
+            (mapcar (lambda (filter)
+                      (let ((new (quarry-grep--copy-filter filter)))
+                        (setf (quarry-grep--filter-enabled new) nil)
+                        new))
+                    (quarry-grep--search-filters search)))
+      (let ((quarry-grep--current search))
+        (should-not (quarry-grep--primary search))
+        (should-not (quarry-grep--other-filters-p))))))
+
+(ert-deftest quarry-test-grep-conditions-do-not-signal ()
+  "No condition signals, in a result buffer or any other buffer."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (dolist (pos (list (point-min) (point-max)
+                       (quarry-test-grep--filter-pos 0)
+                       (quarry-test-grep--heading-pos "notes.txt")
+                       (quarry-test-grep--line-pos "notes.txt" 1)))
+      (goto-char pos)
+      (dolist (predicate quarry-test-grep--condition-predicates)
+        (should-not (condition-case err (progn (funcall predicate) nil) (error err)))))
+    (with-temp-buffer
+      (dolist (predicate quarry-test-grep--condition-predicates)
+        (should-not (condition-case err (progn (funcall predicate) nil) (error err)))
+        (should-not (and (memq predicate '(quarry-grep--running-p
+                                           quarry-grep--has-results-p
+                                           quarry-grep--editable-p
+                                           quarry-grep--earlier-search-p
+                                           quarry-grep--later-search-p
+                                           quarry-grep--other-filters-p))
+                         (funcall predicate)))))))
+
+;;;; The menu
+
+(defun quarry-test-grep--menu-suffixes ()
+  "Return the plists (:key ... :command ...) of the entries of `quarry-grep-menu'.
+The layout is read from the symbol property that `transient-define-prefix'
+sets.  A group is a vector whose last element lists its children.  A
+suffix is a list that holds the plist: as its last element in transient
+0.7.2, (LEVEL CLASS PLIST), and as the rest of the list in 0.13, (CLASS
+. PLIST)."
+  (let (suffixes)
+    (named-let walk ((node (get 'quarry-grep-menu 'transient--layout)))
+      (cond ((vectorp node) (walk (aref node (1- (length node)))))
+            ((not (consp node)))
+            ((keywordp (cadr node)) (push (cdr node) suffixes))
+            ((let ((last (car (last node))))
+               (and (consp last) (keywordp (car last))))
+             (push (car (last node)) suffixes))
+            (t (mapc (lambda (child) (walk child)) node))))
+    (nreverse suffixes)))
+
+(defun quarry-test-grep--menu-entries ()
+  "Return the entries of `quarry-grep-menu' as a list of (KEY . COMMAND).
+KEY is as `key-description' writes it."
+  (mapcar (lambda (plist)
+            (cons (key-description (kbd (plist-get plist :key)))
+                  (plist-get plist :command)))
+          (quarry-test-grep--menu-suffixes)))
+
+(defun quarry-test-grep--keymap-entries ()
+  "Return the `quarry-grep-' commands of `quarry-grep-mode-map' as (KEY . COMMAND)."
+  (let (entries)
+    (named-let walk ((map quarry-grep-mode-map) (prefix nil))
+      (map-keymap
+       (lambda (event binding)
+         (let ((keys (vconcat prefix (vector event))))
+           (cond ((keymapp binding) (walk binding keys))
+                 ((and (symbolp binding)
+                       (string-prefix-p "quarry-grep-" (symbol-name binding)))
+                  (push (cons (key-description keys) binding) entries)))))
+       map))
+    (nreverse entries)))
+
+(ert-deftest quarry-test-grep-menu-matches-keymap ()
+  "Every key of the mode map has a menu entry with its command, and no other."
+  (let* ((menu (quarry-test-grep--menu-entries))
+         (skipped '("?" "M-N" "M-P" "<mouse-2>"))
+         (keymap (cl-remove-if (lambda (entry) (member (car entry) skipped))
+                               (quarry-test-grep--keymap-entries))))
+    (should (> (length keymap) 30))
+    (should (equal (sort (copy-sequence keymap) (lambda (a b) (string< (car a) (car b))))
+                   (sort (copy-sequence menu) (lambda (a b) (string< (car a) (car b))))))
+    (should (= (length menu) (length (delete-dups (mapcar #'car menu)))))
+    ;; The menu is the command of `?' and has no entry for it.
+    (should (eq (keymap-lookup quarry-grep-mode-map "?") 'quarry-grep-menu))
+    (should-not (assoc "?" menu))))
+
+(defun quarry-test-grep--menu-description (key)
+  "Return the text of the description of the entry KEY, in the current buffer."
+  (let ((description
+         (seq-some (lambda (plist)
+                     (and (equal (plist-get plist :key) key)
+                          (plist-get plist :description)))
+                   (quarry-test-grep--menu-suffixes))))
+    (substring-no-properties (if (functionp description) (funcall description) description))))
+
+(ert-deftest quarry-test-grep-menu-descriptions ()
+  "The switches show the values of the buffer's search."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (let ((texts '("d" "f" "c" "i" "H" "C" "B" "A")))
+      ;; `%' names what the filter at point becomes.
+      (goto-char (quarry-test-grep--filter-pos 0))
+      (should (equal (quarry-test-grep--menu-description "%")
+                     "make the filter at point literal"))
+      (goto-char (point-max))
+      (should (equal (quarry-test-grep--menu-description "%")
+                     "make the filter at point regexp or literal"))
+      (should (equal (mapcar #'quarry-test-grep--menu-description texts)
+                     (list (format "directory: %s" (abbreviate-file-name dir))
+                           "file type: everything"
+                           "case: smart" "ignore files: on" "hidden files: on"
+                           "context: 0" "before: 0" "after: 0")))
+      ;; Another search in the same buffer: other values everywhere.
+      (let ((sub (expand-file-name "sub/" dir)))
+        (quarry-grep-literal "needle" "txt" sub))
+      (quarry-test-grep--wait)
+      (quarry-test-grep--keys "c i H")
+      (quarry-test-grep--keys (kbd "C-u 1 B"))
+      (quarry-test-grep--keys (kbd "C-u 3 A"))
+      (goto-char (quarry-test-grep--filter-pos 0))
+      (should (equal (quarry-test-grep--menu-description "%")
+                     "make the filter at point a regexp"))
+      (should (equal (mapcar #'quarry-test-grep--menu-description texts)
+                     (list (format "directory: %s"
+                                   (abbreviate-file-name (expand-file-name "sub/" dir)))
+                           "file type: txt"
+                           "case: sensitive" "ignore files: off" "hidden files: off"
+                           "context: 1/3" "before: 1" "after: 3")))
+      (quarry-test-grep--keys (kbd "C-u 2 C"))
+      (should (equal (quarry-test-grep--menu-description "C") "context: 2")))))
+
+(defun quarry-test-grep--menu-inactive (keys)
+  "Return those of KEYS whose menu entry is inactive in the current buffer.
+That is what the entry's own `:inapt-if-not' function says at point."
+  (seq-filter
+   (lambda (key)
+     (let* ((plist (seq-find (lambda (plist) (equal (plist-get plist :key) key))
+                             (quarry-test-grep--menu-suffixes)))
+            (predicate (plist-get plist :inapt-if-not)))
+       (should plist)
+       (and predicate (not (funcall predicate)))))
+   keys))
+
+(ert-deftest quarry-test-grep-menu-inactive-follows-point ()
+  "Each entry that depends on point is inactive exactly where its command fails."
+  (quarry-test-grep--with-tree (dir '(("top.txt" . "needle\n")
+                                      ("a/b/c.txt" . "needle\n")))
+    (quarry-test-grep--search dir)
+    (let ((keys '("+d" "-f" "-d" "%" "x" "!" "k" "TAB" "RET")))
+      (goto-char (quarry-test-grep--filter-pos 0))
+      (should (equal (quarry-test-grep--menu-inactive keys) '("+d" "-f" "-d" "TAB")))
+      (goto-char (quarry-test-grep--line-pos "a/b/c.txt" 1))
+      (should (equal (quarry-test-grep--menu-inactive keys) '("%" "x" "!" "k")))
+      (goto-char (quarry-test-grep--heading-pos "a/b/c.txt"))
+      (should (equal (quarry-test-grep--menu-inactive keys) '("%" "x" "!" "k")))
+      ;; A file in the search directory itself has no directory to filter.
+      (goto-char (quarry-test-grep--line-pos "top.txt" 1))
+      (should (equal (quarry-test-grep--menu-inactive keys)
+                     '("+d" "-d" "%" "x" "!" "k")))
+      (goto-char (point-max))
+      (should (equal (quarry-test-grep--menu-inactive keys)
+                     '("+d" "-f" "-d" "%" "x" "!" "k" "TAB"))))))
+
+(ert-deftest quarry-test-grep-menu-refused ()
+  "The menu is a user-error outside a result buffer."
+  (with-temp-buffer
+    (should-error (quarry-grep-menu) :type 'user-error))
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (with-temp-buffer
+      (text-mode)
+      (should-error (quarry-grep-menu) :type 'user-error))))
+
+(ert-deftest quarry-test-grep-menu-key-runs-command ()
+  "`? c' changes the search as `c' does, and the menu closes."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (should (eq (quarry-grep--search-case quarry-grep--current) 'smart))
+    (quarry-test-grep--keys "? c")
+    (should (eq (quarry-grep--search-case quarry-grep--current) 'sensitive))
+    (should (eq (quarry-test-grep--request :case) :sensitive))
+    (should-not transient-current-command)
+    ;; A key that two-key bindings use, and a key with a modifier.
+    (quarry-test-grep--keys "? i")
+    (should (quarry-grep--search-no-ignore quarry-grep--current))
+    (quarry-test-grep--keys "g")
+    (quarry-test-grep--keys "? C-c <")
+    (should (eq (quarry-grep--search-case quarry-grep--current) 'sensitive))
+    (should-not (quarry-grep--search-no-ignore quarry-grep--current))))
+
+(ert-deftest quarry-test-grep-menu-prefix-argument ()
+  "A numeric argument typed before `?' or after `C-u' in the menu reaches the command."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (quarry-test-grep--keys "C-u 3 ? C")
+    (should (equal (quarry-grep--context-text quarry-grep--current) "3"))
+    (quarry-test-grep--keys "? C-u 1 B")
+    (should (equal (quarry-grep--context-text quarry-grep--current) "1/3"))
+    (should-not transient-current-command)))
+
+(ert-deftest quarry-test-grep-menu-inactive-entry ()
+  "An inactive entry does not run its command; the menu goes on until C-g."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (let ((sent (length quarry-test-grep--requests)))
+      ;; K needs another filter, - f a file at point.
+      (pop-to-buffer-same-window (quarry-test-grep--buffer))
+      (goto-char (point-min))
+      (execute-kbd-macro (kbd "? K - f C-g"))
+      (should (= (length quarry-test-grep--requests) sent))
+      (should-not transient-current-command))))
+
+(ert-deftest quarry-test-grep-menu-loads-transient-late ()
+  "quarry-grep.el does not load transient or the menu; `?' is an autoload."
+  (let* ((emacs (expand-file-name invocation-name invocation-directory))
+         (lisp (file-name-directory (locate-library "quarry-grep")))
+         (emrs (file-name-directory (locate-library "emrs")))
+         (out (generate-new-buffer " *quarry-grep-late*"))
+         (form '(kill-emacs
+                 (progn
+                   (require 'quarry-grep)
+                   (if (and (not (featurep 'transient))
+                            (not (featurep 'quarry-grep-menu))
+                            (autoloadp (symbol-function 'quarry-grep-menu))
+                            (eq (keymap-lookup quarry-grep-mode-map "?") 'quarry-grep-menu))
+                       0
+                     1)))))
+    (unwind-protect
+        (let ((status (call-process emacs nil out nil "--batch" "-Q"
+                                    "-L" lisp "-L" emrs
+                                    "--eval" (prin1-to-string form))))
+          (should (equal (list status (with-current-buffer out (buffer-string)))
+                         (list 0 (with-current-buffer out (buffer-string))))))
+      (kill-buffer out))))
+
+(ert-deftest quarry-test-grep-header-hint ()
+  "The header line ends with the hint for the menu; a click runs the menu."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (with-current-buffer (quarry-test-grep--buffer)
+      (let* ((header (quarry-grep--header))
+             (start (- (length header) (length "? menu"))))
+        (should (string-suffix-p " files   ? menu" (substring-no-properties header)))
+        (should (eq (get-text-property start 'face header) 'quarry-grep-header-value))
+        (should-not (get-text-property (1+ start) 'face header))
+        (dolist (pos (list start (+ start 2) (+ start 5)))
+          (should (equal (get-text-property pos 'help-echo header)
+                         "mouse-1: show all keys (?)"))
+          (should (eq (get-text-property pos 'mouse-face header) 'header-line-highlight))
+          (should (eq (lookup-key (get-text-property pos 'keymap header) [header-line mouse-1])
+                      (lookup-key (get-text-property pos 'keymap header) [header-line mouse-2])))
+          (should (commandp (lookup-key (get-text-property pos 'keymap header)
+                                        [header-line mouse-1]))))
+        ;; The click opens the menu in the window of the header.
+        (pop-to-buffer-same-window (current-buffer))
+        (let ((click (list 'mouse-1 (list (selected-window) 'header-line '(0 . 0) 0)))
+              (run (lookup-key (get-text-property start 'keymap header) [header-line mouse-1]))
+              (called nil))
+          (cl-letf (((symbol-function 'quarry-grep-menu)
+                     (lambda () (interactive) (setq called t))))
+            (funcall run click))
+          (should called))))))
 
 (provide 'quarry-grep-tests)
 ;;; quarry-grep-tests.el ends here
