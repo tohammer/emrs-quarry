@@ -107,3 +107,76 @@ Origin: requested by the author on 2026-10-11, after trying the
 highlighting. Revisit with the next change to the item shape (context
 lines, or the delivery cost of large results), so the format changes
 once.
+
+## Filters: editing in the buffer, file content, narrowing in memory
+
+Three extensions of the filters, weighed before the grep spec and left
+out of it:
+
+- **Editing a filter in the buffer as you type.** Feasible: the pattern
+  of a filter line becomes an editable field, the rest stays read-only,
+  and a change runs the search again after a short idle delay; with
+  cancellation and under 100 ms per search on an ordinary tree that is
+  search-as-you-type. The cost: the buffer must be writable with
+  read-only regions, the same technique wgrep uses, so the two states
+  must be kept apart; results arrive below while point is in a filter
+  line; undo and invalid half-typed regexps need handling. Today a
+  filter is edited in the minibuffer with `RET`.
+- **Filters on file content**: only files that contain X somewhere, or
+  no file that contains X. Needs a second pass over the files with hits
+  and a third filter target next to line and path.
+- **Narrowing in memory.** Adding a filter only narrows the result, so
+  the service could filter results it holds instead of searching again.
+  Not worth it while a rerun costs under 100 ms; interesting on very
+  large trees.
+
+Origin: evaluation before the grep spec (2026-10-10); the author asked
+for in-buffer editing "if possible". Revisit when the filter block has
+been used for a while.
+
+## Grep on the file index and the watcher
+
+With a current index, grep need not walk the tree or evaluate ignore
+files: the index lists the candidate files at once, which matters on
+very large trees and most with include path filters, since a walk cannot
+skip directories for them. The watcher could mark results as stale or
+refresh them when files change. Both need the two services to share
+state, which is not designed (ADR 0010): emrs has no service-to-service
+calls, the index is owned by one service without locks, and a full
+snapshot copies the whole index (file finder backlog, "Unbounded memory
+during walks and `(:files)`"). The index also holds only non-ignored
+files of a project root, so grep keeps its own walk for other
+directories and for searches with ignore files off. Origin: evaluation
+before the grep spec (2026-10-10); this is why both tools live in one
+module. Revisit when searches on a very large tree are measured and the
+walk is a real share of the time.
+
+## Further features weighed before the spec
+
+Candidates, each one line; none is designed.
+
+- **Regexp replace with preview across files.** The strongest
+  candidate: the engine has the capture groups, and it complements
+  wgrep for mechanical changes.
+- **consult front end**: the pattern as you type in the minibuffer, in
+  the manner of `quarry-consult.el`.
+- **Saved and named searches**, and a list of search buffers, as rg.el
+  has. Today there is one result buffer; `clone-buffer` keeps a result.
+- **Export to a plain `grep-mode` buffer**, as a bridge to embark and
+  other tools.
+- **Multi-line matches.** The engine supports them; display and wgrep
+  get harder.
+- **Searching unsaved buffer contents.** The module sees only the disk;
+  Emacs would have to send the text of modified buffers.
+- **Remote directories.** A module cannot search over TRAMP; the
+  commands refuse and name rg.el. Handing the search over to rg.el
+  automatically, when it is installed, would be possible.
+- **PCRE2** (look-around, back-references): on demand; it needs a C
+  library at build time (ADR 0011).
+
+Considered and not planned: a trigram index for content search (a large
+project of its own; the search is fast enough below AOSP size), and
+`~/.ripgreprc`, compressed files and preprocessors (ADR 0011).
+
+Origin: evaluation before the grep spec (2026-10-10). Pick from here
+when the items above it in this file are done or a need shows up.

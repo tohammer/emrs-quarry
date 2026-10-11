@@ -11,9 +11,28 @@ target, but the engine it is built from is published as crates by the
 same author: `ignore` (walk, ignore rules, file types), `grep-regex`,
 `grep-searcher` and `grep-matcher`.
 
-A prototype on these crates searched 19,500 files in 55 to 90 ms, the same
-as `rg` on the same machine, including a negative line pattern and a path
-exclusion (`GREP-EVALUATION.md` in the emrs repository, section 2).
+`grep-printer` (rg's text and JSON output) is not needed with an own
+`Sink`. The crates are licensed Unlicense or MIT, compatible with
+quarry's MIT or Apache-2.0.
+
+A throwaway prototype on these crates (parallel walk, one searcher per
+thread, an own `Sink` collecting line number, text and match positions)
+was timed against `rg` 15.2.0 on 2026-10-10: 8 cores, Linux, warm file
+cache, three runs each, on a machine that was not idle. `rg` wrote
+coloured, grouped output to `/dev/null`; the prototype collected
+everything in memory.
+
+| Search (smart case) | Files | Lines | `rg` | Prototype |
+|---|---|---|---|---|
+| `defun` in Doom's `straight/repos` | 19,516 | 33,824 | 73–124 ms | 61–90 ms |
+| `save-excursion`, same tree | 19,516 | 4,507 | 64–67 ms | 54–56 ms |
+| `wx[A-Z]\w+Event` in wxWidgets | 11,166 | 20,352 | 98–156 ms | 68–74 ms |
+| `TODO` in wxWidgets | 11,166 | 1,412 | 108–193 ms | 59–60 ms |
+| no match, `straight/repos` | 19,516 | 0 | 69–119 ms | 53–108 ms |
+| `defun`, not `interactive` on the line, path without `/test` | 17,272 | 32,405 | 100 ms (`rg … \| rg -v`) | 106 ms |
+
+Read as "the same speed", not as "faster than `rg`". Not measured then:
+cold-cache searches and trees of AOSP size.
 
 ## Decision
 

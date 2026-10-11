@@ -6,9 +6,8 @@ Status: accepted
 ## Context
 
 A second emrs-based tool is planned: an interactive grep with a result
-buffer, filters and wgrep editing. The evaluation
-(`GREP-EVALUATION.md` in the emrs repository, section 7) compared a
-separate repository with a combined one.
+buffer, filters and wgrep editing. An evaluation before its spec
+(2026-10-10) compared a separate repository with a combined one.
 
 Each emrs module links its own runtime and has its own statics. Two
 modules can exchange data only through Lisp. A grep that is ever to use
@@ -20,6 +19,21 @@ user-visible names later is not.
 Both tools also need the same things around the Rust code: the local
 cargo build and install (ADR 0006), the module lookup, the test harness,
 one emrs pin (ADR 0007), and one set of rules for which files count.
+
+What spoke against combining, and was judged the lesser weight for a
+private project with one developer:
+
+- The tools have different units. The index keeps one long-lived
+  instance with watches per project root; grep runs once on any
+  directory, also outside projects and with ignore rules switched off,
+  where the index has nothing to offer. Grep needs its own walk in any
+  case.
+- One module couples the builds and the releases of the tools.
+- "A comprehensive find and grep suite" invites a shared UI framework
+  before the second tool exists.
+
+The alternative was a separate repository for grep, accepting the build
+and install code, the walker rules and the path matching as duplicates.
 
 The name projdex means project index and does not fit a set of tools.
 

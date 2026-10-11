@@ -27,7 +27,12 @@ buffer text.
 ## Consequences
 
 - Inserting results costs one `insert` and a few property changes per
-  line, measured at about 6 µs per line in batch Emacs.
+  line. A throwaway benchmark (2026-10-10, batch Emacs 31.1, interpreted
+  Elisp, a line number prefix with properties plus one highlighted
+  match per line, no redisplay) took 6 ms for 1,000 lines, 58 ms for
+  10,000, 188 ms for 33,000 and 586 ms for 100,000: about 6 µs per
+  line. rg.el itself was not benchmarked, so the gain over it is an
+  expectation.
 - `next-error` and `previous-error` work through `next-error-function`.
   Commands that exist only for compilation buffers do not; the ones worth
   having (next and previous file) are written here.
