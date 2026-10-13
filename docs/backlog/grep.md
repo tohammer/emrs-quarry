@@ -152,7 +152,13 @@ walk is a real share of the time.
 - **`quarry-test-grep-edit-pattern` failed once** in five full runs of
   `tests/run-ert.sh` during this work and passed in every other run and
   alone; the output was not captured. See also the project backlog,
-  "Order-dependent ERT test". Capture the failure when it shows again.
+  "Order-dependent ERT test". It failed again in CI on 2026-10-13
+  (Emacs 31.1 on macos-latest, run 38443048535, 1 of 236), on a change
+  that did not touch grep: after `r` with `^fn \w+`,
+  `quarry-test-grep--results` held `src/b.rs` before `src/a.rs`, where
+  the test expects `a` first. So the two files came in the other order;
+  whether the service may deliver files in any order, or the buffer
+  should sort them, is not looked into yet. Next: `/devflow:debug`.
 - **Not supported in the live input:** `-w`, `-C`, `-m`, `--pcre2` and
   clusters of short options (`-Fi`); they are errors in the prompt (ADR
   0019). Add an option when it is missed; `-w` and `-C` need little.
