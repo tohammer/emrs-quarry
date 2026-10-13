@@ -72,15 +72,26 @@ seconds long and `(:files)` is opt-in. Revisit if memory use is reported
 on huge trees (cap the change log and force a follow-up walk; snapshot
 shared strings).
 
-## Waiting for `(:files)` runs other process filters
+## Collect `(:files)` with `emrs-call-stream-sync`
 
 `quarry--collect-files` waits with `(accept-process-output nil 0.05)`,
 so other processes' filters and timers can run inside `project-files`.
-`emrs-call-sync` waits on the module pipe only, but that pipe is private
-to emrs. Origin: v1 review (Elisp), 2026-10-09; deferred because it needs
-a public helper in emrs (a synchronous stream collect, or access to the
-pipe). The emrs pinned on 2026-10-11 (`b824f9f`) still has none. Revisit
-when emrs gets one.
+emrs now has `emrs-call-stream-sync` (emrs PR #5, merged 2026-10-12),
+which waits on the module pipe only, returns all items as one list in
+order, and signals `emrs-error` on failure, on timeout (kind `timeout`)
+and when the instance stops. To do:
+
+- Move the emrs pin in `Cargo.toml` from `b824f9f` to `6d8f550`
+  (`6d8f5503127c7a1121210cb4afe2956386933155`) or later on emrs's default
+  branch (ADR 0007); there is no Rust or protocol change in between, only
+  `emrs.el`. Rerun `cargo test` and `tests/run-ert.sh`.
+- Replace the batch collecting, the polling loop and the cancel in
+  `quarry--collect-files` with one call with `quarry-files-timeout`, and
+  map every `emrs-error` to `fail` as today.
+- Users need the matching `emrs.el`: an older one lacks the function.
+
+Origin: v1 review (Elisp), 2026-10-09, deferred then because emrs had no
+public helper; unblocked on 2026-10-12.
 
 ## Symlinked project roots get separate instances
 
