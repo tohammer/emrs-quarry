@@ -4,14 +4,17 @@ Build, distribution, CI and the test suite. Part of [the backlog](../backlog.md)
 
 ## Continuous integration
 
-No CI yet. Add it once the repository is public; then mirror emrs's
-matrix (Linux, macOS, Emacs 30.1 and 31.1).
+CI runs on Linux and macOS (README "Tests"). Open: Windows and Linux on
+ARM, which emrs's CI has; `cargo test` on macOS, where only the ERT suite
+runs; and making the checks required for a merge, which the ruleset of
+`master` does not do yet. Revisit Windows before claiming Windows
+support.
 
 ## Distribution
 
 Installation from GitHub works through package recipes and a local cargo
 build (spec 2026-10-09-install-from-github, README "Installation"). Open:
-prebuilt binaries, which need CI (see above) and would replace the cargo
+prebuilt binaries, which CI would build and which would replace the cargo
 build and its Rust requirement, and a package archive (MELPA) for quarry
 and emrs. Depends on emrs's own distribution work (emrs backlog, "Prebuilt
 artifacts and distribution"). Origin: the install-from-GitHub spec, which

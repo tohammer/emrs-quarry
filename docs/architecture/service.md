@@ -72,7 +72,8 @@ Rust test checks it.
 The watcher covers exactly the directories the walk visits. On Linux that
 is one non-recursive inotify watch per directory, plus `<dir>/.git/info`
 where it exists. Elsewhere the root is watched recursively and events are
-filtered (`Mode::Recursive`; never run on macOS or Windows).
+filtered (`Mode::Recursive`; on macOS run only by the ERT suite in CI,
+never on Windows).
 
 The watcher keeps a set of known directories, each stamped with a clock
 value. A full walk advances the clock and confirms every directory it
