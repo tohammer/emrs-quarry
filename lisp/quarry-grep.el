@@ -1692,6 +1692,7 @@ Does not signal."
 (defvar wgrep-prepared)
 (defvar wgrep-original-mode-map)
 (defvar wgrep-header&footer-parser)
+(defvar wgrep-header/footer-parser)
 (defvar wgrep-results-parser)
 (declare-function wgrep-change-to-wgrep-mode "ext:wgrep" ())
 (declare-function wgrep-construct-filename-property "ext:wgrep" (filename))
@@ -1720,7 +1721,8 @@ this file look at the buffer."
 
 (defun quarry-grep--edit-header-and-footer ()
   "Mark the header and the footer for wgrep.
-The value of `wgrep-header&footer-parser' in a result buffer.  The
+The value of `wgrep-header&footer-parser' (`wgrep-header/footer-parser'
+in the release 3.0.0 of wgrep) in a result buffer.  The
 header is everything before the first file block, the footer the
 status line."
   (let ((first (or (text-property-any (point-min) (point-max) 'quarry-grep-heading t)
@@ -1916,6 +1918,9 @@ command again.  Needs the package wgrep."
       (remove-overlays (point-min) (point-max) 'quarry-grep-fold t)
       (remove-overlays (point-min) (point-max) 'wgrep t)
       (setq-local wgrep-header&footer-parser #'quarry-grep--edit-header-and-footer
+                  ;; Its name in the release 3.0.0 of wgrep, which is
+                  ;; what NonGNU ELPA has.
+                  wgrep-header/footer-parser #'quarry-grep--edit-header-and-footer
                   wgrep-results-parser #'quarry-grep--edit-results
                   ;; The map wgrep goes back to.  `wgrep-setup-internal'
                   ;; would set it too, and bind a key in it.

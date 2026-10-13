@@ -503,7 +503,9 @@ nothing is resolved while no buffer is modified. A nil
 asks (`y-or-n-p`); yes runs the search again and does not enter edit mode.
 
 **Entering.** Fold overlays and wgrep overlays of an earlier commit are
-removed. Buffer-locally, `wgrep-header&footer-parser` and
+removed. Buffer-locally, `wgrep-header&footer-parser` (and
+`wgrep-header/footer-parser`, its name in the release 3.0.0 of wgrep that
+NonGNU ELPA has) and
 `wgrep-results-parser` are set to the two functions below,
 `wgrep-prepared` to nil (the properties of an earlier edit are gone) and
 `wgrep-original-mode-map` to the mode's map; then

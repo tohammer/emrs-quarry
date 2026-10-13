@@ -349,6 +349,8 @@ impl Shared<'_> {
     /// search when the cap is reached.
     fn reserve(&self, wanted: usize) -> usize {
         let max = self.max_lines;
+        // `try_update`, the new name, is not in the minimum supported Rust.
+        #[allow(deprecated)]
         let before = self
             .lines
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |lines| Some(lines.saturating_add(wanted).min(max)))
@@ -659,7 +661,9 @@ pub(crate) mod hook {
         Cancelled(usize),
     }
 
-    static ENDED: LazyLock<(Mutex<HashMap<PathBuf, Vec<Ended>>>, Condvar)> = LazyLock::new(Default::default);
+    type EndedByDir = Mutex<HashMap<PathBuf, Vec<Ended>>>;
+
+    static ENDED: LazyLock<(EndedByDir, Condvar)> = LazyLock::new(Default::default);
 
     pub(super) fn record(dir: &Path, ended: Ended) {
         let (map, cv) = &*ENDED;

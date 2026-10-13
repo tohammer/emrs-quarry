@@ -17,11 +17,12 @@ you type (see "Live grep"). The two tools do not need each other.
 quarry is built on [emrs](https://github.com/tohammer/emrs), which runs the
 Rust side as a message-passing service outside the Emacs thread.
 
-Status: version 1. It was built and tested on Linux only, with Emacs 31.1
-(the ERT suite and `cargo test` pass there) and, for the benchmark, Emacs
-31.0.50. It has not been run with Emacs 30. macOS and Windows are untested;
-the watcher code for them is type-checked but never ran against the real
-backends (`docs/backlog.md`). There is no CI. It installs from GitHub with
+Status: version 1. It was built and used on Linux only, with Emacs 31.1
+and, for the benchmark, Emacs 31.0.50. CI runs the ERT suite on Linux and
+macOS with Emacs 30.1 and 31.1, and `cargo test` on Linux; beyond that,
+Emacs 30 and macOS have not been used by hand, and the watcher code for
+macOS is known only from those tests (`docs/backlog.md`). Windows is
+untested. It installs from GitHub with
 package recipes and a local cargo build; only the Doom recipe is checked by
 hand, the straight, elpaca and package-vc variants are untested. There are
 no prebuilt binaries.
@@ -1106,8 +1107,14 @@ the test of loading without consult and the rest of the suite run as
 usual. Rerun them after
 upgrading consult.
 
-Set `EMACS` to use another Emacs binary. There is no CI (`docs/backlog.md`),
-so run the first two before merging.
+Set `EMACS` to use another Emacs binary.
+
+CI (`.github/workflows/ci.yml`) runs on every pull request and on
+`master`: `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D
+warnings` and `cargo test` on Linux, `cargo check` with the minimum
+supported Rust, and `tests/run-ert.sh` on Linux and macOS with Emacs 30.1
+and 31.1, with consult and wgrep installed from GNU ELPA and NonGNU ELPA.
+`master` takes changes only through pull requests.
 
 ## Documentation
 

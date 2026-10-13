@@ -11,8 +11,9 @@ the case-sensitive prefix bug (ADR 0003). Revisit when a release after
 ## Watcher on macOS and Windows
 
 The recursive-watch path for non-Linux platforms is type-checked for
-Windows and exercised on Linux through a test hook, but never run against
-FSEvents or Windows. Suspected issues: FSEvents' sticky flags causing extra
+Windows and exercised on Linux through a test hook. On macOS it runs
+against FSEvents only in the ERT suite in CI, where the Rust tests do not
+run; it never ran on Windows. Suspected issues: FSEvents' sticky flags causing extra
 directory walks; Windows buffer overflows, which notify does not report as
 lost events. Also, when creating the backend watcher fails,
 notify-debouncer-full leaves its own thread running (upstream). Origin:

@@ -31,8 +31,12 @@ architecture.md or an ADR.
   Pin only commits that are on emrs's default branch: users get `emrs.el`
   from that branch, which must not be older than the module's protocol
   (ADR 0007).
-- There is no CI (backlog). Run `cargo test` and `tests/run-ert.sh`
-  locally before merging.
+- `master` takes changes only through pull requests, documentation
+  included (a ruleset on GitHub). CI runs on each one but is not required
+  for the merge (project backlog); look at it before merging.
+- CI uses the newest stable Rust, so `cargo clippy --all-targets -- -D
+  warnings` can fail there on a lint the local toolchain does not have
+  yet.
 - `nucleo-matcher` is pinned to an upstream git commit because 0.3.1 has a
   prefix bug (ADR 0003). Bump it deliberately and rerun `cargo test`; the
   narrowing and substring-style tests fail when nucleo's parsing or
