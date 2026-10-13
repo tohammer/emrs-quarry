@@ -131,26 +131,6 @@ before the grep spec (2026-10-10); this is why both tools live in one
 module. Revisit when searches on a very large tree are measured and the
 walk is a real share of the time.
 
-## Live grep: manual checks not done yet
-
-The live grep (spec `2026-10-12-live-grep.md`) was run in batch Emacs
-only, with consult 3.7 and the default completion UI. Not tried, in the
-author's Doom setup (vertico, embark, GUI frame): the feel of typing
-against `+default/search-project` on a large tree; the preview while
-moving through candidates; `embark-export` (`C-c C-;`) and Doom's
-`C-c C-e` on the candidates; `C-c C-o` with terms, `!` terms and
-options, and that its echo-area message survives `pop-to-buffer`; the
-note for an invalid regexp while typing (where it stands relative to
-vertico's candidates, and the cursor); how the secondary matches look
-with `consult-grep-context` in their face list (a shadowed foreground
-shows where `quarry-grep-match-secondary` sets none); a region as
-initial input that holds `#` and spaces; `M-n` for the symbol at point;
-the hand-over from a nested minibuffer; the `map!` remap lines of the
-README. consult older than 3.7 was not run at all, and the README names
-no minimum version for the live grep. Origin: live grep spec, Testing section, and its
-review (2026-10-12). Do these when the commands are bound; turn what
-fails into backlog items or fixes.
-
 ## Live grep: deferred from the review
 
 - **The same input after a cancel does not search again.** With

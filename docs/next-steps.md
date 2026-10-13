@@ -12,8 +12,6 @@ architecture.md or an ADR.
   `lisp/quarry-grep-menu.el` are new files, so remove the package's
   build directory and run `doom sync` before the restart (see below);
   without that the new commands and `?` are not found.
-- Use the live grep daily and do its manual checks (grep backlog, "Live
-  grep: manual checks not done yet").
 - Use quarry-grep daily and do its manual checks (grep backlog, "Manual
   checks not done yet"), including context lines (`C`, `B`, `A`), the
   menu (`?`) and path globs in the files prompt (`f`).
