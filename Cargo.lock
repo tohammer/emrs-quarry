@@ -68,7 +68,7 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 [[package]]
 name = "emrs"
 version = "0.1.0"
-source = "git+https://github.com/tohammer/emrs.git?rev=b824f9fe402a5ce6e43ef2bb588f710b43388467#b824f9fe402a5ce6e43ef2bb588f710b43388467"
+source = "git+https://github.com/tohammer/emrs.git?rev=f05b9fac93aaeff7679e7e057af744cf6807c043#f05b9fac93aaeff7679e7e057af744cf6807c043"
 dependencies = [
  "libc",
  "serde",

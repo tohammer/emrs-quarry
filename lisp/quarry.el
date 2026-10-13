@@ -511,33 +511,14 @@ the project root alone, a local root and a starting or running instance."
 (defun quarry--collect-files (rec)
   "Return the absolute file names the index of REC holds, or `fail'.
 Wait up to `quarry-files-timeout' seconds for the stream to end."
-  (let* ((root (quarry--rec-root rec))
-         (batches nil)
-         (end nil)
-         (call nil))
-    (unwind-protect
-        (condition-case nil
-            (progn
-              (setq call (emrs-call-stream
-                          (quarry--rec-instance rec) '(:files)
-                          :on-batch (lambda (items) (push items batches))
-                          :on-end (lambda (status _err) (setq end status))))
-              (let ((deadline (+ (float-time) quarry-files-timeout)))
-                (while (and (not end) (< (float-time) deadline))
-                  (accept-process-output nil 0.05)))
-              (if (eq end 'done)
-                  (let ((files nil))
-                    ;; BATCHES is newest first; keep the order of the index.
-                    (dolist (batch batches)
-                      (dolist (path (nreverse (copy-sequence batch)))
-                        (push (concat root path) files)))
-                    files)
-                'fail))
-          ;; The instance stopped or failed in the meantime.
-          (emrs-error 'fail))
-      ;; Cancels on timeout and on a quit; does nothing for a call that
-      ;; has already ended.
-      (when (and call (not end)) (emrs-cancel call)))))
+  (let ((root (quarry--rec-root rec)))
+    ;; Signals on failure, on timeout and when the instance stopped or
+    ;; stops in the meantime; cancels the call on timeout and on a quit.
+    (condition-case nil
+        (mapcar (lambda (path) (concat root path))
+                (emrs-call-stream-sync (quarry--rec-instance rec) '(:files)
+                                       quarry-files-timeout))
+      (emrs-error 'fail))))
 
 (cl-defmethod project-files :around (project &optional dirs)
   "Serve the files of PROJECT from the quarry index when enabled.

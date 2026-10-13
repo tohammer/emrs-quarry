@@ -31,7 +31,7 @@ uses the same service and the same search values (ADRs 0018, 0019).
    quarry-find-file                           index + matcher state
      completing-read ── table ── emrs-call-sync (:query) ─► handle
                                                             ▲  ▲
-   project-files :around ── emrs-call-stream (:files) ─────┘  │ self-messages
+   project-files :around ── emrs-call-stream-sync (:files) ┘  │ self-messages
    on-event ◄── (:indexed) (:changed) (:watch-failed) ◄─┐     │ WalkBatch/WalkDone,
                                                         │     │ FsChanges/FsRescan/
                                                         │     │ WatchFailed
@@ -81,7 +81,7 @@ as a self-message through `ctx.address()`, so all index access happens in
 `emrs.el` loads `quarry-module` and talks to its two services: `quarry.el`
 to `index`, one instance per project root, and `quarry-grep.el` to
 `grep`, one instance for all result buffers. Both use the emrs API
-(`emrs-start`, `emrs-call`, `emrs-call-sync`, `emrs-call-stream`, ...)
+(`emrs-start`, `emrs-call`, `emrs-call-sync`, `emrs-call-stream`, `emrs-call-stream-sync`, ...)
 and never call the module functions directly. Loading the module and the
 offer to build it are shared in `quarry-core.el`; neither tool loads the
 other's Elisp or uses the other's service. The

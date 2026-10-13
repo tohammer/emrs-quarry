@@ -9,6 +9,9 @@ architecture.md or an ADR.
 - Rebuild the module (`M-x quarry-build-module`) and restart Emacs: path
   globs and context lines need the new module. An older one refuses a
   glob with `/` and shows no context.
+- Update the `emrs` package before that restart (`doom sync -u`, or pull
+  a local checkout): `project-files` from the index now needs
+  `emrs-call-stream-sync`, which an older `emrs.el` does not have.
 - Development mode: `lisp/quarry-consult-grep.el` and
   `lisp/quarry-grep-menu.el` are new files, so remove the package's
   build directory and run `doom sync` before the restart (see below);
@@ -21,8 +24,6 @@ architecture.md or an ADR.
   is the cheapest) or from "Further features weighed before
   the spec", where regexp replace with preview is the strongest
   candidate.
-- The file finder backlog has an item that is unblocked: "Collect
-  `(:files)` with `emrs-call-stream-sync`".
 
 ## Watch out for
 
