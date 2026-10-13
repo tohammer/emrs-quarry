@@ -26,8 +26,8 @@ error messages are in the module docs of `src/grep/service.rs`.
 `(:types)` answers from the `ignore` crate's default type definitions.
 
 `(:search …)` is checked in `handle` before anything is searched: the
-directory, the filters (`Filters::compile`), the file type or globs, the
-extra ignore lines (by building the walker). A request that fails a check
+directory, the filters (`Filters::compile`), the file types, the globs
+(`path_globs`), the extra ignore lines (by building the walker). A request that fails a check
 fails the call; a filter error carries `(:filter INDEX)` as data so Elisp
 can point at the filter. Then `handle` opens the stream (capacity 256
 items) and spawns the search.
@@ -52,9 +52,22 @@ is never opened, and a literal exclude path filter that occurs in a
 directory's path keeps the walk out of that directory, since it occurs in
 the path of every file below. A regexp exclude path filter does not prune:
 what matches a directory's path need not match the files below it
-(`^/src/[^/]*$`), so it is tested on each file. A file type or globs
-become an `ignore::types::Types` selection; globs match file names, not
-paths.
+(`^/src/[^/]*$`), so it is tested on each file. The file types become one
+`ignore::types::Types` selection of the walker, with every named type
+selected: a file must be of one of them.
+
+Globs are path globs in gitignore syntax, compiled into an
+`ignore::overrides::Override` rooted at the directory (ADR 0017). The
+matcher is not given to the walker, where it would overrule ignore files
+and the hidden rule; the entry predicate asks it first, then the path
+filters. So a glob only takes files away, and a file must pass the types
+and the globs. With including globs a file that matches none is
+dropped, and directories are still entered; an excluding glob that
+matches a directory itself (`!gen/`, not `!gen/**`) keeps the walk out
+of it. The matcher reads a glob as a line of a gitignore file and drops
+comments and empty lines without a word, which would leave the search
+unrestricted: `path_globs` escapes a leading `#` and refuses a glob
+that names nothing (`""`, blanks, `!`, `/`).
 
 Each file is searched for the primary filter (the first include line
 filter) by `grep-searcher`. Its `Sink` gets every matching line, removes
@@ -171,8 +184,8 @@ user has typed anything.
 ### Search state
 
 A search is a `quarry-grep--search` record: `dir` (absolute, with a
-trailing slash), `files` (nil for everything, a type name, or a list of
-globs), `case` (`smart`, `sensitive`, `insensitive`), `no-ignore`,
+trailing slash), `types` (a list of file type names, nil for all files) and `globs` (a
+list of path globs), `case` (`smart`, `sensitive`, `insensitive`), `no-ignore`,
 `hidden`, `before` and `after` (the lines of context, 0 by default), and
 `filters`, an ordered list of `quarry-grep--filter` records
 (`target` `line` or `path`, `exclude`, `pattern`, `regexp`, `enabled`).
@@ -190,7 +203,15 @@ differs, and runs the copy; it never modifies a record the buffer or its
 history holds. That makes `equal` on two searches mean "the same search"
 and lets the history keep the records themselves.
 
-`quarry-grep--request` turns a search into the `(:search …)` request. Only
+Where words do not say what they are (the files prompt, `f`, the FILES
+argument of the commands), `quarry-grep--classify-files` decides: a
+word that is a name from `(:types)` is a type, every other word a
+glob. The commands' FILES
+argument stays nil, a string or a list of strings;
+`quarry-grep--files-argument` builds it from what the prompt returned.
+
+`quarry-grep--request` turns a search into the `(:search …)` request, with
+`:file-types` and `:globs` as the search has them. Only
 enabled filters are sent, in order (`quarry-grep--sent-filters`); the list
 sent is kept in `quarry-grep--sent`, because the `(:filter INDEX)` of a
 filter error counts in that list, not in the search's. `:ignores` is
@@ -211,7 +232,12 @@ history lists.
 
 ### Streams and serial numbers
 
-`quarry-grep--run` is the one place a search starts. It ensures the
+`quarry-grep--run` is the one place a search of the result buffer
+starts; the live grep's step opens its own streams ("The live grep"). A search value
+from outside the buffer comes in through `quarry-grep--start-search`,
+which makes or reuses the result buffer and runs it there: the four
+commands build their value in `quarry-grep--start`, the live grep hands
+its own over. It ensures the
 instance first (so a missing module leaves the buffer and its history
 untouched), cancels the running search, records history, widens the
 buffer, resets the state, renders the filter block and the status line,
@@ -545,3 +571,74 @@ wgrep's overlays on the committed lines (applied or rejected, with the
 reason shown at point) stay until the next search or the next `e`. The
 buffer is not searched again after a commit: the changes are in file
 buffers, not on disk, so a search would show the old text.
+
+### The live grep
+
+`lisp/quarry-consult-grep.el` has `quarry-consult-grep` and
+`quarry-consult-grep-project`: the hits of a search as consult
+candidates while the input is typed (spec `2026-10-12-live-grep.md`).
+The file requires `quarry-grep.el`, not `quarry.el`, and consult
+optionally; the commands check with `fboundp` for every consult
+function they call (`quarry-consult-grep--consult-functions`).
+
+**Input.** `quarry-consult-grep--parse` turns the search part of the
+input into a `quarry-grep--search`, the value the result buffer uses
+(ADR 0019); it returns nil when there is nothing to search yet and
+signals a `user-error` for input that is no search. It needs neither
+consult nor the module. `quarry-consult-grep--words` splits at spaces
+and reads a backslash together with the character after it, so `\ ` is
+a space in a word and `\\` before a space ends the word. Words before
+a lone `--` are terms (include line filters, `!` in front for exclude),
+words after it options from the table `quarry-consult-grep--options`;
+a new option is one entry. What is being typed is no error: a lone
+`!`, an option without its value, a last word that is the start of an
+option's spelling, a backslash that ends the input unpaired. Options
+are read only when there is an include term. `-t` and `-g`, each any number of times, fill `types`
+and `globs` directly, so the parser needs no type list and an unknown
+type is the service's error. `quarry-consult-grep-quote` is the
+inverse for one literal string; it writes the separator of the consult
+split style as `\xNN`, since `\#` would still end the search part.
+
+**The step.** `quarry-consult-grep--async` is built like the file
+finder's step (elisp.md, "The consult front end") on a stream instead
+of a call. A new input advances the serial number, cancels the running
+stream, parses, and starts `emrs-call-stream` on the shared instance
+with `quarry-grep--request`, `quarry-grep-max-lines` bound to
+`quarry-consult-grep-max-lines`. The sink is flushed before the first
+batch with candidates, or at the end of a search that had none, so the
+previous candidates stay until then. `cancel` (from
+`consult--async-min-input`) and `destroy` cancel the stream; `cancel`
+also sends `[indicator killed]`, because the cancelled stream's end is
+ignored and nothing else would end the indicator. Errors and the
+notice of a search that reached the cap are a *note*: an overlay with
+an `after-string` at the end of the minibuffer, in the buffer captured
+at `setup`, since the callbacks run with any buffer current. `message`
+would hide the input. Of a message with several lines the last one is
+shown, where the regexp engine names the mistake.
+
+**Candidates** have the shape of `consult-ripgrep`'s (ADR 0018):
+`PATH:LINE:TEXT`, `consult-file` and `consult--prefix-group` on the
+path, `consult-line-number` on the number, `consult-highlight-match` on
+the primary matches, and the face list `(quarry-grep-match-secondary
+consult-grep-context)` on the others, which consult leaves out of its
+matches. Category `consult-grep`, state `consult--grep-state`, so
+preview, grouping and embark's export are consult's.
+
+**The prompt** is `consult--read` over split, min-input, throttle (the
+two options of this file), the step, indicator and refresh, with
+`:async-wrap #'identity` and `default-directory` bound to the searched
+directory, which the candidates' paths are relative to.
+
+**Hand-over.** `quarry-consult-grep-to-buffer` (`C-c C-o` in
+`quarry-consult-grep-map`) splits the minibuffer contents itself with
+the function of the current split style, so it does not depend on what
+the debounced step last saw, parses, and throws the search to a `catch`
+around `consult--read`. The tag is made for each prompt and kept
+buffer-locally in its minibuffer (`quarry-consult-grep--prompt`, with
+the directory). A throw unwinds like a quit: consult removes the
+preview and visits nothing; `exit-minibuffer` would go on with the
+current candidate. After the `catch`, `quarry-consult-grep--hand-over`
+gives the search the context counts of `quarry-grep-context-before`
+and `quarry-grep-context-after` and runs it with
+`quarry-grep--start-search`. The filter part of the input is not
+carried over and is named in the echo area.

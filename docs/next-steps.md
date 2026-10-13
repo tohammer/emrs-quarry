@@ -5,19 +5,25 @@ architecture.md or an ADR.
 
 ## Next
 
-- Rebuild the module (`M-x quarry-build-module`) and restart Emacs:
-  context lines need the new module, an older one shows none.
-- Development mode: `lisp/quarry-grep-menu.el` is a new file, so remove
-  the package's build directory and run `doom sync` before the restart
-  (see below); without that `?` cannot find the menu.
+- Rebuild the module (`M-x quarry-build-module`) and restart Emacs: path
+  globs and context lines need the new module. An older one refuses a
+  glob with `/` and shows no context.
+- Development mode: `lisp/quarry-consult-grep.el` and
+  `lisp/quarry-grep-menu.el` are new files, so remove the package's
+  build directory and run `doom sync` before the restart (see below);
+  without that the new commands and `?` are not found.
+- Use the live grep daily and do its manual checks (grep backlog, "Live
+  grep: manual checks not done yet").
 - Use quarry-grep daily and do its manual checks (grep backlog, "Manual
-  checks not done yet"), now including context lines (`C`, `B`, `A`) and
-  the menu (`?`).
-- Next grep feature: the live search commands and the survey of what
-  else to make native (grep backlog, "Live search commands like Doom's,
-  and a survey of what else to make native"). After that, pick from
-  "Further features weighed before the spec"; regexp replace with
-  preview is named there as the strongest candidate.
+  checks not done yet"), including context lines (`C`, `B`, `A`), the
+  menu (`?`) and path globs in the files prompt (`f`).
+- Next feature: pick from the survey (grep backlog, "Survey: find and
+  grep features worth making native"; finding a file below a directory
+  is the cheapest) or from "Further features weighed before
+  the spec", where regexp replace with preview is the strongest
+  candidate.
+- The file finder backlog has an item that is unblocked: "Collect
+  `(:files)` with `emrs-call-stream-sync`".
 
 ## Watch out for
 
@@ -47,5 +53,16 @@ architecture.md or an ADR.
 - The consult front end uses consult internals (`consult--async-pipeline`
   and its steps, ADR 0008). After a consult upgrade, rerun
   `tests/run-ert.sh` with `QUARRY_TEST_LOAD_PATH` pointing at it (and at
-  compat); without it the command and end-to-end tests
-  are skipped.
+  compat); without it the tests that call consult are skipped.
+- The live grep uses more consult internals than the file finder's front
+  end (ADR 0018): `consult--grep-state`, `consult--prefix-group`,
+  `consult--lookup-member`, the candidate layout `consult--grep-position`
+  reads, the face `consult-grep-context`, and the split functions in
+  `consult-async-split-styles-alist`. After a consult upgrade, rerun
+  `tests/run-ert.sh` with consult on `QUARRY_TEST_LOAD_PATH`;
+  `quarry-test-consult-grep-position` and the prompt tests are the ones
+  that notice.
+- A glob is read as a line of a gitignore file (ADR 0017). After an
+  upgrade of the `ignore` crate, rerun `cargo test`; the glob tests in
+  `src/grep/service.rs` fail when its reading of `#`, `!` or `/`
+  changes.

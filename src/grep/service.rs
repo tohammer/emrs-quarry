@@ -19,10 +19,10 @@
 //! | `:dir` | string: absolute path of an existing directory | |
 //! | `:filters` | list of `(:target :line :exclude nil :pattern "foo" :regexp t)`: the enabled filters in the buffer's order; `:target` is `:line` or `:path`, `:exclude` and `:regexp` may be left out. At least one must be an include line filter | |
 //! | `:case` | `:smart`, `:sensitive` or `:insensitive`: the case rule of the line filters | `:smart` |
-//! | `:file-type` | string: a name from `(:types)` | nil: all files |
-//! | `:globs` | list of strings: globs for file names (not paths: no `/`), e.g. `("*.el" "*.org")`, instead of `:file-type` | nil: all files |
+//! | `:file-types` | list of strings: names from `(:types)`; a file must be of one of them; may be combined with `:globs`, a file must pass both | nil: all files |
+//! | `:globs` | list of strings: gitignore-style path globs relative to `:dir`, like `rg -g`: `("*.el" "src/**" "!*.min.js")`. A glob without `/` matches a name at any depth, one with a `/` at its start or inside a path below `:dir` (a `/` at the end only says "a directory": `!vendor/` is every directory `vendor`), `**` crosses directories, a leading `!` excludes, the last glob that matches decides; with a glob that has no `!`, a file must match one, so name files, not their directory (`src/**`, not `src/`). An excluding glob that matches a directory keeps the walk out of it (`!gen/`; `!gen/**` drops the files one by one). Case-sensitive. A file must also be of one of the `:file-types` if any are given. Globs only restrict: they never bring back a file that an ignore file names or that is hidden (ADR 0017) | nil: all files |
 //! | `:no-ignore` | non-nil: `.gitignore`, `.ignore` and the git exclude files are not applied | nil |
-//! | `:hidden` | search hidden files; say `:hidden nil` to leave out every file and directory whose name starts with a dot, whatever the file type or globs | t |
+//! | `:hidden` | search hidden files; say `:hidden nil` to leave out every file and directory whose name starts with a dot, whatever the file types or globs (a glob cannot bring a hidden file back) | t |
 //! | `:ignores` | list of strings: extra gitignore lines relative to `:dir` | nil |
 //! | `:max-lines` | integer: the search stops when this many kept lines are collected | 50000 |
 //! | `:max-columns` | integer: longer lines are cut after this many characters | 500 |
@@ -46,10 +46,9 @@
 //! | `:dir` is not a directory | `grep directory is not a directory: D` | |
 //! | A filter has an empty or invalid pattern | ``invalid filter `PATTERN`: ENGINE MESSAGE`` (may span lines) | `(:filter INDEX)`, the 0-based position in `:filters` |
 //! | No include line filter | `a search needs an include line filter` | `(:filter nil)` |
-//! | `:file-type` and `:globs` both given | `give a file type or globs, not both` | |
-//! | `:file-type` is not a name from `(:types)` | `unknown file type: NAME` | |
-//! | A glob is empty or invalid | `invalid glob "GLOB": MESSAGE` | |
-//! | A glob contains `/` | `glob "GLOB" names a directory; globs match file names, use a path filter for directories` | |
+//! | A `:file-types` entry is not a name from `(:types)` (the first one is named) | `unknown file type: NAME` | |
+//! | A glob names nothing: empty or blank, `!`, `/` | `invalid glob "GLOB": it is empty` | |
+//! | A glob is invalid | `invalid glob "GLOB": MESSAGE` | |
 //! | An `:ignores` line is invalid | `invalid ignore pattern "LINE": MESSAGE` | |
 //!
 //! **Stream items** are of two kinds, told apart by their first element.
@@ -106,9 +105,10 @@
 use crate::grep::filter::{Case, FilterSpec, Filters};
 use crate::grep::search::{Config, Item, Output, Search};
 use emrs::{CancelToken, Context, Error, Reply, Service, StreamSender};
+use ignore::overrides::{Override, OverrideBuilder};
 use ignore::types::{Types, TypesBuilder};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Capacity of the `(:search)` stream, in items (files).
@@ -118,9 +118,6 @@ const STREAM_CAPACITY: usize = 256;
 /// in its buffer, with or without a match, so a huge `:before` would buffer whole files, per thread. Larger
 /// `:before` and `:after` are clamped to this, not refused.
 const MAX_CONTEXT: usize = 1000;
-
-/// The name of the type built from `:globs`.
-const GLOB_TYPE: &str = "globs";
 
 fn default_true() -> bool {
     true
@@ -149,7 +146,7 @@ pub enum Request {
         #[serde(default)]
         case: Case,
         #[serde(default)]
-        file_type: Option<String>,
+        file_types: Vec<String>,
         #[serde(default)]
         globs: Vec<String>,
         #[serde(default)]
@@ -198,41 +195,56 @@ fn type_list() -> Vec<TypeDef> {
     types
 }
 
-/// The file restriction of a search: a named type, a type made of `globs`, or none.
-fn file_types(file_type: Option<&str>, globs: &[String]) -> Result<Option<Types>, String> {
+/// The file types of a search, if any are asked for (`:file-types`; the walker applies them). A file must be of
+/// one of them: selecting several types gives their union.
+fn file_types(names: &[String]) -> Result<Option<Types>, String> {
+    if names.is_empty() {
+        return Ok(None);
+    }
     let mut builder = TypesBuilder::new();
-    let selected = match (file_type, globs) {
-        (None, []) => return Ok(None),
-        (Some(_), [_, ..]) => return Err("give a file type or globs, not both".to_string()),
-        (Some(name), []) => {
-            builder.add_defaults();
-            // Not left to `build`: it would take `all` for a name.
-            if !builder.definitions().iter().any(|def| def.name() == name) {
-                return Err(format!("unknown file type: {name}"));
-            }
-            name
+    builder.add_defaults();
+    for name in names {
+        // Not left to `build`: it would take `all` for a name.
+        if !builder.definitions().iter().any(|def| def.name() == name) {
+            return Err(format!("unknown file type: {name}"));
         }
-        (None, globs) => {
-            for glob in globs {
-                if glob.is_empty() {
-                    return Err(format!("invalid glob {glob:?}: it is empty"));
-                }
-                // A type's globs are matched against the file name alone; this one would match nothing.
-                if glob.contains('/') {
-                    return Err(format!(
-                        "glob {glob:?} names a directory; globs match file names, use a path filter for directories"
-                    ));
-                }
-                builder.add(GLOB_TYPE, glob).map_err(|e| format!("invalid glob {glob:?}: {e}"))?;
-            }
-            GLOB_TYPE
+        builder.select(name);
+    }
+    builder.build().map(Some).map_err(|e| e.to_string())
+}
+
+/// The path globs of a search, compiled relative to `dir`; `None` for no globs. The search asks the matcher
+/// after the walker's own rules (ADR 0017), so a glob only takes files away.
+///
+/// The matcher reads a glob as a line of a gitignore file and would drop some lines without a word, leaving the
+/// search unrestricted: a line that starts with `#` is a comment there, so that `#` is escaped here (`#*#` are
+/// Emacs's auto-save files); a glob that names nothing (`""`, `"!"`, `"/"`, blanks) is refused.
+fn path_globs(dir: &Path, globs: &[String]) -> Result<Option<Override>, String> {
+    if globs.is_empty() {
+        return Ok(None);
+    }
+    let mut builder = OverrideBuilder::new(dir);
+    for glob in globs {
+        let name = glob.trim_end();
+        let name = name.strip_prefix('!').unwrap_or(name);
+        if name.is_empty() || name == "/" {
+            return Err(format!("invalid glob {glob:?}: it is empty"));
         }
-    };
-    builder.select(selected);
+        let escaped;
+        let line = if glob.starts_with('#') {
+            escaped = format!("\\{glob}");
+            &escaped
+        } else {
+            glob
+        };
+        builder.add(line).map_err(|e| match e {
+            ignore::Error::Glob { err, .. } => format!("invalid glob {glob:?}: {err}"),
+            e => format!("invalid glob {glob:?}: {e}"),
+        })?;
+    }
     match builder.build() {
-        Ok(types) => Ok(Some(types)),
-        Err(ignore::Error::Glob { glob: Some(glob), err }) => Err(format!("invalid glob {glob:?}: {err}")),
-        Err(e) => Err(e.to_string()),
+        Ok(globs) => Ok(Some(globs)),
+        Err(e) => Err(format!("invalid glob: {e}")),
     }
 }
 
@@ -285,7 +297,7 @@ impl Service for GrepService {
                 dir,
                 filters,
                 case,
-                file_type,
+                file_types: type_names,
                 globs,
                 no_ignore,
                 hidden,
@@ -304,14 +316,19 @@ impl Service for GrepService {
                     Ok(filters) => filters,
                     Err(e) => return reply.err(Error::with_data(e.message, FilterErrorData { filter: e.index })),
                 };
-                let types = match file_types(file_type.as_deref(), &globs) {
+                let types = match file_types(&type_names) {
                     Ok(types) => types,
+                    Err(message) => return reply.err(Error::new(message)),
+                };
+                let globs = match path_globs(&dir, &globs) {
+                    Ok(globs) => globs,
                     Err(message) => return reply.err(Error::new(message)),
                 };
                 let config = Config {
                     dir,
                     filters,
                     types,
+                    globs,
                     use_ignore_files: !no_ignore,
                     include_hidden: hidden,
                     ignores,
@@ -392,7 +409,7 @@ pub(crate) mod testing {
         pub dir: String,
         pub filters: Vec<FilterSpec>,
         pub case: Case,
-        pub file_type: Option<String>,
+        pub file_types: Vec<String>,
         pub globs: Vec<String>,
         pub no_ignore: bool,
         pub hidden: bool,
@@ -410,7 +427,7 @@ pub(crate) mod testing {
                 dir: dir.to_str().unwrap().to_string(),
                 filters,
                 case: Case::Smart,
-                file_type: None,
+                file_types: Vec::new(),
                 globs: Vec::new(),
                 no_ignore: false,
                 hidden: true,
@@ -428,7 +445,7 @@ pub(crate) mod testing {
                 dir: self.dir,
                 filters: self.filters,
                 case: self.case,
-                file_type: self.file_type,
+                file_types: self.file_types,
                 globs: self.globs,
                 no_ignore: self.no_ignore,
                 hidden: self.hidden,
@@ -554,16 +571,31 @@ mod tests {
     }
 
     #[test]
-    fn file_type_restricts_the_files() {
+    fn file_types_restrict_the_files() {
         let t =
             tree(&[("a.rs", "needle\n"), ("b.txt", "needle\n"), ("sub/c.rs", "needle\n"), ("sub/d.el", "needle\n")]);
         assert_eq!(find(t.path(), "needle").paths(), ["a.rs", "b.txt", "sub/c.rs", "sub/d.el"]);
 
         let mut q = Query::new(t.path(), vec![line("needle")]);
-        q.file_type = Some("rust".into());
+        q.file_types = vec!["rust".into()];
         let found = run(q);
         assert_eq!(found.paths(), ["a.rs", "sub/c.rs"]);
         assert_eq!(found.summary.files_searched, 2, "other files are not opened");
+    }
+
+    #[test]
+    fn several_file_types_give_the_union_of_their_files() {
+        let t = tree(&[("a.rs", "needle\n"), ("b.txt", "needle\n"), ("sub/c.el", "needle\n"), ("d.md", "needle\n")]);
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        q.file_types = vec!["rust".into(), "elisp".into()];
+        let found = run(q);
+        assert_eq!(found.paths(), ["a.rs", "sub/c.el"]);
+        assert_eq!(found.summary.files_searched, 2, "other files are not opened");
+
+        // A name given twice counts once.
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        q.file_types = vec!["rust".into(), "rust".into()];
+        assert_eq!(run(q).paths(), ["a.rs"]);
     }
 
     #[test]
@@ -578,27 +610,153 @@ mod tests {
     }
 
     #[test]
-    fn hidden_files_stay_out_with_a_file_type_or_globs() {
+    fn globs_with_a_slash_and_double_star_match_paths() {
+        let t = tree(&[
+            ("a.rs", "needle\n"),
+            ("src/b.rs", "needle\n"),
+            ("src/deep/c.rs", "needle\n"),
+            ("other/src/d.rs", "needle\n"),
+            ("src/e.txt", "needle\n"),
+        ]);
+        let search = |globs: &[&str]| {
+            let mut q = Query::new(t.path(), vec![line("needle")]);
+            q.globs = globs.iter().map(|g| g.to_string()).collect();
+            run(q)
+        };
+        assert_eq!(search(&["src/*.rs"]).paths(), ["src/b.rs"]);
+        assert_eq!(search(&["src/**"]).paths(), ["src/b.rs", "src/deep/c.rs", "src/e.txt"]);
+        assert_eq!(search(&["src/**/*.rs"]).paths(), ["src/b.rs", "src/deep/c.rs"]);
+        assert_eq!(search(&["**/src/*.rs"]).paths(), ["other/src/d.rs", "src/b.rs"]);
+        assert_eq!(search(&["*.rs"]).paths(), ["a.rs", "other/src/d.rs", "src/b.rs", "src/deep/c.rs"]);
+        assert_eq!(search(&["*.RS"]).paths(), Vec::<&str>::new(), "case-sensitive");
+    }
+
+    #[test]
+    fn excluding_globs_take_files_away_and_the_last_match_decides() {
+        let t = tree(&[
+            ("a.js", "needle\n"),
+            ("a.min.js", "needle\n"),
+            ("sub/b.js", "needle\n"),
+            ("sub/b.min.js", "needle\n"),
+            ("c.txt", "needle\n"),
+        ]);
+        let search = |globs: &[&str]| {
+            let mut q = Query::new(t.path(), vec![line("needle")]);
+            q.globs = globs.iter().map(|g| g.to_string()).collect();
+            run(q)
+        };
+        // Only excluding globs: everything else stays.
+        assert_eq!(search(&["!*.min.js"]).paths(), ["a.js", "c.txt", "sub/b.js"]);
+        assert_eq!(search(&["*.js", "!*.min.js"]).paths(), ["a.js", "sub/b.js"]);
+        // The later glob wins, in both directions.
+        assert_eq!(search(&["!*.min.js", "*.js"]).paths(), ["a.js", "a.min.js", "sub/b.js", "sub/b.min.js"]);
+        assert_eq!(search(&["*.js", "!*.min.js", "sub/*.min.js"]).paths(), ["a.js", "sub/b.js", "sub/b.min.js"]);
+    }
+
+    #[test]
+    fn an_excluding_glob_that_matches_a_directory_keeps_the_walk_out_of_it() {
+        let t = tree(&[("a.txt", "needle\n"), ("vendor/x.txt", "needle\n"), ("vendor/deep/y.txt", "needle\n")]);
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        q.globs = vec!["!vendor".into()];
+        let found = run(q);
+        assert_eq!(found.paths(), ["a.txt"]);
+        assert_eq!(found.summary.files_searched, 1, "the files below vendor are not opened");
+
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        q.globs = vec!["!vendor/".into()];
+        assert_eq!(run(q).paths(), ["a.txt"]);
+
+        // As in a gitignore file, a later glob does not bring back a file below an excluded directory.
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        q.globs = vec!["!vendor".into(), "vendor/x.txt".into()];
+        assert_eq!(run(q).paths(), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn file_types_and_globs_together_must_both_match() {
+        let t =
+            tree(&[("a.rs", "needle\n"), ("b.txt", "needle\n"), ("sub/c.rs", "needle\n"), ("sub/d.rs", "needle\n")]);
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        q.file_types = vec!["rust".into()];
+        q.globs = vec!["sub/*".into(), "b.txt".into()];
+        let found = run(q);
+        assert_eq!(found.paths(), ["sub/c.rs", "sub/d.rs"]);
+
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        q.file_types = vec!["rust".into()];
+        q.globs = vec!["!sub/d.rs".into()];
+        assert_eq!(run(q).paths(), ["a.rs", "sub/c.rs"]);
+
+        // Several types are alternatives; the globs narrow them all.
+        let t = tree(&[
+            ("a.rs", "needle\n"),
+            ("a_test.el", "needle\n"),
+            ("b.el", "needle\n"),
+            ("b_test.txt", "needle\n"),
+            ("sub/c_test.rs", "needle\n"),
+        ]);
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        q.file_types = vec!["rust".into(), "elisp".into()];
+        q.globs = vec!["*test*".into()];
+        assert_eq!(run(q).paths(), ["a_test.el", "sub/c_test.rs"]);
+
+        // No file passes both: no hits, no error.
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        q.file_types = vec!["elisp".into()];
+        q.globs = vec!["*.rs".into()];
+        assert_eq!(run(q).paths(), Vec::<&str>::new());
+
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        q.file_types = vec!["rust".into(), "elisp".into()];
+        q.globs = vec!["!*test*".into()];
+        assert_eq!(run(q).paths(), ["a.rs", "b.el"]);
+    }
+
+    #[test]
+    fn globs_never_bring_back_ignored_or_hidden_files() {
+        let t = tree(&[
+            (".gitignore", "ignored.txt\n"),
+            ("ignored.txt", "needle\n"),
+            ("seen.txt", "needle\n"),
+            (".hidden.txt", "needle\n"),
+            (".hd/x.txt", "needle\n"),
+        ]);
+        let search = |hidden: bool, no_ignore: bool, globs: &[&str]| {
+            let mut q = Query::new(t.path(), vec![line("needle")]);
+            q.hidden = hidden;
+            q.no_ignore = no_ignore;
+            q.globs = globs.iter().map(|g| g.to_string()).collect();
+            run(q).paths().into_iter().map(String::from).collect::<Vec<_>>()
+        };
+        assert_eq!(search(false, false, &["*.txt", "ignored.txt", ".hidden.txt", ".hd/**"]), ["seen.txt"]);
+        assert_eq!(search(true, false, &["*.txt", "ignored.txt"]), [".hd/x.txt", ".hidden.txt", "seen.txt"]);
+        assert_eq!(search(true, true, &["*.txt"]), [".hd/x.txt", ".hidden.txt", "ignored.txt", "seen.txt"]);
+    }
+
+    #[test]
+    fn hidden_files_stay_out_with_file_types_or_globs() {
         let files = [".hidden.txt", "seen.txt", ".hd/x.txt", "sub/y.txt", "sub/.z.txt", "other.rs"];
         let t = TempDir::new().unwrap();
         for file in files {
             write(t.path(), file, "needle\n");
         }
-        let search = |hidden: bool, file_type: Option<&str>, globs: &[&str]| {
+        let search = |hidden: bool, file_types: &[&str], globs: &[&str]| {
             let mut q = Query::new(t.path(), vec![line("needle")]);
             q.hidden = hidden;
-            q.file_type = file_type.map(String::from);
+            q.file_types = file_types.iter().map(|t| t.to_string()).collect();
             q.globs = globs.iter().map(|g| g.to_string()).collect();
             run(q)
         };
-        let found = search(false, None, &["*.txt"]);
+        let found = search(false, &[], &["*.txt"]);
         assert_eq!(found.paths(), ["seen.txt", "sub/y.txt"]);
         assert_eq!(found.summary.files_searched, 2);
-        assert_eq!(search(false, Some("txt"), &[]).paths(), ["seen.txt", "sub/y.txt"]);
-        assert_eq!(search(false, None, &[]).paths(), ["other.rs", "seen.txt", "sub/y.txt"]);
+        assert_eq!(search(false, &["txt"], &[]).paths(), ["seen.txt", "sub/y.txt"]);
+        assert_eq!(search(false, &[], &[]).paths(), ["other.rs", "seen.txt", "sub/y.txt"]);
         let all_txt = [".hd/x.txt", ".hidden.txt", "seen.txt", "sub/.z.txt", "sub/y.txt"];
-        assert_eq!(search(true, None, &["*.txt"]).paths(), all_txt);
-        assert_eq!(search(true, Some("txt"), &[]).paths(), all_txt);
+        assert_eq!(search(true, &[], &["*.txt"]).paths(), all_txt);
+        assert_eq!(search(true, &["txt"], &[]).paths(), all_txt);
+        assert_eq!(search(false, &["txt", "rust"], &[]).paths(), ["other.rs", "seen.txt", "sub/y.txt"]);
+        assert_eq!(search(false, &["txt", "rust"], &["*.rs"]).paths(), ["other.rs"]);
     }
 
     #[test]
@@ -617,19 +775,22 @@ mod tests {
         let query = || Query::new(t.path(), vec![line("needle")]);
 
         let mut unknown = query();
-        unknown.file_type = Some("nosuchtype".into());
+        unknown.file_types = vec!["nosuchtype".into()];
         let error = refused(unknown);
         assert_eq!(error.kind(), ErrorKind::Service);
         assert_eq!(error.message(), "unknown file type: nosuchtype");
 
         let mut all = query();
-        all.file_type = Some("all".into());
+        all.file_types = vec!["all".into()];
         assert_eq!(refused(all).message(), "unknown file type: all");
 
-        let mut both = query();
-        both.file_type = Some("rust".into());
-        both.globs = vec!["*.rs".into()];
-        assert_eq!(refused(both).message(), "give a file type or globs, not both");
+        let mut among = query();
+        among.file_types = vec!["rust".into(), "nope".into(), "alsonot".into(), "txt".into()];
+        assert_eq!(refused(among).message(), "unknown file type: nope");
+
+        let mut empty = query();
+        empty.file_types = vec!["rust".into(), String::new()];
+        assert_eq!(refused(empty).message(), "unknown file type: ");
 
         let mut bad_glob = query();
         bad_glob.globs = vec!["*.rs".into(), "a[".into()];
@@ -638,14 +799,47 @@ mod tests {
 
         let mut empty_glob = query();
         empty_glob.globs = vec![String::new()];
-        assert!(refused(empty_glob).message().starts_with("invalid glob \"\""));
+        assert_eq!(refused(empty_glob).message(), "invalid glob \"\": it is empty");
 
-        let mut dir_glob = query();
-        dir_glob.globs = vec!["*.rs".into(), "sub/*.txt".into()];
-        assert_eq!(
-            refused(dir_glob).message(),
-            "glob \"sub/*.txt\" names a directory; globs match file names, use a path filter for directories"
-        );
+        let mut lone_bang = query();
+        lone_bang.globs = vec!["!".into()];
+        assert_eq!(refused(lone_bang).message(), "invalid glob \"!\": it is empty");
+
+        // The matcher would drop these lines without a word and search everything.
+        for nothing in [" ", "/", "!/", "! "] {
+            let mut q = query();
+            q.globs = vec![nothing.into()];
+            assert_eq!(refused(q).message(), format!("invalid glob {nothing:?}: it is empty"));
+        }
+    }
+
+    #[test]
+    fn a_glob_that_starts_with_a_hash_is_a_glob_not_a_comment() {
+        // Not `#a#`: a global git exclude file often names Emacs's auto-save files.
+        let t = tree(&[("#a.c", "needle\n"), ("b.c", "needle\n"), ("sub/#d.c", "needle\n")]);
+        let search = |globs: &[&str]| {
+            let mut q = Query::new(t.path(), vec![line("needle")]);
+            q.globs = globs.iter().map(|g| g.to_string()).collect();
+            run(q)
+        };
+        assert_eq!(search(&["#*.c"]).paths(), ["#a.c", "sub/#d.c"]);
+        assert_eq!(search(&["!#*.c"]).paths(), ["b.c"]);
+        assert_eq!(search(&["b.*", "#d.c"]).paths(), ["b.c", "sub/#d.c"]);
+    }
+
+    #[test]
+    fn a_slash_at_the_end_of_a_glob_does_not_anchor_it() {
+        let t = tree(&[("vendor/a", "needle\n"), ("sub/vendor/b", "needle\n"), ("src/c", "needle\n")]);
+        let search = |globs: &[&str]| {
+            let mut q = Query::new(t.path(), vec![line("needle")]);
+            q.globs = globs.iter().map(|g| g.to_string()).collect();
+            run(q)
+        };
+        assert_eq!(search(&["!vendor/"]).paths(), ["src/c"]);
+        assert_eq!(search(&["!/vendor/"]).paths(), ["src/c", "sub/vendor/b"]);
+        // An including glob must name files: the directory alone selects nothing.
+        assert_eq!(search(&["src/"]).paths(), Vec::<&str>::new());
+        assert_eq!(search(&["src/**"]).paths(), ["src/c"]);
     }
 
     #[test]

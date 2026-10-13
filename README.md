@@ -11,7 +11,8 @@ files, updated by a file watcher, and answers fuzzy queries from it with
 The grep tool, `quarry-grep`, works in the manner of
 [rg.el](https://github.com/dajva/rg.el): the search runs in the same
 module, and the matches are shown in a buffer from which the search is
-changed and run again (see "Grep"). The two tools do not need each other.
+changed and run again (see "Grep"). With consult it also searches while
+you type (see "Live grep"). The two tools do not need each other.
 
 quarry is built on [emrs](https://github.com/tohammer/emrs), which runs the
 Rust side as a message-passing service outside the Emacs thread.
@@ -26,7 +27,8 @@ hand, the straight, elpaca and package-vc variants are untested. There are
 no prebuilt binaries.
 
 The grep tool was tested by the ERT suite in batch and by hand in a
-terminal Emacs. It has not been run in a GUI frame, its faces were not
+terminal Emacs; the live grep by the ERT suite in batch and in the
+author's Doom setup. It has not been run in a GUI frame, its faces were not
 looked at in any theme, and it shares the Emacs 30 gap. Editing results
 with wgrep is untested on files with `\r\n` line ends and on files in
 encodings other than UTF-8.
@@ -40,9 +42,10 @@ encodings other than UTF-8.
 - Git credentials for the repositories `tohammer/emrs-quarry` and
   `tohammer/emrs`, which are private; the recipes use the default protocol.
 - Linux for anything you want to rely on (see Status).
-- Optional: [consult](https://github.com/minad/consult) 2.0 or later for
-  the consult front end (see "consult front end"). quarry does not depend
-  on it and never loads it.
+- Optional: [consult](https://github.com/minad/consult), 2.0 or later
+  for the consult front end (see "consult front end"); the live grep
+  (see "Live grep") was tested with consult 3.7 only. quarry does not depend on it;
+  only the commands that need it load it.
 - Optional: [wgrep](https://github.com/mhayashi1120/Emacs-wgrep) to edit
   grep results (see "Editing results"). quarry loads it only when you
   press `e` in a result buffer.
@@ -344,22 +347,49 @@ The commands are autoloaded; without package autoloads, `(require
 
 | Command | Asks for | Searches |
 |---|---|---|
-| `quarry-grep` | regexp, file type, directory | the directory |
-| `quarry-grep-literal` | literal, file type, directory | the directory |
-| `quarry-grep-project` | regexp, file type | the project root (`project-current`), or `default-directory` outside a project |
-| `quarry-grep-dwim` | nothing | the project root for the symbol at point as a literal, in files of the current buffer's type |
+| `quarry-grep` | regexp, file types and globs, directory | the directory |
+| `quarry-grep-literal` | literal, file types and globs, directory | the directory |
+| `quarry-grep-project` | regexp, file types and globs | the project root (`project-current`), or `default-directory` outside a project |
+| `quarry-grep-dwim` | nothing | the project root for the symbol at point as a literal, in files of the current buffer's file type |
+| `quarry-consult-grep` | input in a consult prompt, searched while you type (see "Live grep") | `default-directory`; with a prefix argument, a directory it asks for |
+| `quarry-consult-grep-project` | the same | the project root, or `default-directory` outside a project; with a prefix argument, a project it asks for |
 
 The pattern prompt offers the active region, or else the symbol at point,
-as default. The file type prompt completes over the type names of the
-`ignore` crate (what `rg --type-list` prints) and `everything`; its
-default is the type of the current buffer's file, else `everything`.
-`all` is not a type name; `everything` is the word for no restriction.
-Input that is not a type name is taken as globs separated by spaces, for
-example `*.el *.org`. A glob is matched against the file name alone, not
-the path, and case counts. A glob with a `/` is refused (`glob
-"sub/*.txt" names a directory; globs match file names, use a path filter
-for directories`); restrict the search to directories with a path filter
-(`+ p`, see "Filters"). An empty pattern is refused.
+as default. The files prompt (`Search in files (types and globs)`)
+completes over the type names of the `ignore` crate (what `rg
+--type-list` prints) and `everything`; its default is the type of the
+current buffer's file, else `everything`. `all` is not a type name;
+`everything` is the word for no restriction. The prompt takes words
+separated by spaces: type names, globs, or both (`rust elisp !gen/**`).
+A word that is a type name is a type, in any number; every other word is
+a glob. A glob that is spelled like a type name is taken as the type;
+write `[m]ake` to mean the glob.
+
+How the restrictions combine:
+
+| You give | A file is searched if |
+|---|---|
+| several types | it is of one of them (they are alternatives) |
+| several including globs | it matches one of them (they are alternatives) |
+| types and globs | it passes the types and the globs (both narrow) |
+| an excluding glob (`!...`) | no excluding glob matches it; when several globs match a file, the last one decides |
+
+Nothing in this is an error; a combination that no file passes gives no
+hits.
+
+Globs are gitignore-style and relative to the searched directory. One
+without a `/` matches a name at any depth (`*.el`); one with a `/` at
+its start or inside matches a path from the searched directory
+(`sub/*.txt`, `src/**`); `**` crosses directories. A `/` at the end only
+says "a directory" and does not anchor: `!vendor/` excludes every
+directory `vendor`. A `!` in front excludes (`!*.min.js`), and the last
+glob that matches a file decides. An including glob must name files, not
+their directory: `src/**`, not `src/`, which selects nothing. Case
+counts. Globs only restrict: unlike `rg -g`, a glob never
+brings back an ignored or hidden file; for that use the ignore and
+hidden switches (`i` and `H`, see "The result buffer").
+
+An empty pattern is refused.
 
 ### The result buffer
 
@@ -387,7 +417,7 @@ File: src/walk.rs (2)
 Search finished: 3 lines in 2 files, 61 ms
 ```
 
-- The header line shows the file type, the directory, the case rule,
+- The header line shows the file types and globs, the directory, the case rule,
   whether ignore files are used and hidden files searched, the lines of
   context (`ctx: 2`, or `ctx: 1/3` for 1 before and 3 after; see
   "Context lines"), and the number of hits and files found so far. It
@@ -425,7 +455,7 @@ rest follows in the order it is found.
 | `S-TAB` | Fold all files, or unfold them when all are folded |
 | `g` | Search again |
 | `r`, `t` | Edit the primary filter, as a regexp or as a literal |
-| `d`, `f` | Change the directory; the file type |
+| `d`, `f` | Change the directory; the file types and globs |
 | `c` | Cycle the case rule: smart, sensitive, insensitive |
 | `C`, `B`, `A` | Set the lines of context shown around each hit: both counts, the count before, the count after (see "Context lines") |
 | `i`, `H` | Switch ignore files on or off; hidden files |
@@ -641,9 +671,215 @@ in it.
   line says that the results were edited; `g` searches again, which
   shows what is on disk.
 
+### Live grep
+
+`quarry-consult-grep` and `quarry-consult-grep-project` search while the
+pattern is typed in the minibuffer and show the hits as candidates, in
+the manner of `consult-ripgrep`. The grep service answers each input,
+and the search for the previous input is cancelled. `RET` visits the
+hit.
+
+| Command | Searches | With a prefix argument |
+|---|---|---|
+| `quarry-consult-grep` | `default-directory` | asks for the directory |
+| `quarry-consult-grep-project` | the project root (`project-current`), or `default-directory` outside a project | asks for a project first |
+
+Both need [consult](https://github.com/minad/consult). They were tested
+with consult 3.7 only, by the ERT suite in batch Emacs; which older
+version still works is not known. consult is
+not a dependency of quarry: `lisp/quarry-consult-grep.el` loads without
+it, and the commands then signal a `user-error`. They use consult's
+internal async pipeline and its grep candidate format
+(`docs/decisions/0008`, `0018`), so a consult upgrade can break them.
+The commands are autoloaded; without package autoloads, `(require
+'quarry-consult-grep)` first. The package binds no keys; bind the
+commands yourself (for Doom see below). Remote (TRAMP) directories are
+refused, as by the other grep commands.
+
+An active region is the initial input, quoted so that it is searched
+literally. The symbol at point is offered as future history (`M-n`). The
+history is `quarry-consult-grep-history`.
+
+#### Input
+
+consult splits the input first (`consult-async-split-style`). With the
+default style `perl` the input reads `#search part#filter part`: the
+search part goes to the grep service, and the filter part filters the
+candidates in Emacs with your completion styles. A search starts when
+the search part has `consult-async-min-input` characters (3 by default).
+
+The search part is a list of terms separated by spaces, then, after
+` -- `, options:
+
+```text
+#fn walk !test -- -t rust -g !gen/**#async
+```
+
+- Each term is a pattern that a line must match. The terms may match in
+  any order and anywhere in the line.
+- A term with `!` in front is a pattern that a line must not match
+  (`!test`).
+- `\ ` is a space inside a term (`foo\ bar`), and `\!` at the start of a
+  term is a literal `!`. Any other backslash belongs to the pattern,
+  together with the character after it, so `\\` before a space is a
+  backslash and the space ends the term. A tab separates terms as a
+  space does.
+- The first term without `!` is the primary filter. The order of the
+  terms does not change the hits, but files are searched for the first
+  term, so a rare first term is faster. Point and the preview go to the
+  match of the first term.
+- Terms are Rust regexps (see "Limits"), unless `-F` is given; then all
+  terms are literals.
+- The case rule is `quarry-grep-case` (smart by default), and hidden
+  files are searched when `quarry-include-hidden` is non-nil, unless an
+  option says otherwise.
+
+The options are spelled as in rg. A value is the next word, or attached
+(`-trust`, `--type=rust`).
+
+| Option | Meaning |
+|---|---|
+| `-t TYPE`, `--type TYPE` | a file type; any number, in order |
+| `-g GLOB`, `--glob GLOB` | a glob, see below; any number, in order |
+| `-F`, `--fixed-strings` | all terms are literals, not regexps |
+| `-i`, `--ignore-case` | case rule `insensitive` |
+| `-s`, `--case-sensitive` | case rule `sensitive` |
+| `-S`, `--smart-case` | case rule `smart` |
+| `-u`, `--no-ignore` | ignore files are not used |
+| `-uu` | `-u` and `-.` |
+| `-.`, `--hidden` | hidden files are searched |
+| `--no-hidden` | hidden files are not searched |
+
+Types and globs combine as in the files prompt of the result buffer (see
+"The result buffer"):
+
+| You give | A file is searched if |
+|---|---|
+| several `-t` | it is of one of the types |
+| several including `-g` | it matches one of the globs |
+| `-t` and `-g` | it passes the types and the globs (both narrow) |
+| an excluding `-g !...` | no excluding glob matches it; when several globs match a file, the last one decides |
+
+Nothing in this is an error; a combination that no file passes gives no
+hits. For example, `quarry -- -t elisp -g *test* -g *.rs` searches for
+"quarry" in Elisp files whose name contains "test". The two globs are
+alternatives, but no `.rs` file is an Elisp file, so `-g *.rs` adds
+nothing. `quarry -- -t elisp -t rust -g *test*` searches Elisp and Rust
+files whose name contains "test". To search Elisp files and, besides
+them, every file matching a glob, there is no single input: types and
+globs both narrow.
+
+This differs from rg. In rg an including `-g` overrules `-t` (the first
+example would search every file with "test" in its name and every `.rs`
+file there). Here every option narrows, and only options of the same
+kind are alternatives.
+
+Of several case options the last counts. Nothing else is supported: not
+the other options of rg (`-w`, `-C`, `-m`, `--pcre2`, ...), and not
+clusters of short options (`-Fi`; write `-F -i`). An unknown option is
+not ignored: it is shown as an error in the prompt, and nothing is
+searched. What is still being typed is no error: an option whose value
+is not typed yet, a last word that is the start of an option (`--hid`),
+a lone `!` and a backslash at the end of the input are ignored. Options
+are read only when there is a term to search for.
+
+`-g` differs from rg's:
+
+- Globs only restrict. A glob never brings back an ignored or hidden
+  file, as `rg -g` does; use `-u` and `-.` for that.
+- A glob with a `/` at its start or inside is anchored at the searched
+  directory, as in a gitignore file: `!gen/**` excludes what is in a
+  top-level `gen/`, and `!**/gen/**` at any depth. A glob without such a
+  `/` matches a name at any depth (`*.el`, and `!gen/` for every
+  directory `gen`). The last glob that matches a file decides.
+- To search one directory, name its files: `-g src/**`. `-g src/`
+  selects nothing, as in rg.
+- `!gen/` keeps the walk out of the directory; `!gen/**` gives the same
+  hits but enters it and drops its files one by one.
+- A glob that starts with `#` is a glob (`#*#`), not a comment.
+- With `-t` and `-g` a file must pass both the types and the globs.
+
+A search collects at most `quarry-consult-grep-max-lines` hits (1000 by
+default); a search that stopped there says `[first 1000 hits]` after the
+input. Errors are shown in the same place, for example an invalid
+regexp, an unknown file type or an unknown option. The next input
+searches again.
+
+#### To the result buffer
+
+`C-c C-o` in the prompt (`quarry-consult-grep-to-buffer`, bound in
+`quarry-consult-grep-map`) leaves the prompt and runs the search that is
+typed in the `*quarry-grep*` buffer (see "The result buffer"). The terms
+become its filters, in their order; the file types, the globs, the case
+rule and the ignore and hidden switches are carried over. The context
+lines are those of `quarry-grep-context-before` and
+`quarry-grep-context-after`, and the search stops at
+`quarry-grep-max-lines` hits, not at the live limit. The filter part of
+the input is not carried over; the echo area says so. Input that is no
+search, such as an unknown option, is an error, and the prompt stays
+open. To use another key, bind the command in `quarry-consult-grep-map`.
+
+The candidates have the format and the category of `consult-ripgrep`
+(`docs/decisions/0018`), so preview, grouping by file, `embark-export`
+to a `grep-mode` buffer and wgrep on that buffer work as they do for
+`consult-ripgrep`. `embark-export` exports the candidates that are
+shown; `C-c C-o` runs the search again, without the live limit.
+
+#### From Lisp
+
+Both commands take the directory and the initial input as arguments:
+`(quarry-consult-grep DIR INITIAL)`. INITIAL is a string in the input
+syntax above, without the `#` of the split style. To search for a string
+literally, pass it through `quarry-consult-grep-quote`, which quotes the
+regexp characters, the spaces, a leading `!` and the separator of the
+split style:
+
+```elisp
+(defun my/grep-isearch-string ()
+  "Search the project for the last isearch string, literally."
+  (interactive)
+  (quarry-consult-grep-project
+   nil (quarry-consult-grep-quote isearch-string)))
+```
+
+#### Doom Emacs
+
+To put the commands in place of `+default/search-project` and
+`+default/search-cwd`, in `config.el`:
+
+```elisp
+(map! [remap +default/search-project] #'quarry-consult-grep-project
+      [remap +default/search-cwd]     #'quarry-consult-grep)
+```
+
+A remap changes keys only, not calls from Lisp: commands that call the
+Doom functions, such as `+default/search-project-for-symbol-at-point`,
+still run rg. One prefix argument differs from Doom's: with it,
+`quarry-consult-grep-project` asks for another project, where
+`+default/search-project` searches ignored and hidden files too. For
+that, type ` -- -uu` after the terms. `quarry-consult-grep` with a
+prefix argument asks for the directory, as `+default/search-cwd` does.
+
+Doom previews a hit of its own search commands only on `C-SPC`. That is
+a setting of consult per command (`:preview-key`), which consult looks
+up by the name of the command that runs, so the quarry commands do not
+have it and preview every candidate as point moves. To get Doom's
+behaviour, name them, and any command of your own that calls them:
+
+```elisp
+(after! consult
+  (consult-customize
+   quarry-consult-grep quarry-consult-grep-project
+   :preview-key "C-SPC"))
+```
+
+`:preview-key nil` switches the preview off. Outside Doom the same form
+works without `after!`, once consult is loaded.
+
 ### Options and faces
 
-Customize group `quarry-grep`. They apply to the next search.
+Customize group `quarry-grep`. They apply to the next search. The
+options of the live grep are listed under "Options".
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -693,10 +929,11 @@ Faces: `quarry-grep-match`, `quarry-grep-match-secondary`,
 
 ## Options
 
-The options of the file finder; those of the grep tool are listed under
-"Grep". Customize group `quarry`. `quarry-include-hidden` and `quarry-ignores`
-apply to instances started afterwards; run `quarry-stop` to restart a
-project's instance. The other options apply at once.
+The options of the file finder and of the live grep; those of the grep
+tool are listed under "Grep". Customize group `quarry`. For the file
+finder, `quarry-include-hidden` and `quarry-ignores` apply to instances
+started afterwards; run `quarry-stop` to restart a project's instance.
+The other options apply at once.
 
 | Option | Default | Meaning |
 |---|---|---|
@@ -713,6 +950,9 @@ project's instance. The other options apply at once.
 | `quarry-consult-input-debounce` | `0.05` | Seconds without typing before the consult front end queries. |
 | `quarry-consult-input-throttle` | `0.1` | Minimum seconds between two queries of the consult front end. |
 | `quarry-consult-refresh-interval` | `0.25` | Seconds between queries of the consult front end while the instance is indexing. |
+| `quarry-consult-grep-max-lines` | `1000` | Number of hits a live grep collects before it stops (see "Live grep"). |
+| `quarry-consult-grep-input-debounce` | `0.05` | Seconds without typing before the live grep searches. |
+| `quarry-consult-grep-input-throttle` | `0.1` | Minimum seconds between two searches of the live grep. |
 
 ## What is indexed
 
@@ -852,14 +1092,20 @@ tests of editing grep results (`tests/quarry-grep-wgrep-tests.el`) need
 wgrep: add its directory to `QUARRY_TEST_LOAD_PATH` as well. Without it
 the script says so and those tests are skipped, except the one for the
 refusals of `e`. The
-consult front end tests (`tests/quarry-consult-tests.el`) need consult
-2.0 or later and its dependency compat. `QUARRY_TEST_LOAD_PATH`
+consult front end tests (`tests/quarry-consult-tests.el`) and the live
+grep tests (`tests/quarry-consult-grep-tests.el`) need consult
+(2.0 or later for the file finder; the live grep is tested with 3.7)
+and its dependency compat. `QUARRY_TEST_LOAD_PATH`
 is a colon-separated list of directories that the script adds to
 `load-path`; put the directories of consult and compat there. Without it,
 or when consult cannot be loaded from it, the script says so and skips
-the tests that need consult (the command and end-to-end tests); the
-tests of the async step, the test of loading without consult and the
-rest of the suite run as usual. Rerun them after
+the tests that need consult (the command and end-to-end tests of the
+file finder; of the live grep, the tests that call consult, among
+them those that open its prompt and the hand-over to the result
+buffer); the tests of the async steps,
+of the live grep's input syntax and of its commands' directory logic,
+the test of loading without consult and the rest of the suite run as
+usual. Rerun them after
 upgrading consult.
 
 Set `EMACS` to use another Emacs binary. There is no CI (`docs/backlog.md`),

@@ -3,6 +3,9 @@
 Status: implemented
 Date: 2026-10-11
 
+Superseded in part by `2026-10-12-live-grep.md`: the menu's entry reads
+"file types".
+
 ## Purpose
 
 Make the keys of the `*quarry-grep*` buffer discoverable: `?` opens a

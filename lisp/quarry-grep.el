@@ -13,10 +13,10 @@
 ;;; Commentary:
 
 ;; An interactive grep session in the manner of rg.el.  `quarry-grep',
-;; `quarry-grep-literal', `quarry-grep-project' and `quarry-grep-dwim'
-;; ask for a pattern, a file type and a directory and show the matching
-;; lines in a result buffer, from which the search is changed and run
-;; again.
+;; `quarry-grep-literal' and `quarry-grep-project' ask for a pattern,
+;; file types and globs and a directory, `quarry-grep-dwim' takes the
+;; symbol at point, and they show the matching lines in a result buffer,
+;; from which the search is changed and run again.
 ;;
 ;; The search runs in the `grep' service of the quarry module and its
 ;; results arrive as structured values.  The result buffer is therefore
@@ -165,7 +165,8 @@ A context line is a line before or after a hit, shown for its sake.")
                                    (:copier quarry-grep--copy-search))
   "A search: where, in which files, how, and the ordered filters."
   dir                                   ; absolute directory name, with slash
-  files                                 ; nil: all; string: type; list: globs
+  types                                 ; file type names, nil for all files
+  globs                                 ; list of path globs, nil for none
   (case 'smart)                         ; `smart', `sensitive', `insensitive'
   no-ignore                             ; non-nil: ignore files are not used
   (hidden t)                            ; non-nil: hidden files are searched
@@ -190,7 +191,8 @@ That is its first enabled include line filter."
 (defun quarry-grep--request (search)
   "Return the `:search' request for SEARCH.
 See the module docs of src/grep/service.rs for the fields."
-  (let ((files (quarry-grep--search-files search))
+  (let ((types (quarry-grep--search-types search))
+        (globs (quarry-grep--search-globs search))
         (no-ignore (quarry-grep--search-no-ignore search)))
     (append
      (list :search
@@ -208,8 +210,8 @@ See the module docs of src/grep/service.rs for the fields."
                    ('sensitive :sensitive)
                    ('insensitive :insensitive)
                    (_ :smart)))
-     (cond ((stringp files) (list :file-type files))
-           (files (list :globs files)))
+     (and types (list :file-types types))
+     (and globs (list :globs globs))
      (list :no-ignore (and no-ignore t)
            :hidden (and (quarry-grep--search-hidden search) t)
            ;; Without ignore files everything is searched except the
@@ -382,11 +384,19 @@ See `quarry-grep--edit-sync'.")
   "Return \"N NOUN\", with NOUN in the plural unless N is 1."
   (format "%d %s%s" n noun (if (= n 1) "" "s")))
 
-(defun quarry-grep--files-text (files)
-  "Return the file restriction FILES of a search as shown to the user."
-  (cond ((null files) "everything")
-        ((stringp files) files)
-        (t (mapconcat #'identity files " "))))
+(defun quarry-grep--files-text (types globs)
+  "Return the file restriction of a search as the user would type it.
+TYPES is the list of file type names, GLOBS the list of globs.  That is
+\"everything\" for none, else the types followed by the globs, separated
+by spaces."
+  (if (or types globs)
+      (mapconcat #'identity (append types globs) " ")
+    "everything"))
+
+(defun quarry-grep--search-files-text (search)
+  "Return the file restriction of SEARCH as `quarry-grep--files-text' shows it."
+  (quarry-grep--files-text (quarry-grep--search-types search)
+                           (quarry-grep--search-globs search)))
 
 (defun quarry-grep--filter-kind (filter)
   "Return the kind of FILTER as shown: `line', `line/re', `path', `path/re'."
@@ -822,7 +832,7 @@ replace the filter list and the filters instead of modifying them."
   "Minibuffer history of the patterns of quarry-grep.")
 
 (defvar quarry-grep-files-history nil
-  "Minibuffer history of the file type prompt of quarry-grep.")
+  "Minibuffer history of the file types and globs prompt of quarry-grep.")
 
 (defun quarry-grep--default-pattern ()
   "Return the active region or the symbol at point, or nil."
@@ -868,19 +878,38 @@ the one named like the major mode, else the first."
                      (car matching))
                  :name))))
 
+(defun quarry-grep--classify-files (files)
+  "Return (TYPES . GLOBS) for FILES, words that do not say what they are.
+FILES is nil, a string (a list of one word) or a list of strings.  Each
+word that is the name of a file type (see `quarry-grep--type-list') is
+a type, every other word is a glob.  TYPES and GLOBS are lists of
+strings in their order, nil for none; a type name given twice counts
+once."
+  (let ((names (mapcar (lambda (type) (plist-get type :name))
+                       (quarry-grep--type-list)))
+        types globs)
+    (dolist (word (if (listp files) files (list files)))
+      (if (member word names)
+          (cl-pushnew word types :test #'equal)
+        (push word globs)))
+    (cons (nreverse types) (nreverse globs))))
+
 (defun quarry-grep--parse-files (input)
-  "Return the file restriction INPUT names.
-Nil for `everything' or nothing, a type name, or else the list of the
-globs INPUT holds, separated by spaces."
+  "Return (TYPES . GLOBS) for the file restriction INPUT names.
+Both are nil for `everything' or nothing; else the words of INPUT,
+separated by spaces, go through `quarry-grep--classify-files'."
   (let ((input (string-trim input)))
-    (cond ((member input '("" "everything")) nil)
-          ((cl-some (lambda (type) (equal (plist-get type :name) input))
-                    (quarry-grep--type-list))
-           input)
-          (t (split-string input "[ \t]+" t)))))
+    (if (member input '("" "everything"))
+        (cons nil nil)
+      (quarry-grep--classify-files (split-string input "[ \t]+" t)))))
+
+(defun quarry-grep--files-argument (files)
+  "Return the FILES argument of the commands for FILES, a (TYPES . GLOBS).
+That is nil for none, else the list of the type names and the globs."
+  (append (car files) (cdr files)))
 
 (defun quarry-grep--read-files (&optional default)
-  "Read a file restriction; see `quarry-grep--parse-files' for the value.
+  "Read a file restriction; the value is that of `quarry-grep--parse-files'.
 DEFAULT is the text offered as default; without it that is the type of
 the current buffer's file, else `everything'."
   (let* ((names (cons "everything"
@@ -890,12 +919,12 @@ the current buffer's file, else `everything'."
     (quarry-grep--parse-files
      (minibuffer-with-setup-hook
          (lambda ()
-           ;; Globs are separated by spaces, which complete by default.
+           ;; Words are separated by spaces, which complete by default.
            (let ((map (make-sparse-keymap)))
              (set-keymap-parent map (current-local-map))
              (keymap-set map "SPC" #'self-insert-command)
              (use-local-map map)))
-       (completing-read (format-prompt "Search in files (a type, or globs)" default)
+       (completing-read (format-prompt "Search in files (types and globs)" default)
                         names nil nil nil 'quarry-grep-files-history default)))))
 
 (defun quarry-grep--check-directory (dir)
@@ -933,32 +962,41 @@ before they ask for anything."
       (when (derived-mode-p 'quarry-grep-mode)
         (quarry-grep--check-not-editing)))))
 
+(defun quarry-grep--start-search (search)
+  "Run SEARCH, a `quarry-grep--search', in the result buffer and show it.
+The buffer is reused; it is an error while its results are being edited."
+  (quarry-grep--check-result-buffer)
+  ;; Before the buffer is made: a missing module is a `user-error'.
+  (quarry-grep--ensure-instance)
+  (let ((buffer (get-buffer-create quarry-grep-buffer-name)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'quarry-grep-mode)
+        (quarry-grep-mode))
+      (goto-char (point-min))
+      (quarry-grep--run search))
+    (pop-to-buffer buffer)))
+
 (defun quarry-grep--start (pattern regexp files dir)
   "Search DIR for PATTERN in FILES and show the result buffer.
 PATTERN is a regexp if REGEXP is non-nil, else a literal string.  FILES
-is nil for all files, the name of a file type, or a list of globs."
+is nil for all files, a string or a list of strings: a word that is the
+name of a file type is a type, the others are globs (see
+`quarry-grep--classify-files')."
   (quarry-grep--check-result-buffer)
   (quarry-grep--check-pattern pattern)
-  (let ((search (quarry-grep--make-search
-                 :dir (quarry-grep--check-directory dir)
-                 :files files
-                 :case quarry-grep-case
-                 :before (min quarry-grep-context-before
-                              quarry-grep-max-context)
-                 :after (min quarry-grep-context-after
-                             quarry-grep-max-context)
-                 :hidden (and quarry-include-hidden t)
-                 :filters (list (quarry-grep--make-filter
-                                 :pattern pattern :regexp (and regexp t))))))
-    ;; Before the buffer is made: a missing module is a `user-error'.
-    (quarry-grep--ensure-instance)
-    (let ((buffer (get-buffer-create quarry-grep-buffer-name)))
-      (with-current-buffer buffer
-        (unless (derived-mode-p 'quarry-grep-mode)
-          (quarry-grep-mode))
-        (goto-char (point-min))
-        (quarry-grep--run search))
-      (pop-to-buffer buffer))
+  (let* ((dir (quarry-grep--check-directory dir))
+         (classified (quarry-grep--classify-files files)))
+    (quarry-grep--start-search
+     (quarry-grep--make-search
+      :dir dir
+      :types (car classified)
+      :globs (cdr classified)
+      :case quarry-grep-case
+      :before (min quarry-grep-context-before quarry-grep-max-context)
+      :after (min quarry-grep-context-after quarry-grep-max-context)
+      :hidden (and quarry-include-hidden t)
+      :filters (list (quarry-grep--make-filter
+                      :pattern pattern :regexp (and regexp t)))))
     (when (> (max quarry-grep-context-before quarry-grep-context-after)
              quarry-grep-max-context)
       (quarry-grep--tell-context-limit))))
@@ -967,15 +1005,19 @@ is nil for all files, the name of a file type, or a list of globs."
 (defun quarry-grep (regexp files dir)
   "Search DIR for lines that match REGEXP, in FILES.
 REGEXP is a Rust regexp.  FILES is nil for all files, the name of a
-file type, or a list of globs.  The matches are shown in the buffer
-`quarry-grep-buffer-name'; see `quarry-grep-mode' for what can be done
-there.  Interactively, ask for the three."
+file type, a list of globs, or a list of type names and globs.  A word
+that is the name of a file type is a type, any other is a glob.  A file
+must be of one of the types, if any, and match one of the including
+globs, if any.
+The matches are shown in the buffer `quarry-grep-buffer-name'; see
+`quarry-grep-mode' for what can be done there.  Interactively, ask for
+the three."
   (interactive
    (progn
      (quarry-grep--check-result-buffer)
      (quarry-grep--type-list)
      (list (quarry-grep--read-pattern t)
-           (quarry-grep--read-files)
+           (quarry-grep--files-argument (quarry-grep--read-files))
            (quarry-grep--read-directory))))
   (quarry-grep--start regexp t files dir))
 
@@ -988,7 +1030,7 @@ Like `quarry-grep', but STRING is a literal, not a regexp."
      (quarry-grep--check-result-buffer)
      (quarry-grep--type-list)
      (list (quarry-grep--read-pattern nil)
-           (quarry-grep--read-files)
+           (quarry-grep--files-argument (quarry-grep--read-files))
            (quarry-grep--read-directory))))
   (quarry-grep--start string nil files dir))
 
@@ -1003,14 +1045,14 @@ outside a project."
      (quarry-grep--project-root)
      (quarry-grep--type-list)
      (list (quarry-grep--read-pattern t)
-           (quarry-grep--read-files))))
+           (quarry-grep--files-argument (quarry-grep--read-files)))))
   (quarry-grep--start regexp t files (quarry-grep--project-root)))
 
 ;;;###autoload
 (defun quarry-grep-dwim ()
   "Search the current project for the symbol at point.
 The symbol is searched as a literal in the files of the current
-buffer's type, in the project's root or, outside a project, in
+buffer's file type, in the project's root or, outside a project, in
 `default-directory'."
   (interactive)
   (let ((symbol (thing-at-point 'symbol t))
@@ -1300,13 +1342,14 @@ The prompt says REGEXP or literal.  An empty pattern is a `user-error'."
      (lambda (search) (setf (quarry-grep--search-dir search) dir)))))
 
 (defun quarry-grep-change-files ()
-  "Search other files: a file type, globs, or everything."
+  "Search other files: file types and globs, or everything."
   (interactive nil quarry-grep-mode)
   (let ((files (quarry-grep--read-files
-                (quarry-grep--files-text
-                 (quarry-grep--search-files (quarry-grep--current))))))
+                (quarry-grep--search-files-text (quarry-grep--current)))))
     (quarry-grep--change
-     (lambda (search) (setf (quarry-grep--search-files search) files)))))
+     (lambda (search)
+       (setf (quarry-grep--search-types search) (car files)
+             (quarry-grep--search-globs search) (cdr files))))))
 
 (defun quarry-grep-cycle-case ()
   "Change the case rule: smart, then sensitive, then insensitive."
@@ -1980,8 +2023,8 @@ being edited: `?' is text then."
          nil
          (list
           (quarry-grep--header-part
-           "files" (quarry-grep--files-text (quarry-grep--search-files search))
-           #'quarry-grep-change-files "change the file type (f)")
+           "files" (quarry-grep--search-files-text search)
+           #'quarry-grep-change-files "change the file types and globs (f)")
           (quarry-grep--header-part
            "dir" (abbreviate-file-name (quarry-grep--search-dir search))
            #'quarry-grep-change-directory "change the directory (d)")

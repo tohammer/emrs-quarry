@@ -263,7 +263,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
                          :dir (expand-file-name "src/" dir)
                          :filters '((:target :line :exclude nil :pattern "needle" :regexp t))
                          :case :smart
-                         :file-type "rust"
+                         :file-types '("rust")
                          :no-ignore nil :hidden t :ignores nil
                          :max-lines 50000 :max-columns 500
                          :before 0 :after 0)))
@@ -290,7 +290,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
     (should (equal (quarry-test-grep--request :filters)
                    '((:target :line :exclude nil :pattern "needle" :regexp nil))))
     (should (equal (quarry-test-grep--request :globs) '("*.txt" "*.md")))
-    (should-not (plist-member (cdr (quarry-test-grep--request)) :file-type))
+    (should-not (plist-member (cdr (quarry-test-grep--request)) :file-types))
     (should (equal (quarry-test-grep--request :dir) dir))
     (should (equal (quarry-test-grep--headings)
                    '(".hidden.txt" "notes.txt" "sub/deep.txt")))
@@ -319,7 +319,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
       (should (equal (quarry-test-grep--request :dir) dir))
       (should (equal (quarry-test-grep--request :filters)
                      '((:target :line :exclude nil :pattern "ne+dle" :regexp t))))
-      (should-not (plist-member (cdr (quarry-test-grep--request)) :file-type))
+      (should-not (plist-member (cdr (quarry-test-grep--request)) :file-types))
       (should-not (plist-member (cdr (quarry-test-grep--request)) :globs))
       (should (equal (quarry-test-grep--results) quarry-test-grep--needles)))
     ;; Outside a project.
@@ -327,7 +327,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
     (quarry-grep-project "needle" "txt")
     (quarry-test-grep--wait)
     (should (equal (quarry-test-grep--request :dir) (expand-file-name "sub/" dir)))
-    (should (equal (quarry-test-grep--request :file-type) "txt"))
+    (should (equal (quarry-test-grep--request :file-types) '("txt")))
     (should (equal (quarry-test-grep--results) '(("deep.txt" 1 "über needle"))))))
 
 (ert-deftest quarry-test-grep-command-dwim ()
@@ -341,7 +341,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
         (should (= (length prompts) 1)))
       (quarry-test-grep--wait)
       (should (equal (quarry-test-grep--request :dir) dir))
-      (should (equal (quarry-test-grep--request :file-type) "rust"))
+      (should (equal (quarry-test-grep--request :file-types) '("rust")))
       (should (equal (quarry-test-grep--request :filters)
                      '((:target :line :exclude nil :pattern "main" :regexp nil))))
       (should (equal (quarry-test-grep--results) '(("src/a.rs" 1 "fn main() {"))))
@@ -373,13 +373,115 @@ Each is (PROMPT . INITIAL-CONTENTS)."
       (should-not (quarry-grep--default-type))
       (setq buffer-file-name nil)
       (set-buffer-modified-p nil))
-    (should-not (quarry-grep--parse-files "everything"))
-    (should-not (quarry-grep--parse-files " "))
-    (should (equal (quarry-grep--parse-files "rust") "rust"))
-    (should (equal (quarry-grep--parse-files " *.a  *.b ") '("*.a" "*.b")))
-    (should (equal (quarry-grep--parse-files "*.rs") '("*.rs")))
-    (should (equal (quarry-grep--files-text '("*.a" "*.b")) "*.a *.b"))
-    (should (equal (quarry-grep--files-text nil) "everything"))))
+    (should (equal (quarry-grep--parse-files "everything") (cons nil nil)))
+    (should (equal (quarry-grep--parse-files " ") (cons nil nil)))
+    (should (equal (quarry-grep--parse-files "rust") '(("rust"))))
+    (should (equal (quarry-grep--parse-files " *.a  *.b ") '(nil "*.a" "*.b")))
+    (should (equal (quarry-grep--parse-files "*.rs") '(nil "*.rs")))))
+
+(ert-deftest quarry-test-grep-classify-files ()
+  "A word that is a type name is a type, any other word a glob."
+  (quarry-test-grep--with-tree (dir)
+    (should (equal (quarry-grep--classify-files nil) '(nil)))
+    (should (equal (quarry-grep--classify-files "rust") '(("rust"))))
+    (should (equal (quarry-grep--classify-files "*.rs") '(nil "*.rs")))
+    (should (equal (quarry-grep--classify-files '("*.a" "!b/**")) '(nil "*.a" "!b/**")))
+    (should (equal (quarry-grep--classify-files '("!gen/**" "rust" "src/**"))
+                   '(("rust") "!gen/**" "src/**")))
+    (should (equal (quarry-grep--parse-files "rust !gen/** src/**")
+                   '(("rust") "!gen/**" "src/**")))
+    (should (equal (quarry-grep--parse-files "everything") '(nil)))
+    ;; A glob that is not spelled like a type name.
+    (should (equal (quarry-grep--parse-files "[m]ake") '(nil "[m]ake")))
+    ;; Several types, in order; a name given twice counts once.
+    (should (equal (quarry-grep--classify-files '("rust" "*.a" "txt"))
+                   '(("rust" "txt") "*.a")))
+    (should (equal (quarry-grep--parse-files "rust txt md")
+                   '(("rust" "txt" "md"))))
+    (should (equal (quarry-grep--parse-files "txt rust txt *.a")
+                   '(("txt" "rust") "*.a")))
+    (should (equal (quarry-grep--files-argument (quarry-grep--parse-files "txt *.a rust"))
+                   '("txt" "rust" "*.a")))
+    (should-not (quarry-grep--files-argument (quarry-grep--parse-files "everything")))))
+
+(ert-deftest quarry-test-grep-files-text-and-request ()
+  "The restriction is shown as typed; the request has what the search has."
+  (should (equal (quarry-grep--files-text nil nil) "everything"))
+  (should (equal (quarry-grep--files-text '("rust") nil) "rust"))
+  (should (equal (quarry-grep--files-text '("rust" "txt") nil) "rust txt"))
+  (should (equal (quarry-grep--files-text nil '("*.a" "*.b")) "*.a *.b"))
+  (should (equal (quarry-grep--files-text '("rust" "txt") '("!gen/**" "src/**"))
+                 "rust txt !gen/** src/**"))
+  (let ((search (quarry-grep--make-search :dir "/x/")))
+    (should-not (plist-member (cdr (quarry-grep--request search)) :file-types))
+    (should-not (plist-member (cdr (quarry-grep--request search)) :globs))
+    (let ((request (cdr (quarry-grep--request
+                         (quarry-grep--make-search :dir "/x/" :types '("rust" "txt"))))))
+      (should (equal (plist-get request :file-types) '("rust" "txt")))
+      (should-not (plist-member request :globs)))
+    (let ((request (cdr (quarry-grep--request
+                         (quarry-grep--make-search :dir "/x/" :globs '("a/**" "!b"))))))
+      (should (equal (plist-get request :globs) '("a/**" "!b")))
+      (should-not (plist-member request :file-types)))
+    (let ((request (cdr (quarry-grep--request
+                         (quarry-grep--make-search :dir "/x/" :types '("rust")
+                                                   :globs '("!gen/**"))))))
+      (should (equal (plist-get request :file-types) '("rust")))
+      (should (equal (plist-get request :globs) '("!gen/**"))))))
+
+(ert-deftest quarry-test-grep-change-files-path-globs ()
+  "Path globs, excluding globs and a type with globs, with the real module."
+  (quarry-test-grep--with-tree
+      (dir (append quarry-test-grep--files
+                   '(("src/gen/g.rs" . "let needle = 3;\n")
+                     ("docs/x.md" . "needle md\n"))))
+    (quarry-test-grep--search dir)
+    (should (equal (quarry-test-grep--headings)
+                   '(".hidden.txt" "docs/x.md" "notes.txt" "src/a.rs" "src/gen/g.rs"
+                     "sub/deep.txt")))
+    (quarry-test-grep--keys "f sub/*.txt RET")
+    (should (equal (quarry-test-grep--request :globs) '("sub/*.txt")))
+    (should (equal (quarry-test-grep--headings) '("sub/deep.txt")))
+    (quarry-test-grep--keys "f src/** RET")
+    (should (equal (quarry-test-grep--headings) '("src/a.rs" "src/gen/g.rs")))
+    (quarry-test-grep--keys "f !*.md RET")
+    (should (equal (quarry-test-grep--request :globs) '("!*.md")))
+    (should (equal (quarry-test-grep--headings)
+                   '(".hidden.txt" "notes.txt" "src/a.rs" "src/gen/g.rs" "sub/deep.txt")))
+    (quarry-test-grep--keys "f rust SPC !src/gen/** RET")
+    (should (equal (quarry-test-grep--request :file-types) '("rust")))
+    (should (equal (quarry-test-grep--request :globs) '("!src/gen/**")))
+    (should (equal (quarry-test-grep--headings) '("src/a.rs")))
+    (should (string-prefix-p " files: rust !src/gen/**   " (quarry-test-grep--header)))
+    ;; The default of the prompt is what is searched now.
+    (let ((prompts (quarry-test-grep--prompts
+                    (lambda () (quarry-test-grep--keys "f RET")))))
+      (should (string-match-p "(default rust !src/gen/\\*\\*): " (car (car prompts)))))
+    (should (equal (quarry-test-grep--headings) '("src/a.rs")))
+    ;; Two types search both; the others are not found.
+    (quarry-test-grep--keys "f rust SPC md RET")
+    (should (equal (quarry-test-grep--request :file-types) '("rust" "md")))
+    (should-not (plist-member (cdr (quarry-test-grep--request)) :globs))
+    (should (equal (quarry-test-grep--headings) '("docs/x.md" "src/a.rs" "src/gen/g.rs")))
+    (should (string-prefix-p " files: rust md   " (quarry-test-grep--header)))
+    ;; Two types and an excluding glob.
+    (quarry-test-grep--keys "f rust SPC md SPC !src/gen/** RET")
+    (should (equal (quarry-test-grep--headings) '("docs/x.md" "src/a.rs")))
+    (should (string-prefix-p " files: rust md !src/gen/**   " (quarry-test-grep--header)))))
+
+(ert-deftest quarry-test-grep-command-files-argument ()
+  "The FILES argument of the commands is classified by the same rule."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-grep "needle" '("txt" "!sub/**") dir)
+    (quarry-test-grep--wait)
+    (should (equal (quarry-test-grep--request :file-types) '("txt")))
+    (should (equal (quarry-test-grep--request :globs) '("!sub/**")))
+    (should (equal (quarry-test-grep--headings) '(".hidden.txt" "notes.txt")))
+    (quarry-grep "needle" '("txt" "*.rs" "rust") dir)
+    (quarry-test-grep--wait)
+    (should (equal (quarry-test-grep--request :file-types) '("txt" "rust")))
+    (should (equal (quarry-test-grep--request :globs) '("*.rs")))
+    (should (equal (quarry-test-grep--headings) '("src/a.rs")))))
 
 ;;;; The result buffer
 
@@ -828,17 +930,17 @@ Each is (PROMPT . INITIAL-CONTENTS)."
     (quarry-test-grep--search dir)
     ;; f: a type, globs, everything; the default is what is searched now.
     (quarry-test-grep--keys "f txt RET")
-    (should (equal (quarry-test-grep--request :file-type) "txt"))
+    (should (equal (quarry-test-grep--request :file-types) '("txt")))
     (should (string-prefix-p " files: txt   " (quarry-test-grep--header)))
     (should (equal (quarry-test-grep--headings)
                    '(".hidden.txt" "notes.txt" "sub/deep.txt")))
     (let ((prompts (quarry-test-grep--prompts
                     (lambda () (quarry-test-grep--keys "f RET")))))
       (should (string-match-p "(default txt): " (car (car prompts)))))
-    (should (equal (quarry-test-grep--request :file-type) "txt"))
+    (should (equal (quarry-test-grep--request :file-types) '("txt")))
     (quarry-test-grep--keys "f *.rs SPC *.md RET")
     (should (equal (quarry-test-grep--request :globs) '("*.rs" "*.md")))
-    (should-not (plist-member (cdr (quarry-test-grep--request)) :file-type))
+    (should-not (plist-member (cdr (quarry-test-grep--request)) :file-types))
     (should (string-prefix-p " files: *.rs *.md   " (quarry-test-grep--header)))
     (should (equal (quarry-test-grep--headings) '("src/a.rs")))
     (let ((prompts (quarry-test-grep--prompts
@@ -3172,7 +3274,7 @@ KEY is as `key-description' writes it."
                      "make the filter at point regexp or literal"))
       (should (equal (mapcar #'quarry-test-grep--menu-description texts)
                      (list (format "directory: %s" (abbreviate-file-name dir))
-                           "file type: everything"
+                           "file types: everything"
                            "case: smart" "ignore files: on" "hidden files: on"
                            "context: 0" "before: 0" "after: 0")))
       ;; Another search in the same buffer: other values everywhere.
@@ -3188,7 +3290,7 @@ KEY is as `key-description' writes it."
       (should (equal (mapcar #'quarry-test-grep--menu-description texts)
                      (list (format "directory: %s"
                                    (abbreviate-file-name (expand-file-name "sub/" dir)))
-                           "file type: txt"
+                           "file types: txt"
                            "case: sensitive" "ignore files: off" "hidden files: off"
                            "context: 1/3" "before: 1" "after: 3")))
       (quarry-test-grep--keys (kbd "C-u 2 C"))
