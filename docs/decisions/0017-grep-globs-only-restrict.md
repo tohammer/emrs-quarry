@@ -60,3 +60,8 @@ may be given together; a file must pass both.
   escapes a leading `#`, which would make the line a comment, and
   refuses a glob that names nothing (empty, blank, `!`, `/`), which the
   matcher would drop and so search everything.
+- Where the user writes types and globs as plain words (the files
+  prompt), a word that is a type name is a type and every other word a
+  glob. A glob spelled like a type name is therefore taken as the type;
+  it has to be written another way (`[m]ake`). The live grep's `-t` and
+  `-g` say which is which.

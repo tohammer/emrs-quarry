@@ -43,7 +43,8 @@ shape from the service's file items, and the commands read them with
   buffer. The way to the result buffer is a key of its own in the
   prompt, which runs the search again instead of exporting candidates.
 - Only the primary filter's matches get `consult-highlight-match`. The
-  other include filters' matches get the face list
+  other include filters' matches, when
+  `quarry-grep-highlight-include-filters` is on, get the face list
   `(quarry-grep-match-secondary consult-grep-context)`: the second face
   makes consult leave them out of its matches, so point and the preview
   follow the primary match, as in the result buffer. Where

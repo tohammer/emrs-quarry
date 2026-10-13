@@ -27,7 +27,8 @@ hand, the straight, elpaca and package-vc variants are untested. There are
 no prebuilt binaries.
 
 The grep tool was tested by the ERT suite in batch and by hand in a
-terminal Emacs. It has not been run in a GUI frame, its faces were not
+terminal Emacs; the live grep by the ERT suite in batch and in the
+author's Doom setup. It has not been run in a GUI frame, its faces were not
 looked at in any theme, and it shares the Emacs 30 gap. Editing results
 with wgrep is untested on files with `\r\n` line ends and on files in
 encodings other than UTF-8.
@@ -41,9 +42,9 @@ encodings other than UTF-8.
 - Git credentials for the repositories `tohammer/emrs-quarry` and
   `tohammer/emrs`, which are private; the recipes use the default protocol.
 - Linux for anything you want to rely on (see Status).
-- Optional: [consult](https://github.com/minad/consult) 2.0 or later for
-  the consult front end (see "consult front end") and the live grep (see
-  "Live grep", tested with consult 3.7). quarry does not depend on it;
+- Optional: [consult](https://github.com/minad/consult), 2.0 or later
+  for the consult front end (see "consult front end"); the live grep
+  (see "Live grep") was tested with consult 3.7 only. quarry does not depend on it;
   only the commands that need it load it.
 - Optional: [wgrep](https://github.com/mhayashi1120/Emacs-wgrep) to edit
   grep results (see "Editing results"). quarry loads it only when you
@@ -371,7 +372,7 @@ How the restrictions combine:
 | several types | it is of one of them (they are alternatives) |
 | several including globs | it matches one of them (they are alternatives) |
 | types and globs | it passes the types and the globs (both narrow) |
-| an excluding glob (`!...`) | it is not taken away; when several globs match a file, the last one decides |
+| an excluding glob (`!...`) | no excluding glob matches it; when several globs match a file, the last one decides |
 
 Nothing in this is an error; a combination that no file passes gives no
 hits.
@@ -757,7 +758,7 @@ Types and globs combine as in the files prompt of the result buffer (see
 | several `-t` | it is of one of the types |
 | several including `-g` | it matches one of the globs |
 | `-t` and `-g` | it passes the types and the globs (both narrow) |
-| an excluding `-g !...` | it is not taken away; the last glob that matches a file decides |
+| an excluding `-g !...` | no excluding glob matches it; when several globs match a file, the last one decides |
 
 Nothing in this is an error; a combination that no file passes gives no
 hits. For example, `quarry -- -t elisp -g *test* -g *.rs` searches for

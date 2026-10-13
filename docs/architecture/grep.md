@@ -232,7 +232,8 @@ history lists.
 
 ### Streams and serial numbers
 
-`quarry-grep--run` is the one place a search starts. A search value
+`quarry-grep--run` is the one place a search of the result buffer
+starts; the live grep's step opens its own streams ("The live grep"). A search value
 from outside the buffer comes in through `quarry-grep--start-search`,
 which makes or reuses the result buffer and runs it there: the four
 commands build their value in `quarry-grep--start`, the live grep hands
@@ -637,6 +638,7 @@ buffer-locally in its minibuffer (`quarry-consult-grep--prompt`, with
 the directory). A throw unwinds like a quit: consult removes the
 preview and visits nothing; `exit-minibuffer` would go on with the
 current candidate. After the `catch`, `quarry-consult-grep--hand-over`
-gives the search the context counts of the options and runs it with
+gives the search the context counts of `quarry-grep-context-before`
+and `quarry-grep-context-after` and runs it with
 `quarry-grep--start-search`. The filter part of the input is not
 carried over and is named in the echo area.

@@ -13,10 +13,10 @@
 ;;; Commentary:
 
 ;; An interactive grep session in the manner of rg.el.  `quarry-grep',
-;; `quarry-grep-literal', `quarry-grep-project' and `quarry-grep-dwim'
-;; ask for a pattern, file types and globs and a directory and show the
-;; matching lines in a result buffer, from which the search is changed and
-;; run again.
+;; `quarry-grep-literal' and `quarry-grep-project' ask for a pattern,
+;; file types and globs and a directory, `quarry-grep-dwim' takes the
+;; symbol at point, and they show the matching lines in a result buffer,
+;; from which the search is changed and run again.
 ;;
 ;; The search runs in the `grep' service of the quarry module and its
 ;; results arrive as structured values.  The result buffer is therefore

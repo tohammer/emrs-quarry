@@ -12,16 +12,14 @@ architecture.md or an ADR.
   `lisp/quarry-grep-menu.el` are new files, so remove the package's
   build directory and run `doom sync` before the restart (see below);
   without that the new commands and `?` are not found.
-- Bind the live grep in Doom (README, "Live grep", the `map!` lines) and
-  use it in place of `+default/search-project` and `+default/search-cwd`.
-  Do its manual checks (grep backlog, "Live grep: manual checks not done
-  yet").
+- Use the live grep daily and do its manual checks (grep backlog, "Live
+  grep: manual checks not done yet").
 - Use quarry-grep daily and do its manual checks (grep backlog, "Manual
   checks not done yet"), including context lines (`C`, `B`, `A`), the
   menu (`?`) and path globs in the files prompt (`f`).
 - Next feature: pick from the survey (grep backlog, "Survey: find and
-  grep features worth making native"; rank 2, finding a file below a
-  directory, is the cheapest) or from "Further features weighed before
+  grep features worth making native"; finding a file below a directory
+  is the cheapest) or from "Further features weighed before
   the spec", where regexp replace with preview is the strongest
   candidate.
 - The file finder backlog has an item that is unblocked: "Collect
@@ -55,8 +53,7 @@ architecture.md or an ADR.
 - The consult front end uses consult internals (`consult--async-pipeline`
   and its steps, ADR 0008). After a consult upgrade, rerun
   `tests/run-ert.sh` with `QUARRY_TEST_LOAD_PATH` pointing at it (and at
-  compat); without it the command and end-to-end tests
-  are skipped.
+  compat); without it the tests that call consult are skipped.
 - The live grep uses more consult internals than the file finder's front
   end (ADR 0018): `consult--grep-state`, `consult--prefix-group`,
   `consult--lookup-member`, the candidate layout `consult--grep-position`
