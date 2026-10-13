@@ -859,6 +859,22 @@ still run rg. One prefix argument differs from Doom's: with it,
 that, type ` -- -uu` after the terms. `quarry-consult-grep` with a
 prefix argument asks for the directory, as `+default/search-cwd` does.
 
+Doom previews a hit of its own search commands only on `C-SPC`. That is
+a setting of consult per command (`:preview-key`), which consult looks
+up by the name of the command that runs, so the quarry commands do not
+have it and preview every candidate as point moves. To get Doom's
+behaviour, name them, and any command of your own that calls them:
+
+```elisp
+(after! consult
+  (consult-customize
+   quarry-consult-grep quarry-consult-grep-project
+   :preview-key "C-SPC"))
+```
+
+`:preview-key nil` switches the preview off. Outside Doom the same form
+works without `after!`, once consult is loaded.
+
 ### Options and faces
 
 Customize group `quarry-grep`. They apply to the next search. The
