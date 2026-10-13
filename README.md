@@ -39,8 +39,6 @@ encodings other than UTF-8.
 - Rust 1.88 or later, with `cargo` on `PATH` (or set
   `quarry-build-cargo-program`), to build the module.
 - Network access for cargo's first dependency fetch.
-- Git credentials for the repositories `tohammer/emrs-quarry` and
-  `tohammer/emrs`, which are private; the recipes use the default protocol.
 - Linux for anything you want to rely on (see Status).
 - Optional: [consult](https://github.com/minad/consult), 2.0 or later
   for the consult front end (see "consult front end"); the live grep
@@ -1119,5 +1117,7 @@ so run the first two before merging.
 
 ## Licence
 
-The Rust code is licensed under either MIT or Apache-2.0, at your option.
-The Emacs Lisp files in `lisp/` are licensed under GPL-3.0-or-later.
+The Rust code (`src/`) is licensed under either MIT (`LICENSE-MIT`) or
+Apache-2.0 (`LICENSE-APACHE`), at your option. The Emacs Lisp files in
+`lisp/`, `tests/` and `bench/` are licensed under GPL-3.0-or-later
+(`LICENSE-GPL`).

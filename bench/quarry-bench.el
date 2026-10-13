@@ -1,5 +1,7 @@
 ;;; quarry-bench.el --- Benchmark driver for quarry  -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026  The quarry authors
+
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;;; Commentary:

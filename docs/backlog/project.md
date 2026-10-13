@@ -4,10 +4,8 @@ Build, distribution, CI and the test suite. Part of [the backlog](../backlog.md)
 
 ## Continuous integration
 
-No CI yet. The emrs repository had to disable GitHub Actions for lack of
-quota (2026-10-04), and the same account would pay for this one. Revisit
-when quota allows; then mirror emrs's matrix (Linux, macOS, Emacs 30.1 and
-31.1).
+No CI yet. Add it once the repository is public; then mirror emrs's
+matrix (Linux, macOS, Emacs 30.1 and 31.1).
 
 ## Distribution
 
