@@ -1939,16 +1939,23 @@ Each is (PROMPT . INITIAL-CONTENTS)."
 
 (ert-deftest quarry-test-grep-exclude-file-exactly ()
   "- f excludes the file at point and no file with a similar path."
-  (let ((odd "we.ird+(x)[y]{z}|q$ ü^*?#&~-.c"))
+  (let ((odd "we.ird+(x)[y]{z}|q$ ü^*?#&~-.c")
+        ;; Where case does not tell file names apart (macOS), A.C would
+        ;; be a.c.
+        (upper (let ((probe (make-temp-file "quarry-test")))
+                 (unwind-protect (unless (file-exists-p (upcase probe)) '("A.C"))
+                   (delete-file probe)))))
     (should (equal (quarry-grep--regexp-quote "a.c+(x)[y]{z}|q$^*?\\#&~- ü")
                    "a\\.c\\+\\(x\\)\\[y\\]\\{z\\}\\|q\\$\\^\\*\\?\\\\\\#\\&\\~\\- ü"))
     (quarry-test-grep--with-tree
         (dir (mapcar (lambda (path) (cons path "needle\n"))
-                     (list "a.c" "a.cpp" "a.c.orig" "axc" "sub/a.c" "sub/b.c" "A.C"
-                           odd (concat "sub/" odd) (concat odd "x"))))
+                     (append
+                      (list "a.c" "a.cpp" "a.c.orig" "axc" "sub/a.c" "sub/b.c"
+                            odd (concat "sub/" odd) (concat odd "x"))
+                      upper)))
       (quarry-test-grep--search dir)
       (let ((all (quarry-test-grep--headings)))
-        (should (= (length all) 10))
+        (should (= (length all) (+ 9 (length upper))))
         (goto-char (quarry-test-grep--heading-pos "a.c"))
         (quarry-test-grep--keys "- f")
         (should (equal (quarry-test-grep--headings) (remove "a.c" all)))
@@ -1972,7 +1979,8 @@ Each is (PROMPT . INITIAL-CONTENTS)."
         (quarry-test-grep--keys "- f")
         (should (= (length (quarry-test-grep--filter-lines)) 4))
         (should-not (member "a.c" (quarry-test-grep--headings)))
-        (should (member "A.C" (quarry-test-grep--headings)))))))
+        (when upper
+          (should (member "A.C" (quarry-test-grep--headings))))))))
 
 (ert-deftest quarry-test-grep-header-percent ()
   "A % in the directory or in a glob is doubled for the header line."

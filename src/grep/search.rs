@@ -349,6 +349,8 @@ impl Shared<'_> {
     /// search when the cap is reached.
     fn reserve(&self, wanted: usize) -> usize {
         let max = self.max_lines;
+        // `try_update`, the new name, is not in the minimum supported Rust.
+        #[allow(deprecated)]
         let before = self
             .lines
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |lines| Some(lines.saturating_add(wanted).min(max)))

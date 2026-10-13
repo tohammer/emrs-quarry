@@ -752,7 +752,10 @@ is nil, so the repository is found through `load-path'."
   (quarry-test--with-build (repo cdir)
     (let* ((args (expand-file-name "args" cdir))
            (quarry-build-cargo-program (quarry-test--fake-cargo cdir 0 args))
-           (target (expand-file-name "target" repo))
+           ;; The repository is found through a symlink, so cargo gets
+           ;; its true name; on macOS the temporary directory is itself
+           ;; below a symlink.
+           (target (expand-file-name "target" (file-truename repo)))
            (module (quarry-build--module-file repo)))
       (should (quarry-build-module-sync))
       (let ((recorded (with-temp-buffer (insert-file-contents args) (buffer-string))))
@@ -939,8 +942,11 @@ Wait for WAIT seconds at most (default 10)."
               (should (null (funcall table "xy" nil nil))))
             (should (= starts 1))
             (should (= queries 1))
-            (should (= (length msgs) 1))
-            (should (string-prefix-p "quarry: " (car msgs)))))
+            ;; The warning of the instance's exit comes when the exit is
+            ;; processed, which may be in here; in batch mode it is a
+            ;; message too.
+            (setq msgs (seq-filter (lambda (msg) (string-prefix-p "quarry: " msg)) msgs))
+            (should (= (length msgs) 1))))
       (advice-remove 'quarry--start 'quarry-test-count-start)
       (advice-remove 'quarry-query 'quarry-test-count-query)
       (quarry-stop-all)
