@@ -117,8 +117,9 @@ and menus show the key of the command it remaps to (ADR 0009).
 `project-files` is overridden by an `:around` method that applies only with
 `quarry-mode` and `quarry-provide-project-files`, for the whole root of a
 local project that has a running instance. It collects the `:files` stream
-while waiting in `accept-process-output` and falls back to the next method
-on timeout or error.
+with `emrs-call-stream-sync`, which waits on the module's pipe only, so
+the filters of other processes do not run inside `project-files`, and
+falls back to the next method on timeout or error.
 
 ## The consult front end
 

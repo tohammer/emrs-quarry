@@ -98,6 +98,11 @@ rebuilds the package, so `doom sync -u` rebuilds the module when quarry
 changed. A rebuilt module is used after restarting Emacs; emrs warns when
 the module file it loaded has changed.
 
+Update `emrs` together with quarry. quarry uses functions of `emrs.el` as
+they are added; with an `emrs.el` older than the commit pinned in
+`Cargo.toml`, a command can fail with `void-function` (for example
+`emrs-call-stream-sync`, which `quarry-provide-project-files` needs).
+
 `quarry-build-module-sync` never signals. Without a Rust toolchain, or if
 the build fails, `doom sync` still completes with a warning and the output
 in the buffer `*quarry-build*`. The first quarry command then asks
@@ -185,7 +190,8 @@ with a copy of `quarry.el` that is not inside its repository.
    [emrs repository](https://github.com/tohammer/emrs). The Lisp and Rust
    halves must match: use the commit pinned in `Cargo.toml` (`rev = ...` of
    the `emrs` dependency), or any newer emrs; an `emrs.el` that is too old
-   for the module fails with a protocol error. Either clone emrs and check
+   for the module fails with a protocol error, or with `void-function`
+   for a function quarry uses that it does not have yet. Either clone emrs and check
    out the commit, or take it from the checkout Cargo made, as
    `tests/run-ert.sh` does:
 

@@ -1175,13 +1175,21 @@ Wait for WAIT seconds at most (default 10)."
           (unwind-protect
               (progn
                 (quarry-mode 1)
-                (cl-letf (((symbol-function 'emrs-call-stream)
-                           (lambda (&rest _) 'dummy-call))
-                          ((symbol-function 'emrs-cancel)
-                           (lambda (call) (push call cancelled))))
+                ;; A stream whose batches and end reach nobody, so the
+                ;; wait can only time out.
+                (cl-letf* ((stream (symbol-function 'emrs-call-stream))
+                           (cancel (symbol-function 'emrs-cancel))
+                           ((symbol-function 'emrs-call-stream)
+                            (lambda (instance request &rest _)
+                              (funcall stream instance request
+                                       :on-batch #'ignore :on-end #'ignore)))
+                           ((symbol-function 'emrs-cancel)
+                            (lambda (call)
+                              (push call cancelled)
+                              (funcall cancel call))))
                   (should (equal (project-files (cons 'quarry-test dir))
                                  '("NEXT-METHOD")))
-                  (should (equal cancelled '(dummy-call)))
+                  (should (= (length cancelled) 1))
                   (should (>= (- (float-time) started) 0.2))))
             (quarry-mode -1)))
       (quarry-stop-all)
