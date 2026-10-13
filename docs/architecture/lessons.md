@@ -95,3 +95,26 @@ Part of [the architecture](../architecture.md).
   `before_context` makes the searcher hold that many lines of every
   file across refills, with or without a match, so a huge count buffers
   whole files; hence the limit on the counts (ADR 0015).
+- **A gitignore matcher drops lines without a word.** `OverrideBuilder::add`
+  takes a glob as a line of a gitignore file: a line that starts with
+  `#` is a comment and a blank one nothing, both accepted and ignored.
+  With user input that silently means "no restriction"; escape or refuse
+  such globs before adding them (ADR 0017). And a test with files named
+  like Emacs's auto-save files (`#a#`) finds nothing on a machine whose
+  global git exclude file names them.
+- **consult takes every stretch of a grep candidate with a `face` for a
+  match,** not only `consult-highlight-match`; the column and the
+  preview follow the first one. A face list that holds
+  `consult-grep-context` is left out (ADR 0018).
+- **Leaving a consult prompt for something else is a `throw`,** to a
+  `catch` around `consult--read`: it unwinds like a quit, so the preview
+  is removed and no candidate is visited. `exit-minibuffer` continues in
+  `consult--read` with the current candidate.
+- **`consult--async-split` puts the split style's first character in
+  front of `:initial`,** and the style's `:initial` is a character in
+  consult 3.7, not a string. A stand-in style table in a test hid that;
+  test against consult's own table as well.
+- **`consult--async-throttle` remembers the last input and does not
+  forget it on `cancel`.** A step after it never sees the same input
+  again after min-input cancelled it, so the step must end its own
+  indicator on `cancel`.

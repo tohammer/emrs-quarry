@@ -82,10 +82,10 @@ It names what the filter at point becomes."
    "directory" (abbreviate-file-name (quarry-grep--search-dir quarry-grep--current))))
 
 (defun quarry-grep-menu--files ()
-  "Return the description of the file type."
+  "Return the description of the file types and globs."
   (quarry-grep-menu--entry
-   "file type"
-   (quarry-grep--files-text (quarry-grep--search-files quarry-grep--current))))
+   "file types"
+   (quarry-grep--search-files-text quarry-grep--current)))
 
 ;;;; The menu
 

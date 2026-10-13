@@ -131,44 +131,116 @@ before the grep spec (2026-10-10); this is why both tools live in one
 module. Revisit when searches on a very large tree are measured and the
 walk is a real share of the time.
 
-## Live search commands like Doom's, and a survey of what else to make native
+## Live grep: manual checks not done yet
 
-Write a spec for commands in the manner of two Doom commands:
+The live grep (spec `2026-10-12-live-grep.md`) was run in batch Emacs
+only, with consult 3.7 and the default completion UI. Not tried, in the
+author's Doom setup (vertico, embark, GUI frame): the feel of typing
+against `+default/search-project` on a large tree; the preview while
+moving through candidates; `embark-export` (`C-c C-;`) and Doom's
+`C-c C-e` on the candidates; `C-c C-o` with terms, `!` terms and
+options, and that its echo-area message survives `pop-to-buffer`; the
+note for an invalid regexp while typing (where it stands relative to
+vertico's candidates, and the cursor); how the secondary matches look
+with `consult-grep-context` in their face list (a shadowed foreground
+shows where `quarry-grep-match-secondary` sets none); a region as
+initial input that holds `#` and spaces; `M-n` for the symbol at point;
+the hand-over from a nested minibuffer; the `map!` remap lines of the
+README. consult older than 3.7 was not run at all, and the README names
+no minimum version. Origin: live grep spec, Testing section, and its
+review (2026-10-12). Do these when the commands are bound; turn what
+fails into backlog items or fixes.
 
-- `+default/search-project`: search the current project as you type in
-  the minibuffer; with a prefix argument, choose another project first.
-- `+default/search-cwd`: the same from the current directory; with a
-  prefix argument, ask for the directory.
+## Live grep: deferred from the review
 
-In Doom both run ripgrep as a process through consult (or the other
-completion modules) and show the hits as candidates while the pattern is
-typed. For quarry this is the "consult front end" of the list below with
-its entry points settled: the grep service answers each change of the
-input, in the manner of `quarry-consult.el` for the file finder (ADR
-0008). To settle in the spec: how the commands are named and whether
-they replace the Doom bindings by a remap; the input syntax (Doom's
-consult setup splits the input into a pattern for rg and one that
-filters the candidates, and passes rg options after `--`); how a live
-search becomes a `*quarry-grep*` buffer (export, embark); cancellation
-of the search for the previous input; whether it needs consult or also
-works with plain `completing-read`.
+- **The same input after a cancel does not search again.** With
+  `consult-async-min-input` 3: type `abc`, delete the `c` before the
+  search ends, type `c` again. `consult--async-throttle` still holds
+  `abc` and passes nothing on, so the candidates stay as they were until
+  another input. consult's own behaviour, shared by `consult-ripgrep`;
+  the step now ends its indicator on `cancel`. A fix needs a debounce of
+  quarry's own in place of consult's throttle. Revisit if it is noticed
+  in use.
+- **A failed search empties the candidate list.** While `-t ru` is
+  typed on the way to `-t rust`, each pause is "unknown file type" and
+  the candidates vanish until the input is valid again. Option words
+  being typed are no error any more; a type or glob value being typed
+  still is. Keeping the old candidates under an error note was weighed
+  and left: they would belong to another input. Revisit by feel.
+- **A multi-line region as initial input** is quoted with its newline
+  and finds nothing. Revisit if wanted: take the first line, or refuse.
+- **`quarry-test-grep-edit-pattern` failed once** in five full runs of
+  `tests/run-ert.sh` during this work and passed in every other run and
+  alone; the output was not captured. See also the project backlog,
+  "Order-dependent ERT test". Capture the failure when it shows again.
+- **Not supported in the live input:** `-w`, `-C`, `-m`, `--pcre2` and
+  clusters of short options (`-Fi`); they are errors in the prompt (ADR
+  0019). Add an option when it is missed; `-w` and `-C` need little.
 
-As part of the same work, survey which other find and grep features are
-worth moving into the module, because native code makes them faster or
-makes them possible on large trees. Candidates to look at: the rest of
-Doom's `SPC s` and `SPC f` commands and what they call (search another
-project, search the notes directory, search open buffers, search for the
-symbol at point, locate, find a file from here, recent files), the
-consult commands behind them (`consult-ripgrep`, `consult-find`,
-`consult-line-multi`, `consult-imenu-multi`), and symbol search across a
-project (the definitions of all files, as tags or imenu give them for
-one file). For each: what is slow or missing today on a large tree, and
-whether the index, the watcher or the grep service already has what it
-needs. The result is a ranked list in this backlog, not a design.
+Origin: review of the live grep (2026-10-12).
 
-Origin: requested by the author on 2026-10-11, after the keys menu.
-Revisit as the next grep feature; the survey can come first and decide
-the order.
+## Survey: find and grep features worth making native
+
+Which of Doom's `SPC s` and `SPC f` commands, and the consult commands
+behind them, gain from the module. Ranked by gain against cost. Nothing
+here was measured: "slow" is what the mechanism implies on a large tree
+(a process and a full walk per input), not a number. None is designed.
+
+1. **Live text search** (`+default/search-project`, `-search-cwd`,
+   `consult-ripgrep`). Done on 2026-10-12: `quarry-consult-grep` and
+   `quarry-consult-grep-project`. Searching another project or
+   directory, the notes directory or `.emacs.d` is the same command with
+   a directory argument, and the symbol at point is an initial input.
+2. **Find a file below a directory** (`+default/find-file-under-here`,
+   find in notes, `consult-fd`, `consult-find`). Today: an `fd` or
+   `find` process per input, or `project-find-file` on a list built for
+   that directory. The index has the paths and the matcher. Missing: a
+   query limited to a path prefix, for a directory inside an indexed
+   project, and a decision for directories outside any project (an
+   instance per directory works today but starts a watcher each time).
+   Small on the Rust side; the cheapest item here.
+3. **Grep on the file index** (already above, "Grep on the file index
+   and the watcher"). Not a command, but the live grep raises its
+   value: it walks the tree once per input, where a result buffer walks
+   once per search. Measure the walk's share now that the live grep
+   exists.
+4. **Definitions across a project by pattern** (what dumb-jump does
+   with `rg`; a stand-in for `consult-lsp-symbols`, `consult-eglot-symbols`
+   and tags where no server or tags file exists). The grep service
+   searches; missing are a table of definition patterns per file type
+   and a command that shows the hits as candidates. Medium cost, all of
+   it in Elisp and data. Approximate by nature.
+5. **A symbol index** (the definitions of all files, as imenu gives
+   them for one; `consult-imenu-multi` covers only open buffers). Exact
+   results need a parser per language in the module (tree-sitter
+   grammars: build time, module size, one query file per language) and
+   an index kept current by the watcher, which needs the shared state of
+   ADR 0010. The largest item here; consider only if rank 4 is used and
+   found too coarse.
+6. **Resolve a file name at point against the index** (`+lookup/file`,
+   `find-file-at-point`): a relative path in a log or a compile buffer,
+   found as the suffix of an indexed path. The index answers it with a
+   query; missing is a suffix match that does not rank fuzzily. Small,
+   and of narrow use.
+7. **Recency in the file finder's ranking** (`recentf-open-files`,
+   `projectile-recentf`). The two commands are fast as they are: the
+   list is short. What the module could add is recently visited files
+   ranked first among equal scores (file finder backlog, "Ranking of
+   equal scores"); Emacs would have to send the list.
+
+Not worth moving:
+
+- **Search in open buffers** (`consult-line`, `consult-line-multi`,
+  `+default/search-buffer`, `+vertico/search-symbol-at-point`): the text
+  is in Emacs and may differ from the disk; sending it costs more than
+  searching it there. See "Searching unsaved buffer contents" below.
+- **`locate`**: already an indexed native program, for the whole
+  system; the module has nothing to add.
+- **`imenu` for one buffer**: in Emacs, and instant.
+
+Origin: survey asked for by the author on 2026-10-11, done 2026-10-12
+from Doom's bindings and command definitions and consult 3.7. Pick from
+it; rank 2 is the natural next file finder feature.
 
 ## Further features weighed before the spec
 
@@ -177,9 +249,6 @@ Candidates, each one line; none is designed.
 - **Regexp replace with preview across files.** The strongest
   candidate: the engine has the capture groups, and it complements
   wgrep for mechanical changes.
-- **consult front end**: the pattern as you type in the minibuffer, in
-  the manner of `quarry-consult.el`. Now part of the item above, "Live
-  search commands like Doom's".
 - **Saved and named searches**, and a list of search buffers, as rg.el
   has. Today there is one result buffer; `clone-buffer` keeps a result.
 - **Export to a plain `grep-mode` buffer**, as a bridge to embark and

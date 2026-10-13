@@ -177,3 +177,7 @@ meets the requirement of ADR 0005 without setting `completion-styles`
 (ADR 0008). The command composes consult's internal steps (`consult--`
 functions); only the end-to-end tests exercise them, against the consult
 found through `QUARRY_TEST_LOAD_PATH`.
+
+The live grep (`lisp/quarry-consult-grep.el`) is a second consult front
+end, on the grep service; it is described with the grep tool
+([grep.md](grep.md), "The live grep").

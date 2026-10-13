@@ -81,6 +81,8 @@ pub struct Config {
     pub filters: Filters,
     /// Restricts the files to these types; `None` means all files.
     pub types: Option<ignore::types::Types>,
+    /// Path globs relative to `dir`, asked after the walker's rules: they only take files away (ADR 0017).
+    pub globs: Option<ignore::overrides::Override>,
     /// false: `.gitignore`, `.ignore` and the git exclude files are not applied.
     pub use_ignore_files: bool,
     pub include_hidden: bool,
@@ -221,8 +223,14 @@ impl Search {
             types: config.types.take(),
         };
         let filters = config.filters.clone();
-        let filter: EntryFilter =
-            Arc::new(move |rel, is_dir| if is_dir { !filters.skip_dir(rel) } else { filters.keep_file(rel) });
+        let globs = config.globs.take();
+        let filter: EntryFilter = Arc::new(move |rel, is_dir| {
+            // `rel` is root-relative and `/`-separated, the form the matcher takes.
+            if globs.as_ref().is_some_and(|globs| globs.matched(rel, is_dir).is_ignore()) {
+                return false;
+            }
+            if is_dir { !filters.skip_dir(rel) } else { filters.keep_file(rel) }
+        });
         let walker = walk::walker(&options, Some(filter))?;
         Ok(Search { config, walker })
     }
@@ -1266,6 +1274,7 @@ mod tests {
                 dir: dir.to_path_buf(),
                 filters,
                 types: None,
+                globs: None,
                 use_ignore_files: true,
                 include_hidden: true,
                 ignores: Vec::new(),
