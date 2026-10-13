@@ -1165,8 +1165,13 @@ Wait for WAIT seconds at most (default 10)."
       (delete-directory dir t))))
 
 (ert-deftest quarry-test-project-files-timeout ()
+  "A timeout cancels the call and falls back to the next method.
+The wait reads only the module, so another process's filter does not
+run inside `project-files'."
   (let ((dir (quarry-test--files-tree))
-        (cancelled nil))
+        (cancelled nil)
+        (other nil)
+        (filtered nil))
     (unwind-protect
         (let ((quarry-provide-project-files t)
               (quarry-files-timeout 0.2)
@@ -1187,11 +1192,19 @@ Wait for WAIT seconds at most (default 10)."
                             (lambda (call)
                               (push call cancelled)
                               (funcall cancel call))))
+                  (setq other (make-process
+                               :name "quarry-test-other" :noquery t
+                               :command '("sh" "-c" "echo hi; sleep 5")
+                               :filter (lambda (_proc _string) (setq filtered t))))
                   (should (equal (project-files (cons 'quarry-test dir))
                                  '("NEXT-METHOD")))
                   (should (= (length cancelled) 1))
+                  ;; Its output arrived during the wait and is read only now.
+                  (should-not filtered)
+                  (should (quarry-test--wait (lambda () filtered) 3))
                   (should (>= (- (float-time) started) 0.2))))
             (quarry-mode -1)))
+      (when other (delete-process other))
       (quarry-stop-all)
       (quarry-test--wait (lambda () (zerop (hash-table-count quarry--instances))) 3)
       (delete-directory dir t))))
