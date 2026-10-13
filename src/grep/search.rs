@@ -659,7 +659,9 @@ pub(crate) mod hook {
         Cancelled(usize),
     }
 
-    static ENDED: LazyLock<(Mutex<HashMap<PathBuf, Vec<Ended>>>, Condvar)> = LazyLock::new(Default::default);
+    type EndedByDir = Mutex<HashMap<PathBuf, Vec<Ended>>>;
+
+    static ENDED: LazyLock<(EndedByDir, Condvar)> = LazyLock::new(Default::default);
 
     pub(super) fn record(dir: &Path, ended: Ended) {
         let (map, cv) = &*ENDED;

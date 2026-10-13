@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  rust:
+    name: Rust checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  msrv:
+    name: Minimum supported Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - run: cargo check
+
+  emacs:
+    name: Emacs ${{ matrix.emacs }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        emacs: ["30.1", "31.1"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs }}
+      # consult (with compat) and wgrep are optional for quarry, but without
+      # them tests/run-ert.sh skips the tests that need them.
+      - name: Install consult and wgrep
+        run: |
+          emacs --batch --eval '(progn
+            (require (quote package))
+            (setq package-user-dir (expand-file-name "target/elpa"))
+            (package-refresh-contents)
+            (package-install (quote consult))
+            (package-install (quote wgrep)))'
+          echo "QUARRY_TEST_LOAD_PATH=$(printf '%s:' "$PWD"/target/elpa/*/)" >> "$GITHUB_ENV"
+      - run: tests/run-ert.sh
