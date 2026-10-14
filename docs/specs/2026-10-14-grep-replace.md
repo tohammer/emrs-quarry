@@ -1,6 +1,6 @@
 # Grep: regexp replace with preview
 
-Status: draft
+Status: approved
 Date: 2026-10-14
 
 ## Purpose
