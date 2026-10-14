@@ -150,7 +150,10 @@ is switched on, or the changes were already applied (see below).
 Then it runs the stale check of `e` (`quarry-grep--stale-files`: file
 gone, mtime changed, visited by a modified buffer). With stale files it
 asks, as `e` does, whether to search again. Yes reruns the search with
-the template and applies nothing. Otherwise it asks "Replace N matches
+the template and applies nothing; no stops and applies nothing either
+(unlike `e`, which goes on: a modified visiting buffer would be
+changed and saved with the user's unsaved edits). Without stale files
+it asks "Replace N matches
 on L lines in F files? " (`y-or-n-p`).
 
 For each file block with switched-on matches, in buffer order:
@@ -294,7 +297,7 @@ in Emacs, with undo in those buffers afterwards.
   `tests/run-ert.sh` is green. Needs task 1.
 - [x] 3. **`x` on matches and headings.** *Done when* the toggle tests
   pass. Needs task 2.
-- [ ] 4. **Applying.** `quarry-grep-replace-apply`, the per-file
+- [x] 4. **Applying.** `quarry-grep-replace-apply`, the per-file
   procedure, the overlays and faces of the results, the applied state,
   progress and `C-g`. *Done when* the applying, rejection, encoding and
   500-file tests pass. Needs task 3.

@@ -696,6 +696,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
                    ("+ L" . quarry-grep-include-line-regexp)
                    ("e" . quarry-grep-edit)
                    ("R" . quarry-grep-replace)
+                   ("C-c C-c" . quarry-grep-replace-apply)
                    ("q" . quit-window)))
     (should (eq (keymap-lookup quarry-grep-mode-map key) command)))
   (should (eq (get 'quarry-grep-mode 'derived-mode-parent) 'special-mode)))
@@ -3076,7 +3077,8 @@ wgrep are replaced, so the test does not depend on the environment."
     quarry-grep--running-p quarry-grep--has-results-p
     quarry-grep--wgrep-available-p quarry-grep--editable-p
     quarry-grep--earlier-search-p quarry-grep--later-search-p
-    quarry-grep--other-filters-p quarry-grep--replace-p)
+    quarry-grep--other-filters-p quarry-grep--replace-p
+    quarry-grep--applicable-p)
   "The functions that say whether a command applies; none signals.")
 
 (ert-deftest quarry-test-grep-condition-at-point ()
@@ -3224,7 +3226,8 @@ wgrep are replaced, so the test does not depend on the environment."
                                            quarry-grep--earlier-search-p
                                            quarry-grep--later-search-p
                                            quarry-grep--other-filters-p
-                                           quarry-grep--replace-p))
+                                           quarry-grep--replace-p
+                                           quarry-grep--applicable-p))
                          (funcall predicate)))))))
 
 ;;;; The menu
@@ -3767,6 +3770,322 @@ DISPLAY is the text of the `display' property, or nil."
         (should-not quarry-grep--past)
         (should-not quarry-grep--future)
         (should-not (quarry-test-grep--replace-counts))))))
+
+;;;; Applying a replacement
+
+(defmacro quarry-test-grep--answering (answer &rest body)
+  "Run BODY with `y-or-n-p' giving ANSWER; return the questions asked."
+  (declare (indent 1))
+  `(let ((asked nil))
+     (cl-letf (((symbol-function 'y-or-n-p)
+                (lambda (prompt) (push prompt asked) ,answer)))
+       ,@body)
+     (nreverse asked)))
+
+(defmacro quarry-test-grep--with-replace (spec &rest body)
+  "Run BODY with a preview; SPEC is (DIR FILES PATTERN TEMPLATE).
+DIR is bound to a tree of FILES, which is searched for the regexp
+PATTERN with the replacement TEMPLATE.  The result buffer is current
+and shown in the selected window.  Saving makes no backup files, which
+the next search would find."
+  (declare (indent 1))
+  (pcase-let ((`(,dir ,files ,pattern ,template) spec))
+    `(quarry-test-grep--with-tree (,dir ,files)
+       (let ((make-backup-files nil))
+         (quarry-test-grep--search ,dir ,pattern)
+         (quarry-grep-replace ,template)
+         (quarry-test-grep--wait)
+         (pop-to-buffer-same-window (quarry-test-grep--buffer))
+         ,@body))))
+
+(defun quarry-test-grep--apply (answer)
+  "Press C-c C-c in the result buffer, answering ANSWER; return the questions."
+  (pop-to-buffer-same-window (quarry-test-grep--buffer))
+  (quarry-test-grep--answering answer
+    (execute-kbd-macro (kbd "C-c C-c"))))
+
+(defun quarry-test-grep--bytes (dir path)
+  "Return the bytes of the file PATH of DIR as a unibyte string."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally (expand-file-name path dir))
+    (buffer-string)))
+
+(defun quarry-test-grep--write-bytes (dir path bytes)
+  "Write BYTES, a unibyte string, to the file PATH of DIR as they are."
+  (let ((coding-system-for-write 'no-conversion))
+    (write-region bytes nil (expand-file-name path dir) nil 'silent)))
+
+(defun quarry-test-grep--replace-results ()
+  "Return what applying left on the result lines, in buffer order.
+A list of (PATH LINE RESULT HELP): RESULT is `applied' or `rejected',
+HELP the `help-echo' of the line.  Each overlay must cover its line
+and have the face of its result."
+  (with-current-buffer (quarry-test-grep--buffer)
+    (mapcar (lambda (overlay)
+              (let ((bol (overlay-start overlay))
+                    (result (overlay-get overlay 'quarry-grep-replace-result)))
+                (should (= (overlay-end overlay) (save-excursion (goto-char bol) (pos-eol))))
+                (should (eq (overlay-get overlay 'face)
+                            (if (eq result 'applied)
+                                'quarry-grep-replace-applied
+                              'quarry-grep-replace-rejected)))
+                (list (get-text-property bol 'quarry-grep-file)
+                      (get-text-property bol 'quarry-grep-line)
+                      result
+                      (overlay-get overlay 'help-echo))))
+            (sort (seq-filter (lambda (overlay) (overlay-get overlay 'quarry-grep-replaced))
+                              (overlays-in (point-min) (point-max)))
+                  (lambda (a b) (< (overlay-start a) (overlay-start b)))))))
+
+(defconst quarry-test-grep--apply-files
+  '(("a.txt" . "foo_1 and foo_2\nnothing\nfoo_3 foo_4\n")
+    ("b.txt" . "x foo_5\n")
+    ("c.txt" . "keep\nfoo_6 end\nfoo_7\nlast line\n")
+    ("d/e.txt" . "foo_8foo_9\n"))
+  "A tree to apply `foo_([0-9])' → `bar_$1' to.")
+
+(ert-deftest quarry-test-grep-replace-apply ()
+  "C-c C-c writes the switched-on matches, into files and a visiting buffer."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "new_${1}x")
+    (let ((visiting (find-file-noselect (expand-file-name "c.txt" dir)))
+          (a1 (quarry-test-grep--text-start "a.txt" 1)))
+      ;; Point in the visiting buffer, after a match that gets longer.
+      (with-current-buffer visiting
+        (goto-char (point-min))
+        (search-forward "foo_6 ")
+        (should (looking-at-p "end")))
+      ;; The second match of a.txt:1 and all of b.txt off.
+      (goto-char (+ a1 10))
+      (quarry-test-grep--keys "x")
+      (goto-char (quarry-test-grep--heading-pos "b.txt"))
+      (quarry-test-grep--keys "x")
+      (should (quarry-grep--applicable-p))
+      ;; No: nothing is written.
+      (should (equal (quarry-test-grep--apply nil)
+                     '("Replace 7 matches on 5 lines in 3 files? ")))
+      (should (equal (quarry-test-grep--bytes dir "a.txt") "foo_1 and foo_2\nnothing\nfoo_3 foo_4\n"))
+      (should-not quarry-grep--replace-applied)
+      (should-not (quarry-test-grep--replace-results))
+      ;; Yes.
+      (let ((sent (length quarry-test-grep--requests))
+            (messages (quarry-test-grep--messages
+                       (lambda () (should (quarry-test-grep--apply t))))))
+        (should (equal (car (last messages)) "Replaced 5 lines in 3 files; 0 rejected"))
+        ;; Nothing was searched.
+        (should (= (length quarry-test-grep--requests) sent)))
+      (should (equal (quarry-test-grep--bytes dir "a.txt") "new_1x and foo_2\nnothing\nnew_3x new_4x\n"))
+      (should (equal (quarry-test-grep--bytes dir "b.txt") "x foo_5\n"))
+      (should (equal (quarry-test-grep--bytes dir "c.txt") "keep\nnew_6x end\nnew_7x\nlast line\n"))
+      (should (equal (quarry-test-grep--bytes dir "d/e.txt") "new_8xnew_9x\n"))
+      ;; The visiting buffer was changed and saved; its point stayed with its text.
+      (with-current-buffer visiting
+        (should-not (buffer-modified-p))
+        (should (equal (buffer-string) "keep\nnew_6x end\nnew_7x\nlast line\n"))
+        (should (looking-at-p "end")))
+      (should (equal (quarry-test-grep--replace-results)
+                     '(("a.txt" 1 applied "replaced")
+                       ("a.txt" 3 applied "replaced")
+                       ("c.txt" 2 applied "replaced")
+                       ("c.txt" 3 applied "replaced")
+                       ("d/e.txt" 1 applied "replaced"))))
+      (should (string-match-p "\nReplaced 5 lines in 3 files; 0 rejected\\'"
+                              (quarry-test-grep--status)))
+      ;; The preview stays as it was.
+      (should (equal (quarry-test-grep--replacement a1) '("new_1x" nil "foo_1new_1x")))
+      ;; Applied: x, C-c C-c and e are refused, also in the menu.
+      (should quarry-grep--replace-applied)
+      (should-not (quarry-grep--applicable-p))
+      (should (equal (quarry-test-grep--menu-inactive '("C-c C-c")) '("C-c C-c")))
+      (goto-char a1)
+      (quarry-test-grep--refused "g searches again" (quarry-grep-toggle-filter))
+      (quarry-test-grep--refused "g searches again" (quarry-grep-replace-apply))
+      (quarry-test-grep--refused "g searches again" (quarry-grep-edit))
+      ;; A search ends the state and removes the overlays.
+      (quarry-test-grep--keys "g")
+      (should-not quarry-grep--replace-applied)
+      (should-not (quarry-test-grep--replace-results))
+      (should-not (string-search "Replaced" (quarry-test-grep--status)))
+      (should (equal (quarry-test-grep--results)
+                     '(("a.txt" 1 "new_1x and foo_2") ("b.txt" 1 "x foo_5"))))
+      (should (quarry-grep--applicable-p)))))
+
+(ert-deftest quarry-test-grep-replace-apply-refused ()
+  "C-c C-c is refused without a complete preview with matches switched on."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--apply-files)
+    (quarry-test-grep--search dir "foo_([0-9])")
+    ;; No template.
+    (should-not (quarry-grep--applicable-p))
+    (quarry-test-grep--refused "R starts one" (quarry-grep-replace-apply))
+    (quarry-grep-replace "bar_$1")
+    (quarry-test-grep--wait)
+    (should (quarry-grep--applicable-p))
+    (should-not (quarry-test-grep--menu-inactive '("C-c C-c")))
+    ;; Nothing switched on.
+    (dolist (path '("a.txt" "b.txt" "c.txt" "d/e.txt"))
+      (goto-char (quarry-test-grep--heading-pos path))
+      (quarry-test-grep--keys "x"))
+    (should-not (quarry-grep--applicable-p))
+    (quarry-test-grep--refused "No match is switched on" (quarry-grep-replace-apply))
+    ;; Running, cancelled and failed.
+    (quarry-test-grep--with-fake-stream
+      (quarry-grep-rerun)
+      (should-not (quarry-grep--applicable-p))
+      (quarry-test-grep--refused "search is running" (quarry-grep-replace-apply))
+      (funcall (nth 2 (car quarry-test-grep--fake)) 'cancelled nil)
+      (should-not (quarry-grep--applicable-p))
+      (quarry-test-grep--refused "cancelled" (quarry-grep-replace-apply))
+      (quarry-grep-rerun)
+      (funcall (nth 2 (car quarry-test-grep--fake)) 'error '(:kind failed :message "boom"))
+      (should (eq (quarry-test-grep--state) 'failed))
+      (should-not (quarry-grep--applicable-p))
+      (quarry-test-grep--refused "failed" (quarry-grep-replace-apply)))
+    ;; Truncated: only what is shown would be written.
+    (let ((quarry-grep-max-lines 2))
+      (quarry-test-grep--keys "g")
+      (should (plist-get quarry-grep--summary :truncated))
+      (should-not (quarry-grep--applicable-p))
+      (quarry-test-grep--refused "narrow the search or raise `quarry-grep-max-lines'"
+        (quarry-grep-replace-apply)))
+    (should (equal (quarry-test-grep--bytes dir "a.txt") "foo_1 and foo_2\nnothing\nfoo_3 foo_4\n"))))
+
+(ert-deftest quarry-test-grep-replace-apply-stale ()
+  "A file changed since the search: search again, or stop without writing."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
+    (let ((b (expand-file-name "b.txt" dir))
+          (sent (length quarry-test-grep--requests)))
+      (set-file-times b (time-add (file-attribute-modification-time (file-attributes b)) 3))
+      ;; No: nothing is written and nothing searched.
+      (let ((messages (quarry-test-grep--messages
+                       (lambda ()
+                         (should (equal (quarry-test-grep--apply nil)
+                                        '("1 result file changed since the search (b.txt); search again first? ")))))))
+        (should (equal messages '("Nothing was replaced"))))
+      (should (= (length quarry-test-grep--requests) sent))
+      (should-not quarry-grep--replace-applied)
+      (should (equal (quarry-test-grep--bytes dir "a.txt") "foo_1 and foo_2\nnothing\nfoo_3 foo_4\n"))
+      ;; Yes: the search runs again with the template; nothing is written.
+      (should (equal (length (quarry-test-grep--apply t)) 1))
+      (should (= (length quarry-test-grep--requests) (1+ sent)))
+      (quarry-test-grep--wait)
+      (should (equal (quarry-test-grep--request :replace) "bar_$1"))
+      (should-not quarry-grep--replace-applied)
+      (should (equal (quarry-test-grep--bytes dir "a.txt") "foo_1 and foo_2\nnothing\nfoo_3 foo_4\n"))
+      ;; Now nothing is stale: the only question is the one to replace.
+      (should (equal (quarry-test-grep--apply t)
+                     '("Replace 9 matches on 6 lines in 4 files? ")))
+      (should (equal (quarry-test-grep--bytes dir "b.txt") "x bar_5\n")))))
+
+(ert-deftest quarry-test-grep-replace-apply-line-changed ()
+  "A line that differs from the search is rejected; the file's others are written."
+  (quarry-test-grep--with-replace (dir '(("a.txt" . "foo_1\nfoo_2\nfoo_3\n")) "foo_([0-9])" "bar_$1")
+    (let* ((a (expand-file-name "a.txt" dir))
+           (time (file-attribute-modification-time (file-attributes a))))
+      ;; Changed on disk with the time set back, so the stale check passes.
+      (quarry-test-grep--write-bytes dir "a.txt" "foo_1\nfoo_2 changed\nfoo_3\n")
+      (set-file-times a time)
+      (should-not (quarry-grep--stale-files))
+      (quarry-test-grep--apply t)
+      (should (equal (quarry-test-grep--bytes dir "a.txt") "bar_1\nfoo_2 changed\nbar_3\n"))
+      (should (equal (quarry-test-grep--replace-results)
+                     '(("a.txt" 1 applied "replaced")
+                       ("a.txt" 2 rejected "line changed since the search")
+                       ("a.txt" 3 applied "replaced"))))
+      (should (string-match-p "\nReplaced 2 lines in 1 file; 1 rejected\\'"
+                              (quarry-test-grep--status)))
+      ;; Searching again shows what still matches.
+      (quarry-test-grep--keys "g")
+      (should (equal (quarry-test-grep--results) '(("a.txt" 2 "foo_2 changed")))))))
+
+(ert-deftest quarry-test-grep-replace-apply-unwritable ()
+  "A file that cannot be written and a read-only buffer reject their lines."
+  (skip-unless (not (zerop (user-uid))))
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
+    (let ((b (expand-file-name "b.txt" dir)))
+      (set-file-modes b #o444)
+      (with-current-buffer (find-file-noselect (expand-file-name "c.txt" dir))
+        (setq buffer-read-only t))
+      (quarry-test-grep--apply t)
+      (should (equal (quarry-test-grep--bytes dir "b.txt") "x foo_5\n"))
+      (should (equal (quarry-test-grep--bytes dir "c.txt") "keep\nfoo_6 end\nfoo_7\nlast line\n"))
+      (should (equal (quarry-test-grep--bytes dir "a.txt") "bar_1 and bar_2\nnothing\nbar_3 bar_4\n"))
+      (should (equal (quarry-test-grep--bytes dir "d/e.txt") "bar_8bar_9\n"))
+      (let ((results (quarry-test-grep--replace-results)))
+        (should (equal (mapcar (lambda (result) (seq-take result 3)) results)
+                       '(("a.txt" 1 applied) ("a.txt" 3 applied)
+                         ("b.txt" 1 rejected)
+                         ("c.txt" 2 rejected) ("c.txt" 3 rejected)
+                         ("d/e.txt" 1 applied))))
+        (should (string-match-p "Permission denied" (nth 3 (nth 2 results))))
+        (should (equal (nth 3 (nth 3 results)) "buffer is read-only")))
+      (should (string-match-p "\nReplaced 3 lines in 2 files; 3 rejected\\'"
+                              (quarry-test-grep--status)))
+      (set-file-modes b #o644))))
+
+(ert-deftest quarry-test-grep-replace-apply-stopped ()
+  "C-g stops after the file being written; the status line says what was left."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
+    (let ((write (symbol-function 'quarry-grep--replace-in-file)))
+      ;; As if C-g came while the first file was written.
+      (cl-letf (((symbol-function 'quarry-grep--replace-in-file)
+                 (lambda (&rest args)
+                   (prog1 (apply write args)
+                     (setq quit-flag t)))))
+        (quarry-test-grep--apply t)))
+    (should-not quit-flag)
+    (should (equal (quarry-test-grep--bytes dir "a.txt") "bar_1 and bar_2\nnothing\nbar_3 bar_4\n"))
+    (should (equal (quarry-test-grep--bytes dir "b.txt") "x foo_5\n"))
+    (should (equal (quarry-test-grep--replace-results)
+                   '(("a.txt" 1 applied "replaced") ("a.txt" 3 applied "replaced"))))
+    (should (string-match-p
+             "\nReplaced 2 lines in 1 file; 0 rejected; stopped, 3 files not processed\\'"
+             (quarry-test-grep--status)))))
+
+(ert-deftest quarry-test-grep-replace-apply-encodings ()
+  "Line ends, a byte order mark and Latin-1 are kept; a Latin-1 line is not replaced."
+  (quarry-test-grep--with-tree (dir '(("crlf.txt" . "") ("bom.txt" . "") ("latin.txt" . "")))
+    (let ((make-backup-files nil))
+      (quarry-test-grep--write-bytes dir "crlf.txt" "foo_1 x\r\nnothing\r\nfoo_2\r\n")
+      ;; \x66 is f and \x62 b: a hex escape takes all hex digits after it.
+      (quarry-test-grep--write-bytes dir "bom.txt" "\xef\xbb\xbf\x66oo_3\n\xc3\xbc foo_4\n")
+      (quarry-test-grep--write-bytes dir "latin.txt" "caf\xe9 foo_5\nfoo_6\n")
+      (quarry-test-grep--search dir "foo_([0-9])")
+      (quarry-grep-replace "bär_$1")
+      (quarry-test-grep--wait)
+      ;; The Latin-1 line holds a byte that is not UTF-8.
+      (should (get-text-property (quarry-test-grep--line-pos "latin.txt" 1) 'quarry-grep-inexact))
+      (should (equal (quarry-test-grep--apply t) '("Replace 5 matches on 5 lines in 3 files? ")))
+      (should (equal (quarry-test-grep--bytes dir "crlf.txt")
+                     "b\xc3\xa4r_1 x\r\nnothing\r\nb\xc3\xa4r_2\r\n"))
+      (should (equal (quarry-test-grep--bytes dir "bom.txt")
+                     "\xef\xbb\xbf\x62\xc3\xa4r_3\n\xc3\xbc b\xc3\xa4r_4\n"))
+      (should (equal (quarry-test-grep--bytes dir "latin.txt") "caf\xe9 foo_5\nb\xe4r_6\n"))
+      (should (equal (seq-filter (lambda (result) (eq (nth 2 result) 'rejected))
+                                 (quarry-test-grep--replace-results))
+                     nil)))))
+
+(ert-deftest quarry-test-grep-replace-apply-many-files ()
+  "500 files with 4 matches each are all written as expected."
+  (let* ((count 500)
+         (paths (cl-loop for i below count
+                         collect (format "d%d/f%03d.txt" (% i 10) i)))
+         (content (lambda (word)
+                    (format "x %s_1 y %s_2\nmiddle\n%s_3\nend %s_4\n" word word word word))))
+    (quarry-test-grep--with-replace (dir (mapcar (lambda (path) (cons path (funcall content "foo")))
+                                                 paths)
+                                         "foo_([0-9])" "bar_$1")
+      (should (= quarry-grep--files count))
+      (let ((start (float-time)))
+        (should (equal (quarry-test-grep--apply t)
+                       '("Replace 2000 matches on 1500 lines in 500 files? ")))
+        (message "quarry-test-grep-replace-apply-many-files: applied in %.2f s"
+                 (- (float-time) start)))
+      (should (string-match-p "\nReplaced 1500 lines in 500 files; 0 rejected\\'"
+                              (quarry-test-grep--status)))
+      (let ((expected (funcall content "bar")))
+        (dolist (path paths)
+          (should (equal (list path (quarry-test-grep--bytes dir path))
+                         (list path expected))))))))
 
 (provide 'quarry-grep-tests)
 ;;; quarry-grep-tests.el ends here

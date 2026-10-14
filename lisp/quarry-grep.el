@@ -157,6 +157,12 @@ A context line is a line before or after a hit, shown for its sake.")
     (t :inverse-video t))
   "Face for the new text of a match in the preview of a replacement.")
 
+(defface quarry-grep-replace-applied '((t :inherit success))
+  "Face for a result line whose replacement was written.")
+
+(defface quarry-grep-replace-rejected '((t :inherit error))
+  "Face for a result line whose replacement was rejected.")
+
 ;;;; The search
 
 ;; Searches and filters are values: a command that changes a search
@@ -375,7 +381,10 @@ See `quarry-grep--edit-sync'.")
 Those are the lines shown shortened or with bytes that are not UTF-8.")
 
 (defvar-local quarry-grep--replace-applied nil
-  "Non-nil when the replacement shown was applied.  A new search resets it.")
+  "Non-nil when the replacement shown was applied.  A new search resets it.
+The value is a plist of the counts: `:lines' and `:files' replaced,
+`:rejected' lines and `:skipped' files, those not processed because
+\\`C-g' stopped the replacement.")
 
 ;;;; Rendering
 
@@ -606,6 +615,9 @@ replacement, the matches of a line with new texts get them."
             "")
           (if quarry-grep--edited
               "\nThe results were edited; g searches again"
+            "")
+          (if quarry-grep--replace-applied
+              (concat "\n" (quarry-grep--applied-text quarry-grep--replace-applied))
             "")))
 
 (defun quarry-grep--search-status-text ()
@@ -696,6 +708,8 @@ is set so that the results bring it back."
     (remove-overlays (point-min) (point-max) 'quarry-grep-fold t)
     ;; What a commit with wgrep left on the edited lines.
     (remove-overlays (point-min) (point-max) 'wgrep t)
+    ;; What applying a replacement left on the result lines.
+    (remove-overlays (point-min) (point-max) 'quarry-grep-replaced t)
     (erase-buffer)
     (dolist (filter filters)
       (quarry-grep--insert-filter filter (alist-get filter roles)))
@@ -2115,6 +2129,8 @@ the package wgrep."
   (quarry-grep--current)
   (when (quarry-grep--running-p)
     (user-error "A search is running; wait for it or cancel it with C-c C-k"))
+  (when quarry-grep--replace-applied
+    (user-error "The replacement was applied; g searches again"))
   (when (quarry-grep--replace-p)
     (user-error "The results preview a replacement; leave it with C-c C-k first"))
   (unless (quarry-grep--has-results-p)
@@ -2148,6 +2164,262 @@ the package wgrep."
       (setq quarry-grep--editing t)
       (add-hook 'post-command-hook #'quarry-grep--edit-sync nil t)
       (wgrep-change-to-wgrep-mode))))
+
+;;;; Applying a replacement
+
+;; Elisp writes the switched-on matches (docs/decisions/0021): into the
+;; buffer that visits a file, which is then saved, or into a temporary
+;; buffer that is written back with the coding system it was read with.
+;; Every line is compared with the text of the search first.  Each
+;; result line gets an overlay with `quarry-grep-replaced' t and
+;; `quarry-grep-replace-result' `applied' or `rejected'; the next search
+;; removes them.
+
+(defconst quarry-grep--line-changed "line changed since the search"
+  "The reason for a line that is not what the search saw.")
+
+(defun quarry-grep--apply-refusal ()
+  "Return why `quarry-grep-replace-apply' cannot run now, or nil.
+Does not signal."
+  (cond ((not (quarry-grep--replace-p))
+         "The results do not preview a replacement; R starts one")
+        (quarry-grep--replace-applied
+         "The replacement was applied; g searches again")
+        ((quarry-grep--running-p)
+         "A search is running; wait for it or cancel it with C-c C-k")
+        ((eq quarry-grep--state 'failed)
+         "The search failed; there is nothing to replace")
+        ((eq quarry-grep--state 'cancelled)
+         "The search was cancelled, so the preview is not complete; g searches again")
+        ((plist-get quarry-grep--summary :truncated)
+         "The search stopped at its line limit and only what is shown would be replaced; narrow the search or raise `quarry-grep-max-lines'")
+        ((zerop quarry-grep--replace-on)
+         "No match is switched on")))
+
+(defun quarry-grep--applicable-p ()
+  "Return non-nil when `quarry-grep-replace-apply' can run.
+That is during a complete preview with matches switched on that was
+not applied yet.  Does not signal."
+  (not (quarry-grep--apply-refusal)))
+
+(defun quarry-grep--replace-work ()
+  "Return the lines that the switched-on matches change, by file.
+A list of (PATH . LINES) in buffer order; LINES is a list of (BOL N OLD
+NEW) in ascending order of N: the start of the result line, its line
+number, its text and its text with each switched-on match replaced."
+  (let ((work nil))
+    (save-restriction
+      (widen)
+      (dolist (block (quarry-grep--blocks))
+        (let ((lines nil))
+          (save-excursion
+            (goto-char (car block))
+            (while (< (point) (cdr block))
+              (let* ((bol (point))
+                     (eol (pos-eol))
+                     (start (and (get-text-property bol 'quarry-grep-line)
+                                 (next-single-property-change
+                                  bol 'quarry-grep-prefix nil eol)))
+                     (on (and start
+                              (cl-remove-if
+                               (lambda (span)
+                                 (get-text-property (car span) 'quarry-grep-replace-off))
+                               (quarry-grep--replacement-spans start eol)))))
+                (when on
+                  (let ((pos start)
+                        (parts nil))
+                    (pcase-dolist (`(,beg . ,end) on)
+                      (push (buffer-substring-no-properties pos beg) parts)
+                      (push (get-text-property beg 'quarry-grep-replacement) parts)
+                      (setq pos end))
+                    (push (buffer-substring-no-properties pos eol) parts)
+                    (push (list bol (get-text-property bol 'quarry-grep-line)
+                                (buffer-substring-no-properties start eol)
+                                (apply #'concat (nreverse parts)))
+                          lines))))
+              (forward-line 1)))
+          (when lines
+            (push (cons (get-text-property (car block) 'quarry-grep-file)
+                        (sort lines (lambda (a b) (< (nth 1 a) (nth 1 b)))))
+                  work)))))
+    (nreverse work)))
+
+(defun quarry-grep--replace-text (start old new)
+  "Replace OLD, the text at START, with NEW.
+Only the part between their common prefix and suffix changes, so that
+markers in the rest of the line, point among them, stay with their text."
+  (let* ((old-length (length old))
+         (new-length (length new))
+         (same (compare-strings old nil nil new nil nil))
+         (prefix (if (eq same t) old-length (1- (abs same))))
+         (suffix 0))
+    (while (and (< suffix (- (min old-length new-length) prefix))
+                (eq (aref old (- old-length suffix 1))
+                    (aref new (- new-length suffix 1))))
+      (cl-incf suffix))
+    (goto-char (+ start prefix))
+    (delete-region (point) (+ start (- old-length suffix)))
+    (insert (substring new prefix (- new-length suffix)))))
+
+(defun quarry-grep--replace-lines (lines)
+  "Replace LINES in the current buffer, as far as they are what the search saw.
+LINES is a list of (BOL N OLD NEW) in ascending order of N.  Line N,
+counted from the start of the widened buffer, must be OLD; it becomes
+NEW.  Return a list with one element per line: nil when it was
+replaced, else the reason why not."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      (let ((at 1))
+        (mapcar
+         (lambda (line)
+           (pcase-let ((`(,_ ,n ,old ,new) line))
+             ;; A template has no newline, so the numbers stay valid.
+             (if (and (zerop (forward-line (- n at)))
+                      (setq at n)
+                      (string= old (buffer-substring-no-properties (point) (pos-eol))))
+                 (progn (quarry-grep--replace-text (point) old new) nil)
+               quarry-grep--line-changed)))
+         lines)))))
+
+(defun quarry-grep--write-coding (coding)
+  "Return the coding system to write a file with that was read with CODING.
+A file that held only ASCII was read as `undecided'; it is written as
+UTF-8, the encoding of the new text, with its line ends."
+  (if (eq (coding-system-base coding) 'undecided)
+      (coding-system-change-text-conversion coding 'utf-8)
+    coding))
+
+(defun quarry-grep--replace-in-file (file lines)
+  "Replace LINES in FILE; return the result of each line.
+LINES and the result are as for `quarry-grep--replace-lines'.  The
+buffer that visits FILE is changed and saved; otherwise FILE is read
+into a temporary buffer and written back with the coding system it was
+read with.  When FILE cannot be read or written, every line has the
+error message as its reason."
+  (condition-case err
+      (if-let* ((buffer (find-buffer-visiting file)))
+          (with-current-buffer buffer
+            (cond (buffer-read-only
+                   (make-list (length lines) "buffer is read-only"))
+                  ((not (verify-visited-file-modtime buffer))
+                   (make-list (length lines) "buffer is not up to date with its file"))
+                  (t
+                   (let ((results (with-undo-amalgamate
+                                    (quarry-grep--replace-lines lines))))
+                     (when (memq nil results)
+                       (save-buffer))
+                     results))))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (let* ((coding (quarry-grep--write-coding buffer-file-coding-system))
+                 (results (let ((inhibit-modification-hooks t))
+                            (quarry-grep--replace-lines lines))))
+            (when (memq nil results)
+              (when-let* ((pos (unencodable-char-position (point-min) (point-max) coding)))
+                (error "The new text has a character that %s cannot encode: %c"
+                       coding (char-after pos)))
+              (let ((coding-system-for-write coding))
+                (write-region nil nil file nil 'silent)))
+            results)))
+    (error (make-list (length lines) (error-message-string err)))))
+
+(defun quarry-grep--mark-result (bol reason)
+  "Mark the result line at BOL as applied, or rejected for REASON."
+  (let ((overlay (make-overlay bol (save-excursion (goto-char bol) (pos-eol)))))
+    (overlay-put overlay 'quarry-grep-replaced t)
+    (overlay-put overlay 'quarry-grep-replace-result (if reason 'rejected 'applied))
+    (overlay-put overlay 'face (if reason
+                                   'quarry-grep-replace-rejected
+                                 'quarry-grep-replace-applied))
+    (overlay-put overlay 'help-echo (or reason "replaced"))))
+
+(defun quarry-grep--applied-text (counts)
+  "Return what COUNTS, a value of `quarry-grep--replace-applied', say."
+  (let ((skipped (plist-get counts :skipped)))
+    (concat (format "Replaced %s in %s; %d rejected"
+                    (quarry-grep--plural (plist-get counts :lines) "line")
+                    (quarry-grep--plural (plist-get counts :files) "file")
+                    (plist-get counts :rejected))
+            (if (> skipped 0)
+                (format "; stopped, %s not processed"
+                        (quarry-grep--plural skipped "file"))
+              ""))))
+
+(defun quarry-grep--matches-text (n)
+  "Return \"N match\" or \"N matches\"."
+  (format "%d match%s" n (if (= n 1) "" "es")))
+
+(defun quarry-grep-replace-apply ()
+  "Write the switched-on matches of the preview into the files.
+Each line is compared with the text of the search first and rejected
+when it differs.  A buffer that visits a file is changed and saved;
+other files are read, changed and written back in their encoding, with
+no undo.  When a result file changed since the search, ask whether to
+search again instead.  Afterwards each result line shows whether it was
+applied, and \\<quarry-grep-mode-map>\\[quarry-grep-rerun] searches again.
+\\`C-g' stops after the file being written."
+  (interactive nil quarry-grep-mode)
+  (quarry-grep--current)
+  (when-let* ((refusal (quarry-grep--apply-refusal)))
+    (user-error "%s" refusal))
+  (let ((stale (quarry-grep--stale-files)))
+    (cond
+     ((and stale
+           (y-or-n-p (format "%s changed since the search (%s%s); search again first? "
+                             (quarry-grep--plural (length stale) "result file")
+                             (car stale)
+                             (if (cdr stale) ", ..." ""))))
+      (quarry-grep-rerun)
+      (message "Searching again; press C-c C-c when the search is done"))
+     (stale
+      ;; Unlike `e': a modified buffer would be saved with its edits.
+      (message "Nothing was replaced"))
+     (t
+      (let* ((work (quarry-grep--replace-work))
+             (lines (apply #'+ (mapcar (lambda (file) (length (cdr file))) work))))
+        (when (y-or-n-p (format "Replace %s on %s in %s? "
+                                (quarry-grep--matches-text quarry-grep--replace-on)
+                                (quarry-grep--plural lines "line")
+                                (quarry-grep--plural (length work) "file")))
+          (quarry-grep--apply work)))))))
+
+(defun quarry-grep--apply (work)
+  "Write WORK, what `quarry-grep--replace-work' returned, and show the results."
+  (let ((total (length work))
+        (done 0)
+        (replaced 0)
+        (files 0)
+        (rejected 0)
+        (stopped nil))
+    (save-restriction
+      (widen)
+      ;; `C-g' only sets `quit-flag'; it is looked at between files.
+      (let ((inhibit-quit t))
+        (while (and work (not stopped))
+          (pcase-let* ((`(,path . ,lines) (pop work))
+                       ;; Not `expand-file-name': a path like "~/x" must
+                       ;; stay below the search directory.
+                       (results (quarry-grep--replace-in-file
+                                 (concat default-directory path) lines)))
+            (cl-loop for line in lines
+                     for reason in results
+                     do (quarry-grep--mark-result (car line) reason)
+                     if reason do (cl-incf rejected) else do (cl-incf replaced))
+            (when (memq nil results)
+              (cl-incf files))
+            (cl-incf done)
+            (when (and (zerop (% done 100)) (< done total))
+              (message "Replacing: %d of %d files" done total))
+            (when quit-flag
+              (setq quit-flag nil
+                    stopped t))))))
+    (setq quarry-grep--replace-applied
+          (list :lines replaced :files files :rejected rejected :skipped (- total done)))
+    (quarry-grep--update-status)
+    (force-mode-line-update)
+    (message "%s" (quarry-grep--applied-text quarry-grep--replace-applied))))
 
 ;;;; History
 
@@ -2338,6 +2610,7 @@ being edited: `?' is text then."
   "C-c >" #'quarry-grep-history-forward
   "C-c C-k" #'quarry-grep-cancel
   "R" #'quarry-grep-replace
+  "C-c C-c" #'quarry-grep-replace-apply
   "e" #'quarry-grep-edit)
 
 (defun quarry-grep--after-clone ()

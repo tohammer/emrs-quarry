@@ -152,7 +152,9 @@ goes to the command that is run."
    ["Edit"
     ("e" "edit the results (wgrep)" quarry-grep-edit
      :inapt-if-not quarry-grep--editable-p)
-    ("R" "replace the matches" quarry-grep-replace)]]
+    ("R" "replace the matches" quarry-grep-replace)
+    ("C-c C-c" "write the replacement" quarry-grep-replace-apply
+     :inapt-if-not quarry-grep--applicable-p)]]
   (interactive nil quarry-grep-mode)
   (quarry-grep--current)
   (transient-setup 'quarry-grep-menu)
