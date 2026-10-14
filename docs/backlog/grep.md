@@ -36,7 +36,12 @@ theme, GUI frame), and on Emacs 30.1 with its own transient 0.7.2, where
 only the tests of the menu were run against that transient's source
 loaded into Emacs 31.1. Origin: grep spec,
 Testing section, and its review (2026-10-10); context lines and keys
-menu specs, Testing sections. Do these once quarry-grep is in daily use; turn what
+menu specs, Testing sections. From the replace spec (2026-10-14): the
+faces of the preview and of the results in the author's theme, in a GUI
+frame and in a terminal (where strike-through may not show), `x`
+through a long preview, a real `C-g` during a large apply (the tests
+only set `quit-flag`), and a replace in files open in Emacs with undo
+in those buffers afterwards. Do these once quarry-grep is in daily use; turn what
 fails into backlog items or fixes.
 
 ## wgrep on other line ends and encodings, and on huge results

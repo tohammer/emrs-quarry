@@ -736,7 +736,8 @@ in it.
   wgrep then refuses each change whose line in the file is no longer the
   text the search found.
 - Folded files are unfolded on entering. `e` is refused while a search
-  runs and when there are no results.
+  runs, when there are no results, and during a replace preview or
+  after a replacement was applied (see "Replacing matches").
 - After a commit the result lines show the edited text and the status
   line says that the results were edited; `g` searches again, which
   shows what is on disk.
@@ -750,7 +751,7 @@ the current one as initial input, and searches again with it. The buffer
 text does not change; each match shows the old text struck through
 (`quarry-grep-replace-old`) followed by the new text
 (`quarry-grep-replace-new`). The header shows `→ TEMPLATE`, which `R`
-edits when clicked, and `N of M matches switched on`. Lines that cannot
+edits when clicked, and `N of M matches on`. Lines that cannot
 be replaced (shown cut, or not valid UTF-8) are shown as before and
 counted in the status line.
 

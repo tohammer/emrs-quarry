@@ -103,10 +103,12 @@ follows the narrowed search.
 
 `e` is refused during a preview, with a message that names `C-c C-k`.
 The menu (`?`) gets `R` and `C-c C-c`, with `C-c C-c` inactive outside a
-preview. `quarry-grep--replace-p` decides for the menu and the commands,
+preview. (Added in task 5: the entries of `x` and `C-c C-k` are active
+wherever the commands now act, through `quarry-grep--toggle-at-point-p`
+and `quarry-grep--cancellable-p`.) `quarry-grep--replace-p` decides for the menu and the commands,
 as the other `-p` predicates do. The header line gets a part `→
 TEMPLATE` during a preview, which runs `R` when clicked, and the counts
-`N of M matches switched on`.
+`N of M matches on`.
 
 ### The preview
 
@@ -175,7 +177,9 @@ For each file block with switched-on matches, in buffer order:
 4. If at least one line was changed: a visiting buffer is saved with
    `save-buffer`. A temporary buffer is written with `write-region` to
    the file, with `coding-system-for-write` bound to the coding system
-   it was read with, and then killed. A file that cannot be read or
+   it was read with, and then killed. (Added in task 4: a file read as
+   `undecided`, that is pure ASCII, is written as UTF-8 with its line
+   ends, the encoding of the new text.) A file that cannot be read or
    written rejects all its lines, with the error message.
 
 Each result line gets an overlay with the result: `applied`, or
@@ -220,6 +224,8 @@ way out.
 | A line in the file differs from the search | that line rejected, reason in its overlay; the other lines of the file go on |
 | A file cannot be read or written (permissions, gone) | all lines of the file rejected with the error message; the other files go on |
 | A visiting buffer is read-only | its lines are rejected: "buffer is read-only" |
+| A visiting buffer is not up to date with its file (added in task 4: `save-buffer` would ask in the middle of the loop) | its lines are rejected: "buffer is not up to date with its file" |
+| The new text has a character the file's coding system cannot encode (added in task 4) | the file's lines are rejected with that message; nothing is written |
 | `C-g` while applying | stops after the current file, reports what was written |
 | A module older than this feature | it ignores `:replace`; the rebuild message below |
 
