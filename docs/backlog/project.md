@@ -6,9 +6,7 @@ Build, distribution, CI and the test suite. Part of [the backlog](../backlog.md)
 
 CI runs on Linux and macOS (README "Tests"). Open: Windows and Linux on
 ARM, which emrs's CI has; `cargo test` on macOS, where only the ERT suite
-runs; and making the checks required for a merge, which the ruleset of
-`master` does not do yet. Revisit Windows before claiming Windows
-support.
+runs. Revisit Windows before claiming Windows support.
 
 ## Distribution
 

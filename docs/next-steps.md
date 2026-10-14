@@ -32,8 +32,10 @@ architecture.md or an ADR.
   from that branch, which must not be older than the module's protocol
   (ADR 0007).
 - `master` takes changes only through pull requests, documentation
-  included (a ruleset on GitHub). CI runs on each one but is not required
-  for the merge (project backlog); look at it before merging.
+  included (a ruleset on GitHub), and all six CI jobs must pass before
+  the merge. GitHub cancels a macOS job when no runner takes it within
+  about 15 minutes ("The job was not acquired by Runner"); the check
+  then shows as failed. Rerun that job.
 - CI uses the newest stable Rust, so `cargo clippy --all-targets -- -D
   warnings` can fail there on a lint the local toolchain does not have
   yet.
