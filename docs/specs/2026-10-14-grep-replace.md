@@ -217,15 +217,17 @@ way out.
 | A file cannot be read or written (permissions, gone) | all lines of the file rejected with the error message; the other files go on |
 | A visiting buffer is read-only | its lines are rejected: "buffer is read-only" |
 | `C-g` while applying | stops after the current file, reports what was written |
-| A module older than this feature | the search fails, or its lines have no `:replacements`; either way the rebuild message below |
+| A module older than this feature | it ignores `:replace`; the rebuild message below |
 
-The request type has no `deny_unknown_fields`, but whether emrs's
-deserializer passes unknown keys over is not known. Task 1 finds out.
-Elisp covers both cases. If the search fails with an error that names
-`replace`, the failure message says to rebuild the module. If the
-first file item has a kept, exact line without `:replacements`, `R`
-cancels the search, shows the same message and runs the search without
-the template.
+emrs's deserializer skips plist keys that a request type does not name
+(found in task 1: emrs `src/convert/de.rs`, and tried on a module built
+without `:replace`). An older module therefore searches as usual and
+sends no `:replacements`. If a file item has a kept line without
+`:inexact` and without the key `:replacements` (checked with
+`plist-member`: a kept line whose primary filter matched only empty
+text has `:replacements nil`), the preview cancels the search, says
+that the module is older than replace and must be rebuilt, and runs
+the search without the template.
 
 ## Testing
 
@@ -275,7 +277,7 @@ in Emacs, with undo in those buffers afterwards.
 
 ## Tasks
 
-- [ ] 1. **Service: `:replace` and `:replacements`.** Request field,
+- [x] 1. **Service: `:replace` and `:replacements`.** Request field,
   interpolation with `grep-matcher` on the whole line, `:replacements`
   on exact kept lines, the module docs of `src/grep/service.rs`. Find
   out how an older module treats the unknown field and write it into

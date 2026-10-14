@@ -29,6 +29,7 @@
 //! | `:before` | integer ≥ 0: lines sent before each kept line as context lines, at most 1000 | 0 |
 //! | `:after` | integer ≥ 0: lines sent after each kept line as context lines, at most 1000 | 0 |
 //! | `:sort-budget-ms` | integer: how long results are collected to be sent sorted | 150 |
+//! | `:replace` | string: a replacement template for the primary filter's matches, in the syntax of `rg -r`: `$0` is the whole match, `$1` or `${1}` a group by number, `$name` or `${name}` a group by name, `$$` a literal `$`. A name runs as far as ASCII letters, digits and `_` go, so `$1a` is the group named `1a` (write `${1}a`). A group that does not exist or did not take part gives the empty string; a literal primary filter has only `$0`. Not checked: every string is a template | nil: no `:replacements` |
 //!
 //! A *kept line* is a line that the primary filter (the first include line filter) matched and the other line
 //! filters kept. A *context line* is a line of the same file that is not kept and lies at most `:before` lines
@@ -80,6 +81,11 @@
 //!   the line held bytes that are not valid UTF-8 (each shown as U+FFFD). The matches are found on the whole
 //!   line and listed as positions in `:text` as sent: a match that crosses the cut ends at the cut, a match
 //!   beyond it is not listed.
+//! - `:replacements` only with `:replace`, and only on a kept line whose `:inexact` is nil: a list of strings,
+//!   one per entry of `:spans` and in the same order, each the template interpolated for that match, on the
+//!   whole line as the matching is done (`:replacements ("new_a" "new_b")`). A kept line with `:inexact` t and
+//!   a context line have no `:replacements`; without `:replace` no line has it. Empty matches are in neither
+//!   list.
 //!
 //! The summary item, exactly one, the last item of a search that was not cancelled:
 //!
@@ -165,6 +171,8 @@ pub enum Request {
         after: usize,
         #[serde(default = "default_sort_budget_ms")]
         sort_budget_ms: u64,
+        #[serde(default)]
+        replace: Option<String>,
     },
 }
 
@@ -307,6 +315,7 @@ impl Service for GrepService {
                 before,
                 after,
                 sort_budget_ms,
+                replace,
             } => {
                 let dir = match search_dir(&dir) {
                     Ok(dir) => dir,
@@ -338,6 +347,7 @@ impl Service for GrepService {
                     after: after.min(MAX_CONTEXT),
                     sort_budget: Duration::from_millis(sort_budget_ms),
                     started,
+                    replace,
                 };
                 let search = match Search::new(config) {
                     Ok(search) => search,
@@ -419,6 +429,7 @@ pub(crate) mod testing {
         pub before: usize,
         pub after: usize,
         pub sort_budget_ms: u64,
+        pub replace: Option<String>,
     }
 
     impl Query {
@@ -437,6 +448,7 @@ pub(crate) mod testing {
                 before: 0,
                 after: 0,
                 sort_budget_ms: 60_000,
+                replace: None,
             }
         }
 
@@ -455,6 +467,7 @@ pub(crate) mod testing {
                 before: self.before,
                 after: self.after,
                 sort_budget_ms: self.sort_budget_ms,
+                replace: self.replace,
             }
         }
     }
