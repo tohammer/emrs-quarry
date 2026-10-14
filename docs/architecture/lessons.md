@@ -118,3 +118,10 @@ Part of [the architecture](../architecture.md).
   forget it on `cancel`.** A step after it never sees the same input
   again after min-input cancelled it, so the step must end its own
   indicator on `cancel`.
+- **A grep result is sorted only while the search ends within its sort
+  budget.** A regexp with `\w` takes about 100 ms to compile in a debug
+  build (25 ms in release), so on a busy machine the search passes 150 ms
+  and its files arrive in the order the walker threads finish them. The
+  ERT searches therefore go out with a budget of 60 s
+  (`quarry-test-grep--with-tree`), as the Rust tests do; a test that
+  compares the order of results from a real search must use that macro.

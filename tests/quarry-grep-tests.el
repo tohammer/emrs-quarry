@@ -55,12 +55,28 @@ src/a.rs:2 and :4, sub/deep.txt:1.")
       (write-region content nil (expand-file-name path dir) nil 'silent))
     dir))
 
+(defconst quarry-test-grep--sort-budget-ms 60000
+  "The sort budget of the tests' searches, as the Rust tests use it.
+With the service's 150 ms a slow search, such as a regexp with `\\w' in
+a debug build on a busy machine, sends its files in the order the walker
+threads finish them.")
+
+(defun quarry-test-grep--add-sort-budget (args)
+  "Add `quarry-test-grep--sort-budget-ms' to a search request in ARGS.
+ARGS are the arguments of `emrs-call-stream'."
+  (pcase-let ((`(,instance ,request . ,rest) args))
+    (if (eq (car-safe request) :search)
+        `(,instance (,@request :sort-budget-ms ,quarry-test-grep--sort-budget-ms) ,@rest)
+      args)))
+
 (defmacro quarry-test-grep--with-tree (spec &rest body)
   "Run BODY with a tree; SPEC is (DIR [FILES]).
 DIR is bound to a tree of FILES (default `quarry-test-grep--files') and
 is the `default-directory'.  The result buffer has a name of its own,
 the options have their defaults, and the requests and calls of
-`emrs-call-stream' are recorded."
+`emrs-call-stream' are recorded.  Searches reach the service with
+`quarry-test-grep--sort-budget-ms', so their files arrive in path order
+however long they take; the recorded requests are as Lisp sent them."
   (declare (indent 1))
   (let ((dir (car spec)))
     `(let* ((,dir (quarry-test-grep--tree ,(or (cadr spec) 'quarry-test-grep--files)))
@@ -84,10 +100,14 @@ the options have their defaults, and the requests and calls of
        (advice-add 'emrs-call-stream :filter-return
                    (lambda (call) (push call quarry-test-grep--calls) call)
                    '((name . quarry-test-grep-calls)))
+       (advice-add 'emrs-call-stream :filter-args
+                   #'quarry-test-grep--add-sort-budget
+                   '((name . quarry-test-grep-sort-budget) (depth . 100)))
        (unwind-protect
            (save-window-excursion ,@body)
          (advice-remove 'emrs-call-stream 'quarry-test-grep-requests)
          (advice-remove 'emrs-call-stream 'quarry-test-grep-calls)
+         (advice-remove 'emrs-call-stream 'quarry-test-grep-sort-budget)
          (when (get-buffer quarry-grep-buffer-name)
            (kill-buffer quarry-grep-buffer-name))
          (dolist (buffer (buffer-list))
@@ -990,6 +1010,8 @@ Each is (PROMPT . INITIAL-CONTENTS)."
     ;; r: as a regexp.
     (quarry-test-grep--keys "r C-a C-k ^fn SPC \\w+ RET")
     (should (equal (quarry-test-grep--filter-lines) '(("+" "line/re" "^fn \\w+" nil))))
+    ;; The order below holds because the search came in sorted.
+    (should (plist-get quarry-grep--summary :sorted))
     (should (equal (quarry-test-grep--results)
                    '(("src/a.rs" 1 "fn main() {") ("src/b.rs" 1 "fn other() {}"))))
     ;; %: literal and regexp, on a filter line only.
