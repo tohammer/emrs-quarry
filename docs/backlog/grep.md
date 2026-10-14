@@ -162,38 +162,30 @@ behind them, gain from the module. Ranked by gain against cost. Nothing
 here was measured: "slow" is what the mechanism implies on a large tree
 (a process and a full walk per input), not a number. None is designed.
 
-1. **Find a file below a directory** (`+default/find-file-under-here`,
-   find in notes, `consult-fd`, `consult-find`). Today: an `fd` or
-   `find` process per input, or `project-find-file` on a list built for
-   that directory. The index has the paths and the matcher. Missing: a
-   query limited to a path prefix, for a directory inside an indexed
-   project, and a decision for directories outside any project (an
-   instance per directory works today but starts a watcher each time).
-   Small on the Rust side; the cheapest item here.
-2. **Grep on the file index** (already above, "Grep on the file index
+1. **Grep on the file index** (already above, "Grep on the file index
    and the watcher"). Not a command, but the live grep raises its
    value: it walks the tree once per input, where a result buffer walks
    once per search. Measure the walk's share now that the live grep
    exists.
-3. **Definitions across a project by pattern** (what dumb-jump does
+2. **Definitions across a project by pattern** (what dumb-jump does
    with `rg`; a stand-in for `consult-lsp-symbols`, `consult-eglot-symbols`
    and tags where no server or tags file exists). The grep service
    searches; missing are a table of definition patterns per file type
    and a command that shows the hits as candidates. Medium cost, all of
    it in Elisp and data. Approximate by nature.
-4. **A symbol index** (the definitions of all files, as imenu gives
+3. **A symbol index** (the definitions of all files, as imenu gives
    them for one; `consult-imenu-multi` covers only open buffers). Exact
    results need a parser per language in the module (tree-sitter
    grammars: build time, module size, one query file per language) and
    an index kept current by the watcher, which needs the shared state of
    ADR 0010. The largest item here; consider only if the item before it is used
    and found too coarse.
-5. **Resolve a file name at point against the index** (`+lookup/file`,
+4. **Resolve a file name at point against the index** (`+lookup/file`,
    `find-file-at-point`): a relative path in a log or a compile buffer,
    found as the suffix of an indexed path. The index answers it with a
    query; missing is a suffix match that does not rank fuzzily. Small,
    and of narrow use.
-6. **Recency in the file finder's ranking** (`recentf-open-files`,
+5. **Recency in the file finder's ranking** (`recentf-open-files`,
    `projectile-recentf`). The two commands are fast as they are: the
    list is short. What the module could add is recently visited files
    ranked first among equal scores (file finder backlog, "Ranking of
@@ -211,8 +203,7 @@ Not worth moving:
 
 Origin: survey asked for by the author on 2026-10-11, done 2026-10-12
 from Doom's bindings and command definitions and consult 3.7. Pick from
-it; finding a file below a directory is the natural next file finder
-feature.
+it.
 
 ## Further features weighed before the spec
 

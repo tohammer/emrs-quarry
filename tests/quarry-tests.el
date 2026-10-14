@@ -1209,6 +1209,258 @@ run inside `project-files'."
       (quarry-test--wait (lambda () (zerop (hash-table-count quarry--instances))) 3)
       (delete-directory dir t))))
 
+;;;; Finding below a directory
+
+(defun quarry-test--dir-tree ()
+  "Create a project tree with an ignored directory and a symlink; return it.
+`link' points to `sub'; `ignored/' is in .gitignore."
+  (let ((dir (quarry-test--make-tree
+              '("top.txt" "sub/a.txt" "sub/deep/b.txt" "subx/c.txt" "ignored/x.txt"))))
+    (write-region "ignored/\n" nil (expand-file-name ".gitignore" dir) nil 'silent)
+    (make-symbolic-link (expand-file-name "sub" dir) (expand-file-name "link" dir))
+    dir))
+
+(defun quarry-test--project-finder (root)
+  "Return a `project-find-functions' entry for the project at ROOT.
+It finds the project for ROOT and the directories below it, compared
+as true names, and no project elsewhere."
+  (let ((true (file-name-as-directory (file-truename root))))
+    (lambda (dir)
+      (and (string-prefix-p true (file-name-as-directory (file-truename dir)))
+           (cons 'quarry-test root)))))
+
+(defmacro quarry-test--with-dir-project (var &rest body)
+  "Run BODY with VAR bound to an indexed `quarry-test--dir-tree'.
+It is the current project of the directories below it, and of no others."
+  (declare (indent 1))
+  `(let* ((,var (quarry-test--dir-tree))
+          (project-find-functions (list (quarry-test--project-finder ,var))))
+     (unwind-protect
+         (progn
+           (emrs-call-sync (quarry--rec-instance (quarry--ensure ,var)) '(:rescan) 10)
+           ,@body)
+       (quarry-stop-all)
+       (quarry-test--wait (lambda () (zerop (hash-table-count quarry--instances))) 3)
+       (delete-directory ,var t))))
+
+(defun quarry-test--stopped-p (rec)
+  "Wait until the instance of REC has stopped; return non-nil if it did."
+  (quarry-test--wait
+   (lambda () (eq (emrs-instance-state (quarry--rec-instance rec)) 'stopped))
+   3))
+
+(ert-deftest quarry-test-dir-target-index ()
+  "The root and its subdirectories with files are answered by the index."
+  (quarry-test--with-dir-project dir
+    (should (equal (quarry--dir-target dir) (cons dir nil)))
+    (should (equal (quarry--dir-target (directory-file-name dir)) (cons dir nil)))
+    (should (equal (quarry--dir-target (concat dir "sub/")) (cons dir "sub/")))
+    (should (equal (quarry--dir-target (concat dir "sub/deep/")) (cons dir "sub/deep/")))
+    ;; Through a symlink to a directory inside the project.
+    (should (equal (quarry--dir-target (concat dir "link/")) (cons dir "sub/")))
+    (should (= (hash-table-count quarry--instances) 1))))
+
+(ert-deftest quarry-test-dir-target-one-shot ()
+  "An ignored directory and one outside any project get a one-shot record."
+  (quarry-test--with-dir-project dir
+    (let ((outside (quarry-test--make-tree '("o.txt"))))
+      (unwind-protect
+          (dolist (target (list (concat dir "ignored/") outside))
+            (let* ((result (quarry--dir-target target))
+                   (rec (car result)))
+              (unwind-protect
+                  (progn
+                    (should (quarry--rec-p rec))
+                    (should (null (cdr result)))
+                    (should (quarry--rec-one-shot rec))
+                    (should-not (quarry--rec-watching rec))
+                    (should (equal (quarry--rec-root rec) target))
+                    (should (memq (emrs-instance-state (quarry--rec-instance rec))
+                                  '(starting running)))
+                    (should-not (plist-get (quarry--call-sync rec '(:status)) :watching))
+                    ;; Only the project's own instance is in the table.
+                    (should (= (hash-table-count quarry--instances) 1))
+                    (should-not (quarry--lookup target)))
+                (emrs-stop (quarry--rec-instance rec)))
+              (should (quarry-test--stopped-p rec))
+              ;; Its end is not recorded as a project's.
+              (should-not (gethash target quarry--failures))
+              (let ((err (should-error (quarry--target-rec rec) :type 'user-error)))
+                (should (string-match-p "the walk of .* has ended" (cadr err))))))
+        (delete-directory outside t)))))
+
+(ert-deftest quarry-test-dir-target-indexing-without-files ()
+  "A probe with :indexing t but no files below the directory gets a one-shot record."
+  (quarry-test--with-dir-project dir
+    (let ((result nil))
+      (cl-letf* ((orig (symbol-function 'quarry-query))
+                 ((symbol-function 'quarry-query)
+                  (lambda (root text limit exact &optional rel)
+                    (if rel
+                        '(:paths nil :total 0 :indexing t)
+                      (funcall orig root text limit exact)))))
+        (setq result (quarry--dir-target (concat dir "ignored/"))))
+      (unwind-protect
+          (progn
+            (should (quarry--rec-p (car result)))
+            (should (null (cdr result)))
+            (should (quarry--rec-one-shot (car result))))
+        (when (quarry--rec-p (car result))
+          (emrs-stop (quarry--rec-instance (car result))))))))
+
+(ert-deftest quarry-test-dir-target-prepare-failure-stops-one-shot ()
+  "A one-shot instance is stopped when preparing it signals an error or quit."
+  (let ((outside (quarry-test--make-tree '("o.txt")))
+        (project-find-functions nil))
+    (unwind-protect
+        (dolist (condition '((user-error "Boom") (quit)))
+          (let ((started nil))
+            (cl-letf (((symbol-function 'quarry--prepare)
+                       (lambda (&rest _) (signal (car condition) (cdr condition)))))
+              (advice-add 'quarry--start :filter-return
+                          (lambda (rec) (push rec started) rec)
+                          '((name . quarry-test-capture)))
+              (unwind-protect
+                  (should (equal (condition-case err
+                                     (quarry--dir-target outside)
+                                   ((error quit) err))
+                                 condition))
+                (advice-remove 'quarry--start 'quarry-test-capture)))
+            (should (= (length started) 1))
+            (should (quarry-test--stopped-p (car started)))))
+      (delete-directory outside t))))
+
+(defun quarry-test--find-in-directory-with-keys (dir keys)
+  "Run `quarry-find-file-in-directory' in DIR typing KEYS.
+Return the visited file and kill its buffer."
+  (let ((buf nil))
+    (unwind-protect
+        ;; The command loop runs each command in the selected window's
+        ;; buffer, so that is where DIR must be `default-directory'.
+        (progn
+          (with-current-buffer (window-buffer)
+            (let ((default-directory dir))
+              (execute-kbd-macro
+               (kbd (concat "M-x quarry-find-file-in-directory RET " keys)))))
+          (setq buf (window-buffer))
+          (buffer-file-name buf))
+      (when (and buf (buffer-file-name buf))
+        (kill-buffer buf)))))
+
+(ert-deftest quarry-test-find-file-in-directory-index ()
+  "A subdirectory of the project: candidates relative to it, visited below it."
+  (quarry-test--with-dir-project dir
+    (let* ((sub (concat dir "sub/"))
+           (orig (symbol-function 'completing-read))
+           (seen nil))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt table &rest args)
+                   ;; M-x reads with `completing-read' too.
+                   (when (string-prefix-p "Find file in " prompt)
+                     (push (list prompt (sort (all-completions "" table) #'string<))
+                           seen))
+                   (apply orig prompt table args))))
+        (should (equal (quarry-test--find-in-directory-with-keys sub "deep/b.txt RET")
+                       (concat sub "deep/b.txt")))
+        (should (equal (car seen)
+                       (list (format "Find file in %s: " (abbreviate-file-name sub))
+                             '("a.txt" "deep/b.txt"))))
+        ;; Input that completes to exactly one candidate visits it.
+        (should (equal (quarry-test--find-in-directory-with-keys sub "deep RET RET")
+                       (concat sub "deep/b.txt")))
+        ;; No one-shot instance was needed.
+        (should (= (hash-table-count quarry--instances) 1))))))
+
+(defun quarry-test--find-in-directory-one-shot (dir reply)
+  "Run `quarry-find-file-in-directory' on DIR outside any project.
+The prompt calls REPLY with the candidates of the empty input and
+returns what it returns.  Return (REC STATE SHOWN RESULT): the one-shot
+record, its instance's state during the prompt, the candidates and the
+visited file name, or the error the command signalled."
+  (let ((rec nil) (state nil) (shown nil) (result nil))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _)
+                 (setq state (emrs-instance-state (quarry--rec-instance rec))
+                       shown (sort (all-completions "" table) #'string<))
+                 (funcall reply shown))))
+      (advice-add 'quarry--dir-target :filter-return
+                  (lambda (target) (setq rec (car target)) target)
+                  '((name . quarry-test-capture)))
+      (unwind-protect
+          (setq result
+                (condition-case err
+                    (progn (quarry-find-file-in-directory dir)
+                           (prog1 (buffer-file-name)
+                             (kill-buffer)))
+                  ((error quit) err)))
+        (advice-remove 'quarry--dir-target 'quarry-test-capture)))
+    (list rec state shown result)))
+
+(ert-deftest quarry-test-find-file-in-directory-one-shot ()
+  "A one-shot instance runs during the prompt and is stopped after it."
+  (let ((dir (quarry-test--make-tree '("o1.txt" "d/o2.txt")))
+        (project-find-functions nil))
+    (unwind-protect
+        (pcase-dolist (`(,reply ,expected)
+                       `((,(lambda (_) "d/o2.txt") ,(concat dir "d/o2.txt"))
+                         (,(lambda (_) (signal 'quit nil)) (quit))
+                         (,(lambda (_) (error "Boom")) (error "Boom"))))
+          (pcase-let ((`(,rec ,state ,shown ,result)
+                       (quarry-test--find-in-directory-one-shot dir reply)))
+            (should (quarry--rec-one-shot rec))
+            (should (eq state 'running))
+            (should (equal shown '("d/o2.txt" "o1.txt")))
+            (should (equal result expected))
+            (should (quarry-test--stopped-p rec))
+            (should (zerop (hash-table-count quarry--instances)))))
+      (quarry-stop-all)
+      (delete-directory dir t))))
+
+(ert-deftest quarry-test-find-file-in-directory-refused ()
+  "Remote and missing directories are refused before any instance starts."
+  (let ((dir (quarry-test--make-tree '("file")))
+        (count (hash-table-count quarry--instances))
+        (starts 0))
+    (advice-add 'emrs-start :before (lambda (&rest _) (cl-incf starts))
+                '((name . quarry-test-count-start)))
+    (unwind-protect
+        (progn
+          (let ((err (should-error (quarry-find-file-in-directory
+                                    "/ssh:quarry-test-host:/tmp/")
+                                   :type 'user-error)))
+            (should (equal (cadr err) "quarry finds files in local directories only: /ssh:quarry-test-host:/tmp/")))
+          (let ((err (should-error (quarry-find-file-in-directory (concat dir "nope"))
+                                   :type 'user-error)))
+            (should (string-match-p (regexp-quote (concat dir "nope")) (cadr err))))
+          (let ((err (should-error (quarry-find-file-in-directory (concat dir "file"))
+                                   :type 'user-error)))
+            (should (string-match-p "Not a directory" (cadr err)))
+            (should (string-match-p (regexp-quote (concat dir "file")) (cadr err))))
+          (should (= starts 0))
+          (should (= (hash-table-count quarry--instances) count)))
+      (advice-remove 'emrs-start 'quarry-test-count-start)
+      (delete-directory dir t))))
+
+(ert-deftest quarry-test-find-file-in-directory-prefix-argument ()
+  "With a prefix argument the command asks for the directory and uses it."
+  (let ((dir (quarry-test--make-tree '("o1.txt")))
+        (project-find-functions nil)
+        (asked nil) (visited nil) (prompt nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'read-directory-name)
+                   (lambda (&rest _) (setq asked t) dir))
+                  ((symbol-function 'completing-read)
+                   (lambda (p &rest _) (setq prompt p) "o1.txt"))
+                  ((symbol-function 'find-file)
+                   (lambda (file &rest _) (setq visited file))))
+          (let ((current-prefix-arg '(4)))
+            (call-interactively #'quarry-find-file-in-directory))
+          (should asked)
+          (should (equal prompt (format "Find file in %s: " (abbreviate-file-name dir))))
+          (should (equal visited (concat dir "o1.txt"))))
+      (quarry-stop-all)
+      (delete-directory dir t))))
+
 (ert-deftest quarry-test-core-loads-alone ()
   "quarry-core.el loads without quarry.el and defines `quarry--load-module'."
   (let* ((emacs (expand-file-name invocation-name invocation-directory))

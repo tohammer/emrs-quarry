@@ -45,6 +45,29 @@ prefers more prominent paths (recently visited, shallower in a well-known
 tree) may help. Origin: task 8 benchmark observation, 2026-10-09.
 Revisit with real use.
 
+## ASCII and Unicode haystacks score differently
+
+nucleo can score the same text differently when it is stored as an
+ASCII and as a Unicode haystack: pattern `s` on
+`tests/x$y/src/test_core.rsx` scores 34 as ASCII and 16 as Unicode. A
+path with any non-ASCII character is a Unicode haystack throughout, so
+it ranks differently from an ASCII path of the same shape. With `:dir`
+(ADR 0020) the ASCII rest of a path below a non-ASCII directory stays a
+Unicode slice, so the project index and a one-shot instance rooted at
+that directory can rank it differently. Converting an ASCII rest to
+`Utf32Str::Ascii` would fix the `:dir` case; the cause in nucleo was not
+looked into. Origin: task 1 of the find-below-directory spec,
+2026-10-14. Revisit if rankings with non-ASCII paths look wrong in use.
+
+## `project-files` for a subdirectory
+
+`project-files` is served from the index only for the whole project root
+(`DIRS` other than the root fall back to the normal method). `:files`
+could take a `:dir` like `:query` does, now that the matcher can limit
+paths to a directory. Origin: scope of the find-below-directory spec,
+2026-10-14, which left the `:files` stream without `:dir`. Revisit when a
+caller of `project-files` with a subdirectory is slow.
+
 ## `remove_dir` scans the whole index
 
 `Index::remove_dir` is O(n). A batch with many sibling directory removals
@@ -92,3 +115,16 @@ reason: emrs fails open calls before it runs `on-exit`, where
 a `run-at-time 0` timer, after `on-exit` ran. Origin: review of the
 consult spec (2026-10-09); deferred because the warning already carries
 the reason. Revisit if users find the message confusing.
+
+## Parallel scoring with `:dir` splits before the filter
+
+On a full scoring with `:dir`, `Matcher::query_styled` splits the slot
+range of the whole index into one chunk per thread and `score_chunk`
+skips paths outside the directory. A directory's files likely sit
+together in slot order (slots follow walk batches), so the first
+keystroke in a large subdirectory may be scored by one or two threads.
+Narrowed keystrokes are balanced. Results are unaffected. Fix: collect
+the slots below the dir first and score those as `Candidates::Slots`.
+Origin: review of the find-below-directory change (Rust), 2026-10-14;
+not measured. Revisit if a large subdirectory's first keystroke is
+noticeably slower than `quarry-find-file`'s.

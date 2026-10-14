@@ -16,6 +16,10 @@
 ;; quarry's index in a consult prompt.  Each input goes to the index
 ;; asynchronously, a superseded query is cancelled, and the candidates
 ;; update while the first walk of a project still runs.
+;; `quarry-consult-find-file-in-directory' does the same for the files
+;; below any local directory: from the project's index when the
+;; directory is in it, else from a one-shot walk that ends with the
+;; prompt.
 ;;
 ;; The command needs consult 2.0 or later.  This file loads and
 ;; byte-compiles without it; the command then signals a `user-error'.
@@ -75,8 +79,14 @@ where positions are present, the same strings `quarry--table' returns."
                        ;; UIs may add properties in place.
                        (copy-sequence path)))))
 
-(defun quarry-consult--async (root)
+(defvar quarry-consult-directory-history nil
+  "Minibuffer history of `quarry-consult-find-file-in-directory'.")
+
+(defun quarry-consult--async (root &optional dir)
   "Return a consult async step that queries the index of ROOT.
+ROOT is a project root or a one-shot record, as `quarry-query-async'
+takes; DIR, a directory relative to the root, limits the query to the
+paths below it.
 See `consult--async-pipeline' for the protocol.  Each new input string
 is sent with `quarry-query-async'; the call it supersedes is cancelled.
 The reply replaces the candidates.  While the instance indexes, the
@@ -102,9 +112,12 @@ seconds.  The first error is reported with `message'."
                  (emrs-cancel pending))))
            (failure (text)
              ;; The message of the instance's failed exit, if known, as
-             ;; `quarry--call-sync' reports it.
+             ;; `quarry--call-sync' reports it.  A one-shot record has
+             ;; none: its text is used.
              (format "quarry: %s"
-                     (or (gethash (quarry--root root) quarry--failures) text)))
+                     (or (and (not (quarry--rec-p root))
+                              (gethash (quarry--root root) quarry--failures))
+                         text)))
            (fail (text)
              (unless reported
                (setq reported t)
@@ -134,12 +147,13 @@ seconds.  The first error is reported with `message'."
              (let ((this serial))
                (condition-case err
                    (progn
-                     (setq call (quarry-query-async
-                                 root input quarry-limit (and quarry-highlight t)
-                                 (lambda (reply err)
-                                   (when (= this serial)
-                                     (setq call nil)
-                                     (receive reply err)))))
+                     (setq call (apply #'quarry-query-async
+                                       root input quarry-limit (and quarry-highlight t)
+                                       (lambda (reply err)
+                                         (when (= this serial)
+                                           (setq call nil)
+                                           (receive reply err)))
+                                       (and dir (list dir))))
                      (funcall sink [indicator running]))
                  ;; `emrs-call' signals for an instance that is known to
                  ;; have stopped or failed, and `quarry--ensure' may
@@ -161,7 +175,35 @@ seconds.  The first error is reported with `message'."
              (funcall sink action))
             (_ (funcall sink action))))))))
 
-;;;; Command
+;;;; Commands
+
+(defun quarry-consult--require (command)
+  "Signal a `user-error' naming COMMAND unless consult 2.0 or later is here."
+  (unless (quarry-consult--available-p)
+    (user-error "Install consult 2.0 or later to use %s" command)))
+
+(defun quarry-consult--read (prompt target dir rel history)
+  "Read a file path with PROMPT in a consult prompt and return it.
+TARGET and REL are as for `quarry-consult--async', which supplies the
+candidates; REL limits them to a directory.  `default-directory' is DIR
+during the read.  HISTORY is the symbol of the history variable."
+  (let ((default-directory dir))
+    (consult--read
+     (consult--async-pipeline
+      (consult--async-split)
+      (consult--async-throttle quarry-consult-input-throttle
+                               quarry-consult-input-debounce)
+      (quarry-consult--async target rel)
+      (consult--async-indicator)
+      (consult--async-refresh))
+     :prompt prompt
+     :category 'project-file
+     :sort nil
+     :require-match t
+     :history `(:input ,history)
+     ;; The pipeline above is complete; the default wrapper would add
+     ;; split, indicator and refresh a second time.
+     :async-wrap #'identity)))
 
 (defun quarry-consult--available-p ()
   "Return non-nil when consult 2.0 or later is loaded or can be loaded."
@@ -177,8 +219,7 @@ the input changes; see `consult-async-split-style' for filtering them
 further.  With INCLUDE-ALL, or in a remote project, defer to
 `project-find-file' with INCLUDE-ALL.  Needs consult 2.0 or later."
   (interactive "P")
-  (unless (quarry-consult--available-p)
-    (user-error "Install consult 2.0 or later to use quarry-consult-find-file"))
+  (quarry-consult--require 'quarry-consult-find-file)
   (let* ((project (project-current t))
          (root (quarry--root (project-root project))))
     (if (or include-all (file-remote-p root))
@@ -186,26 +227,39 @@ further.  With INCLUDE-ALL, or in a remote project, defer to
       ;; No wait for a first page: the step re-queries while the
       ;; instance indexes, so the candidates fill in the open prompt.
       (quarry--prepare root t)
-      (let ((path (let ((default-directory root))
-                    (consult--read
-                     (consult--async-pipeline
-                      (consult--async-split)
-                      (consult--async-throttle quarry-consult-input-throttle
-                                               quarry-consult-input-debounce)
-                      (quarry-consult--async root)
-                      (consult--async-indicator)
-                      (consult--async-refresh))
-                     :prompt (format "Find file in %s: " (project-name project))
-                     :category 'project-file
-                     :sort nil
-                     :require-match t
-                     :history '(:input quarry-consult-history)
-                     ;; The pipeline above is complete; the default
-                     ;; wrapper would add split, indicator and refresh
-                     ;; a second time.
-                     :async-wrap #'identity))))
+      (let ((path (quarry-consult--read
+                   (format "Find file in %s: " (project-name project))
+                   root root nil 'quarry-consult-history)))
         ;; Not `expand-file-name': a path like "~/x" must stay below ROOT.
         (find-file (concat root path))))))
+
+;;;###autoload
+(defun quarry-consult-find-file-in-directory (&optional dir)
+  "Visit a file below DIR, chosen in a consult prompt.
+DIR is `default-directory' by default; with a prefix argument, ask for
+it.  A directory below the root of the current project is answered from
+the project's index when that has files below it.  Any other local
+directory is walked once for the prompt, without a watcher, and the
+walk is stopped when the prompt ends.  The candidates are relative to
+DIR.  Needs consult 2.0 or later."
+  (interactive
+   (progn
+     (quarry-consult--require 'quarry-consult-find-file-in-directory)
+     (list (if current-prefix-arg
+               (read-directory-name "Find file in directory: ")
+             default-directory))))
+  (quarry-consult--require 'quarry-consult-find-file-in-directory)
+  (let* ((dir (quarry--check-directory (or dir default-directory)))
+         (target (quarry--dir-target dir t)))
+    (let ((path (unwind-protect
+                    (quarry-consult--read
+                     (format "Find file in %s: " (abbreviate-file-name dir))
+                     (car target) dir (cdr target)
+                     'quarry-consult-directory-history)
+                  (unless (stringp (car target))
+                    (emrs-stop (quarry--rec-instance (car target)))))))
+      ;; Not `expand-file-name': a path like "~/x" must stay below DIR.
+      (find-file (concat dir path)))))
 
 (provide 'quarry-consult)
 ;;; quarry-consult.el ends here
