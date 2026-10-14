@@ -5,7 +5,6 @@ architecture.md or an ADR.
 
 ## Next
 
-- Set the GitHub repository's description and topics; both are empty.
 - Rebuild the module (`M-x quarry-build-module`) and restart Emacs: path
   globs and context lines need the new module. An older one refuses a
   glob with `/` and shows no context.
