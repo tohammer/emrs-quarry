@@ -13,6 +13,11 @@
 //! grapheme indices are converted to the character index of the grapheme's first code point. Each position has
 //! a group: the number of the term (non-negated atom, in query order) that matched it, so a UI can colour terms
 //! differently. A position two terms matched belongs to the earlier one.
+//!
+//! A query can be limited to a directory `dir` (`""` for the whole index, else relative to the root and ending in
+//! `/`): only paths starting with `dir` are candidates, each is matched on the part after `dir` (its haystack
+//! sliced after `dir`'s nucleo characters), and paths, positions and groups refer to that part. Ranking compares
+//! the full paths, which with the common prefix orders as the parts do.
 
 use crate::index::Index;
 use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization, Pattern};
@@ -50,6 +55,7 @@ pub struct QueryResult {
 
 /// The previous query, for incremental narrowing.
 struct Cache {
+    dir: String,
     text: String,
     style: Style,
     version: u64,
@@ -70,6 +76,21 @@ struct Chunk {
     matches: Vec<u32>,
     /// The chunk's best `limit` hits, best first.
     top: Vec<Hit>,
+}
+
+/// The directory a query is limited to: its path prefix and the prefix's length in nucleo characters.
+#[derive(Clone, Copy)]
+struct Dir<'a> {
+    /// `""` or a directory ending in `/`.
+    prefix: &'a str,
+    /// Number of nucleo characters (graphemes) of `prefix`: where the haystack of a path below it is sliced.
+    graphemes: usize,
+}
+
+impl<'a> Dir<'a> {
+    fn new(prefix: &'a str) -> Self {
+        Dir { prefix, graphemes: if prefix.is_empty() { 0 } else { Utf32String::from(prefix).len() } }
+    }
 }
 
 /// The paths a query scores: the whole index, or the matches of the previous query.
@@ -135,12 +156,15 @@ impl Matcher {
     /// A fuzzy-style query (see [`Matcher::query_styled`]).
     #[cfg(test)]
     pub fn query(&mut self, index: &Index, text: &str, limit: usize, positions: bool) -> QueryResult {
-        self.query_styled(index, text, Style::Fuzzy, limit, positions)
+        self.query_styled(index, "", text, Style::Fuzzy, limit, positions)
     }
 
+    /// The best `limit` paths of `index` below `dir` for `text` (see the module docs). `dir` is `""` for the
+    /// whole index or a normalized directory ending in `/`.
     pub fn query_styled(
         &mut self,
         index: &Index,
+        dir: &str,
         text: &str,
         style: Style,
         limit: usize,
@@ -148,9 +172,13 @@ impl Matcher {
     ) -> QueryResult {
         let limit = limit.clamp(1, MAX_LIMIT);
         let pattern = parse(text, style);
+        debug_assert!(dir.is_empty() || dir.ends_with('/'), "unnormalized dir {dir:?}");
+        let below = Dir::new(dir);
 
-        let cache =
-            self.cache.take().filter(|c| c.version == index.version() && c.style == style && narrows(&c.text, text));
+        let cache = self
+            .cache
+            .take()
+            .filter(|c| c.version == index.version() && c.style == style && c.dir == dir && narrows(&c.text, text));
         let candidates = match &cache {
             Some(cache) => Candidates::Slots(&cache.matches),
             None => Candidates::All(index.len()),
@@ -168,13 +196,14 @@ impl Matcher {
                     .enumerate()
                     .map(|(i, nucleo)| {
                         let range = (i * size).min(candidates.len())..((i + 1) * size).min(candidates.len());
-                        scope.spawn(move || score_chunk(index, pattern, candidates, range, nucleo, limit))
+                        scope.spawn(move || score_chunk(index, below, pattern, candidates, range, nucleo, limit))
                     })
                     .collect();
                 handles.into_iter().map(|h| h.join().expect("scoring thread panicked")).collect()
             })
         } else {
-            vec![score_chunk(index, &pattern, candidates, 0..candidates.len(), &mut self.nucleos[0], limit)]
+            let nucleo = &mut self.nucleos[0];
+            vec![score_chunk(index, below, &pattern, candidates, 0..candidates.len(), nucleo, limit)]
         };
 
         let (matches, top) = if chunks.len() == 1 {
@@ -194,19 +223,20 @@ impl Matcher {
         let (positions, groups) = if positions {
             let nucleo = &mut self.nucleos[0];
             let mut buf = Vec::new();
-            let marked = top.iter().map(|hit| match_positions(index, &pattern, hit.slot, nucleo, &mut buf));
+            let marked = top.iter().map(|hit| match_positions(index, below, &pattern, hit.slot, nucleo, &mut buf));
             let (positions, groups) = marked.unzip();
             (Some(positions), Some(groups))
         } else {
             (None, None)
         };
         let result = QueryResult {
-            paths: top.iter().map(|hit| index.path(hit.slot).to_owned()).collect(),
+            paths: top.iter().map(|hit| index.path(hit.slot)[dir.len()..].to_owned()).collect(),
             positions,
             groups,
             total: matches.len(),
         };
-        self.cache = Some(Cache { text: text.to_owned(), style, version: index.version(), matches });
+        let cache = Cache { dir: dir.to_owned(), text: text.to_owned(), style, version: index.version(), matches };
+        self.cache = Some(cache);
         result
     }
 }
@@ -314,9 +344,10 @@ fn substring_atom(raw: &str) -> Atom {
     atom
 }
 
-/// Scores candidates `range` with one nucleo matcher and keeps the best `limit`.
+/// Scores candidates `range` that are below `dir` with one nucleo matcher and keeps the best `limit`.
 fn score_chunk(
     index: &Index,
+    dir: Dir<'_>,
     pattern: &Pattern,
     candidates: Candidates<'_>,
     range: Range<usize>,
@@ -326,7 +357,10 @@ fn score_chunk(
     let mut hits = Vec::new();
     for i in range {
         let slot = candidates.get(i);
-        if let Some(score) = pattern.score(index.haystack(slot), nucleo) {
+        if !index.path(slot).starts_with(dir.prefix) {
+            continue;
+        }
+        if let Some(score) = pattern.score(index.haystack(slot).slice(dir.graphemes..), nucleo) {
             hits.push(Hit { score, slot });
         }
     }
@@ -352,10 +386,11 @@ fn best(index: &Index, mut hits: Vec<Hit>, limit: usize) -> Vec<Hit> {
     hits
 }
 
-/// Character indices of the match of `pattern` in the path at `slot`, sorted and deduplicated, and the group
-/// (term number) of each.
+/// Character indices of the match of `pattern` in the part after `dir` of the path at `slot`, sorted and
+/// deduplicated, and the group (term number) of each.
 fn match_positions(
     index: &Index,
+    dir: Dir<'_>,
     pattern: &Pattern,
     slot: u32,
     nucleo: &mut nucleo_matcher::Matcher,
@@ -364,14 +399,21 @@ fn match_positions(
     let mut marks = Vec::new();
     for (group, atom) in pattern.atoms.iter().filter(|atom| !atom.negative).enumerate() {
         buf.clear();
-        atom.indices(index.haystack(slot), nucleo, buf);
+        atom.indices(index.haystack(slot).slice(dir.graphemes..), nucleo, buf);
         marks.extend(buf.iter().map(|&g| (g, group as u32)));
     }
     // By position, then group: deduplicating keeps the earliest term.
     marks.sort_unstable();
     marks.dedup_by_key(|mark| mark.0);
-    let starts = (!index.chars_are_graphemes(slot)).then(|| grapheme_starts(index.path(slot)));
-    marks.into_iter().map(|(g, group)| (starts.as_ref().map_or(g, |starts| starts[g as usize]), group)).unzip()
+    // Graphemes are converted on the full path, whose segmentation the haystack has; then made relative to `dir`.
+    let path = index.path(slot);
+    let starts = (!index.chars_are_graphemes(slot)).then(|| grapheme_starts(path));
+    let chars = if starts.is_some() { path[..dir.prefix.len()].chars().count() as u32 } else { 0 };
+    let char_index = |g: u32| match &starts {
+        Some(starts) => starts[g as usize + dir.graphemes] - chars,
+        None => g,
+    };
+    marks.into_iter().map(|(g, group)| (char_index(g), group)).unzip()
 }
 
 /// For each nucleo character (grapheme) of `text`, the character index of its first code point.
@@ -418,18 +460,30 @@ mod tests {
 
     /// Single-threaded full scoring, written independently of `Matcher`: the reference for equivalence tests.
     fn reference(index: &Index, text: &str, limit: usize, positions: bool) -> QueryResult {
-        reference_styled(index, text, Style::Fuzzy, limit, positions)
+        reference_styled(index, "", text, Style::Fuzzy, limit, positions)
     }
 
-    fn reference_styled(index: &Index, text: &str, style: Style, limit: usize, positions: bool) -> QueryResult {
+    /// The reference below `dir`: the paths starting with `dir`, each matched on its nucleo form with the
+    /// characters of `dir` cut off. (Not on the text after `dir` converted anew: nucleo can score the same text
+    /// differently as an ASCII and as a Unicode haystack, and a non-ASCII path stays Unicode when cut.)
+    fn reference_styled(
+        index: &Index,
+        dir: &str,
+        text: &str,
+        style: Style,
+        limit: usize,
+        positions: bool,
+    ) -> QueryResult {
         let limit = limit.clamp(1, MAX_LIMIT);
         let mut nucleo = nucleo_matcher::Matcher::new(Config::DEFAULT.match_paths());
         let pattern = parse(text, style);
+        let cut = Utf32String::from(dir).len();
         let mut hits: Vec<(u32, &str)> = index
             .iter()
+            .filter(|p| p.starts_with(dir))
             .filter_map(|p| {
                 let hay = Utf32String::from(p);
-                pattern.score(hay.slice(..), &mut nucleo).map(|s| (s, p))
+                pattern.score(hay.slice(cut..), &mut nucleo).map(|s| (s, &p[dir.len()..]))
             })
             .collect();
         hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())).then(a.1.cmp(b.1)));
@@ -438,18 +492,20 @@ mod tests {
         let marked: Option<Vec<(Vec<u32>, Vec<u32>)>> = positions.then(|| {
             hits.iter()
                 .map(|(_, p)| {
-                    let hay = Utf32String::from(*p);
+                    let full = format!("{dir}{p}");
+                    let hay = Utf32String::from(full.as_str());
                     // Grapheme index -> group of the first term that matched it.
                     let mut groups = std::collections::BTreeMap::new();
                     for (group, atom) in pattern.atoms.iter().filter(|a| !a.negative).enumerate() {
                         let mut idx = Vec::new();
-                        atom.indices(hay.slice(..), &mut nucleo, &mut idx);
+                        atom.indices(hay.slice(cut..), &mut nucleo, &mut idx);
                         for g in idx {
-                            groups.entry(g).or_insert(group as u32);
+                            groups.entry(g as usize + cut).or_insert(group as u32);
                         }
                     }
-                    let starts = grapheme_starts(p);
-                    groups.into_iter().map(|(g, group)| (starts[g as usize], group)).unzip()
+                    let starts = grapheme_starts(&full);
+                    let chars = dir.chars().count() as u32;
+                    groups.into_iter().map(|(g, group)| (starts[g] - chars, group)).unzip()
                 })
                 .collect()
         });
@@ -612,7 +668,7 @@ mod tests {
     }
 
     fn styled(index: &Index, text: &str, style: Style) -> Vec<String> {
-        let mut got = Matcher::new().query_styled(index, text, style, 100, false).paths;
+        let mut got = Matcher::new().query_styled(index, "", text, style, 100, false).paths;
         got.sort();
         got
     }
@@ -668,7 +724,7 @@ mod tests {
     #[test]
     fn substring_style_positions() {
         let index = index_of(&["src/act/manager.rs"]);
-        let result = Matcher::new().query_styled(&index, "man 'sat", Style::Substring, 10, true);
+        let result = Matcher::new().query_styled(&index, "", "man 'sat", Style::Substring, 10, true);
         // `'sat` is fuzzy: s, a, t of `src/act`.
         assert_eq!(result.positions, Some(vec![vec![0, 4, 6, 8, 9, 10]]));
         assert_eq!(result.groups, Some(vec![vec![1, 1, 1, 0, 0, 0]]));
@@ -678,12 +734,83 @@ mod tests {
     fn narrowing_cache_is_per_style() {
         let index = index_of(&["src/act/manager.rs", "a/c/t/m/a/n", "zzz"]);
         let mut matcher = Matcher::new();
-        assert_eq!(matcher.query_styled(&index, "ac", Style::Substring, 10, false).total, 1);
-        let result = matcher.query_styled(&index, "act", Style::Fuzzy, 10, false);
+        assert_eq!(matcher.query_styled(&index, "", "ac", Style::Substring, 10, false).total, 1);
+        let result = matcher.query_styled(&index, "", "act", Style::Fuzzy, 10, false);
         assert_eq!(matcher.last_scored, 3, "style changed: full scoring");
         assert_eq!(result.total, 2);
-        matcher.query_styled(&index, "actm", Style::Fuzzy, 10, false);
+        matcher.query_styled(&index, "", "actm", Style::Fuzzy, 10, false);
         assert_eq!(matcher.last_scored, 2);
+    }
+
+    fn below(index: &Index, dir: &str, text: &str, positions: bool) -> QueryResult {
+        Matcher::new().query_styled(index, dir, text, Style::Fuzzy, 100, positions)
+    }
+
+    #[test]
+    fn dir_limits_candidates_to_whole_components() {
+        let index = index_of(&["src/main.rs", "src/a/src.rs", "srcx/a.rs", "lib/src.rs", "src", "a/src/b"]);
+        let result = below(&index, "src/", "", false);
+        assert_eq!(result.paths, ["main.rs", "a/src.rs"]);
+        assert_eq!(result.total, 2);
+        assert_eq!(below(&index, "srcx/", "a", false).paths, ["a.rs"]);
+        assert_eq!(below(&index, "a/src/", "", false).paths, ["b"]);
+        assert_eq!(
+            below(&index, "nothing/", "", true),
+            QueryResult { paths: vec![], positions: Some(vec![]), groups: Some(vec![]), total: 0 }
+        );
+        // An empty dir is the whole index.
+        assert_eq!(below(&index, "", "rs", true), Matcher::new().query(&index, "rs", 100, true));
+    }
+
+    #[test]
+    fn dir_characters_do_not_match() {
+        let index = index_of(&["src/main.rs", "src/a/src.rs"]);
+        assert_eq!(paths(&index, "src"), ["src/main.rs", "src/a/src.rs"]);
+        let result = below(&index, "src/", "src", true);
+        assert_eq!(result.paths, ["a/src.rs"]);
+        assert_eq!(result.total, 1);
+        assert_eq!(result.positions, Some(vec![vec![2, 3, 4]]));
+        // `^` anchors at the start of the part below the directory.
+        assert_eq!(below(&index, "src/", "^ma", false).paths, ["main.rs"]);
+    }
+
+    #[test]
+    fn dir_positions_are_relative_char_indices() {
+        let index = index_of(&["dä/src/act/manager.rs", "dä/ñame.rs"]);
+        let result = below(&index, "dä/", "man !x act", true);
+        assert_eq!(result.paths, ["src/act/manager.rs"]);
+        assert_eq!(result.positions, Some(vec![vec![4, 5, 6, 8, 9, 10]]));
+        assert_eq!(result.groups, Some(vec![vec![1, 1, 1, 0, 0, 0]]));
+        let result = below(&index, "dä/", "ñame", true);
+        assert_eq!(result.paths, ["ñame.rs"]);
+        assert_eq!(result.positions, Some(vec![vec![0, 1, 2, 3]]));
+        // Multi-codepoint graphemes in the directory and below it: decomposed "é" is two characters.
+        let index = index_of(&["e\u{301}/a\u{301}x.rs"]);
+        let result = below(&index, "e\u{301}/", "x", true);
+        assert_eq!(result.paths, ["a\u{301}x.rs"]);
+        assert_eq!(result.positions, Some(vec![vec![2]]));
+        assert_eq!(below(&index, "e\u{301}/", "e", false).total, 0);
+        // A combining character right after the dir's `/` belongs to the part below it.
+        let index = index_of(&["e/\u{301}x.rs"]);
+        let result = below(&index, "e/", "x", true);
+        assert_eq!(result.paths, ["\u{301}x.rs"]);
+        assert_eq!(result.positions, Some(vec![vec![1]]));
+    }
+
+    #[test]
+    fn narrowing_cache_is_per_dir() {
+        let index = index_of(&["src/a.rs", "src/b.rs", "src/c.md", "lib/d.rs", "lib/e.md", "f.rs"]);
+        let mut matcher = Matcher::new();
+        // (total, number of candidates scored)
+        let mut query = |dir, text| {
+            let total = matcher.query_styled(&index, dir, text, Style::Fuzzy, 10, false).total;
+            (total, matcher.last_scored)
+        };
+        assert_eq!(query("src/", "r"), (2, 6));
+        assert_eq!(query("src/", "rs"), (2, 2), "same dir: the previous matches");
+        assert_eq!(query("lib/", "rs"), (1, 6), "other dir: full scoring");
+        assert_eq!(query("", "rs"), (4, 6), "whole index: full scoring");
+        assert_eq!(query("", "rs."), (0, 4));
     }
 
     #[test]
@@ -906,6 +1033,8 @@ mod tests {
         Query(String),
         Add(&'static str),
         Remove(&'static str),
+        /// Later queries are limited to this directory.
+        Dir(&'static str),
     }
 
     fn queries(texts: &[&str]) -> Vec<Step> {
@@ -986,28 +1115,49 @@ mod tests {
             Step::Remove("util_x"),
             Step::Query("util_x".into()),
         ]);
+        // The directory changes between queries that would narrow.
+        sequences.push(vec![
+            Step::Query("u".into()),
+            Step::Dir("src/"),
+            Step::Query("ut".into()),
+            Step::Query("uti".into()),
+            Step::Dir(""),
+            Step::Query("util".into()),
+            Step::Dir("dö/"),
+            Step::Query("util_".into()),
+            Step::Dir("src/"),
+            Step::Query("util_".into()),
+            Step::Dir("srcx/"),
+            Step::Query("util_x".into()),
+        ]);
 
         // One matcher per thread count, all fed the same steps; 1 thread scores sequentially even above the
-        // threshold, so it checks narrowing alone.
+        // threshold, so it checks narrowing alone. Each sequence runs on the whole index and below directories
+        // (an ASCII one, a non-ASCII one, and one with a multi-codepoint grapheme); the directories have a few
+        // hundred paths each, above the threshold.
         let mut narrowed = 0;
-        for (style, (seq_no, sequence)) in [Style::Fuzzy, Style::Substring]
-            .into_iter()
-            .flat_map(|style| sequences.iter().enumerate().map(move |s| (style, s)))
-        {
+        let sequences = &sequences;
+        for (style, start_dir, (seq_no, sequence)) in [Style::Fuzzy, Style::Substring].into_iter().flat_map(|style| {
+            ["", "src/", "dö/", "e\u{301}t/"]
+                .into_iter()
+                .flat_map(move |dir| sequences.iter().enumerate().map(move |s| (style, dir, s)))
+        }) {
             let mut matchers: Vec<(usize, Matcher)> =
                 [1, 3, 8].into_iter().map(|t| (t, Matcher::with_parallelism(100, t))).collect();
+            let mut dir = start_dir;
             for (step_no, step) in sequence.iter().enumerate() {
                 match step {
                     Step::Add(p) => assert!(index.add(p)),
                     Step::Remove(p) => assert!(index.remove(p)),
+                    Step::Dir(d) => dir = d,
                     Step::Query(text) => {
                         let (limit, positions) = [(50, true), (1, true), (10_000, false), (7, true)][step_no % 4];
-                        let want = reference_styled(&index, text, style, limit, positions);
+                        let want = reference_styled(&index, dir, text, style, limit, positions);
                         for (threads, matcher) in &mut matchers {
-                            let got = matcher.query_styled(&index, text, style, limit, positions);
+                            let got = matcher.query_styled(&index, dir, text, style, limit, positions);
                             assert_eq!(
                                 got, want,
-                                "{style:?} sequence {seq_no} step {step_no} {text:?} threads {threads}"
+                                "{style:?} {dir:?} sequence {seq_no} step {step_no} {text:?} threads {threads}"
                             );
                             narrowed += usize::from(matcher.last_scored < index.len());
                         }

@@ -1,18 +1,25 @@
-//! The `index` service: one instance per project root, owning the index of that project.
+//! The `index` service: one instance per root, owning the index of that root: a project root, or a directory
+//! walked for one prompt (started with `:watch nil`).
 //!
 //! Lisp shapes (spec "Start arguments", "Requests and replies", "Events"):
 //!
 //! | Request | Reply |
 //! |---|---|
-//! | `(:query :text S :limit N :positions BOOL :substring BOOL)` | `(:paths (P ...) :positions (POS ...) :groups (G ...) :total M :indexing BOOL)` |
+//! | `(:query :text S :limit N :positions BOOL :substring BOOL :dir D)` | `(:paths (P ...) :positions (POS ...) :groups (G ...) :total M :indexing BOOL)` |
 //! | `(:files)` | stream of strings (relative paths), capacity 4096 |
 //! | `(:rescan)` | number of files, once a walk that started after the request has finished |
 //! | `(:status)` | `(:root R :files N :indexing BOOL :watching BOOL :walks K :skipped S)` |
 //!
 //! `:limit` defaults to 200 and is clamped to 1..=10000; `:positions` and `:substring` default to nil. `:substring` selects [`Style::Substring`].
-//! `:groups` is parallel to `:positions`: for each path the term number of each matched character. Start arguments are
-//! `(:root "/abs/dir/" :include-hidden t :ignores ("*.min.js"))`; `:include-hidden` defaults to t, `:ignores` to
-//! nil. Events: `(:indexed :files N :millis T)`, `(:changed :added A :removed R)`, `(:watch-failed :message S)`.
+//! `:groups` is parallel to `:positions`: for each path the term number of each matched character. `:dir` (nil or
+//! `""` for the whole index) limits a query to the paths below a directory, given relative to the root and
+//! `/`-separated, with or without a trailing `/` (`"src"` is `"src/"`, which does not take `srcx/a`). A `D` that
+//! starts with `/` or has an empty, `.` or `..` component is an error (`invalid :dir`). The paths below `D` are
+//! matched on, and `:paths`, `:positions` and `:groups` refer to, their part after `D`; `:total` counts them only
+//! (0 when nothing is below `D`). Start arguments are
+//! `(:root "/abs/dir/" :include-hidden t :ignores ("*.min.js") :watch t)`; `:include-hidden` and `:watch`
+//! default to t, `:ignores` to nil; with `:watch nil` no [`Watcher`] is created (see **Watching**). Events:
+//! `(:indexed :files N :millis T)`, `(:changed :added A :removed R)`, `(:watch-failed :message S)`.
 //!
 //! **Generations.** Every walk has a generation number and builds a fresh [`Index`] from its batches
 //! (self-messages [`Request::WalkBatch`]); the fresh index becomes current at the walk's [`Request::WalkDone`].
@@ -30,8 +37,8 @@
 //! follow-up walk; `(:files)` waits only for the running walk's `WalkDone` (it needs a consistent index, not a
 //! new walk).
 //!
-//! **Watching** (`src/watch.rs`). `start` sets up the [`Watcher`]; if that fails the instance runs without it and
-//! emits `(:watch-failed ...)`. The watcher thread sends [`Request::FsChanges`], [`Request::FsRescan`] and
+//! **Watching** (`src/watch.rs`). `start` sets up the [`Watcher`] (not with `:watch nil`: then the instance changes
+//! only by walks); if that fails the instance runs without it and emits `(:watch-failed ...)`. The watcher thread sends [`Request::FsChanges`], [`Request::FsRescan`] and
 //! [`Request::WatchFailed`] as self-messages. File-system changes are applied to the index queries use (the
 //! current index, or during the first walk the partial fresh one) and `(:changed ...)` reports how many paths
 //! that added and removed, when any. While a walk runs, the changes are also recorded in it and replayed on its
@@ -75,7 +82,7 @@ fn default_true() -> bool {
     true
 }
 
-/// Start arguments: `(:root "/abs/dir/" :include-hidden t :ignores ("*.min.js"))`.
+/// Start arguments: `(:root "/abs/dir/" :include-hidden t :ignores ("*.min.js") :watch t)`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Args {
     /// Absolute path of an existing directory.
@@ -85,11 +92,14 @@ pub struct Args {
     /// Extra gitignore-syntax lines relative to the root.
     #[serde(default)]
     pub ignores: Vec<String>,
+    /// Whether to watch the file system. With false no [`Watcher`] is created: the index changes only by walks.
+    #[serde(default = "default_true")]
+    pub watch: bool,
 }
 
 #[derive(Debug, Deserialize)]
 pub enum Request {
-    /// `(:query :text S :limit N :positions BOOL :substring BOOL)`; replies with [`QueryReply`].
+    /// `(:query :text S :limit N :positions BOOL :substring BOOL :dir D)`; replies with [`QueryReply`].
     Query {
         text: String,
         #[serde(default = "default_limit")]
@@ -99,6 +109,9 @@ pub enum Request {
         /// Plain terms match as substrings ([`Style::Substring`]) instead of fuzzily.
         #[serde(default)]
         substring: bool,
+        /// Only the paths below this directory, relative to it; nil or `""` for the whole index.
+        #[serde(default)]
+        dir: Option<String>,
     },
     /// `(:files)`; replies with a stream of paths.
     Files,
@@ -196,6 +209,19 @@ pub struct IndexService {
     skipped: usize,
     /// The file watcher; `None` when set-up failed, after it failed, and after `stop`.
     watch: Option<Watcher>,
+}
+
+/// The `:dir` of a query as the matcher takes it: `""` stays `""`, any other gets a trailing `/`. An error for a
+/// directory that starts with `/` or has an empty, `.` or `..` component.
+fn normalize_dir(dir: &str) -> Result<String, String> {
+    if dir.is_empty() {
+        return Ok(String::new());
+    }
+    let trimmed = dir.strip_suffix('/').unwrap_or(dir);
+    if trimmed.split('/').any(|c| c.is_empty() || c == "." || c == "..") {
+        return Err(format!("invalid :dir {dir:?}: not a directory relative to the root"));
+    }
+    Ok(format!("{trimmed}/"))
 }
 
 /// Applies `change` to `index`; returns the number of paths added and removed.
@@ -404,13 +430,17 @@ impl Service for IndexService {
             };
             address.lock().unwrap_or_else(|e| e.into_inner()).send(request);
         });
-        let watch = match Watcher::start(config.clone(), sink) {
-            Ok(watch) => Some(watch),
-            Err(message) => {
-                ctx.log(Level::Warn, format!("not watching {}: {message}", args.root));
-                ctx.emit(Event::WatchFailed { message });
-                None
+        let watch = if args.watch {
+            match Watcher::start(config.clone(), sink) {
+                Ok(watch) => Some(watch),
+                Err(message) => {
+                    ctx.log(Level::Warn, format!("not watching {}: {message}", args.root));
+                    ctx.emit(Event::WatchFailed { message });
+                    None
+                }
             }
+        } else {
+            None
         };
         let mut service = IndexService {
             root: args.root,
@@ -434,10 +464,14 @@ impl Service for IndexService {
 
     fn handle(&mut self, request: Request, reply: Reply, ctx: &Context<Self>) {
         match request {
-            Request::Query { text, limit, positions, substring } => {
+            Request::Query { text, limit, positions, substring, dir } => {
+                let dir = match normalize_dir(dir.as_deref().unwrap_or("")) {
+                    Ok(dir) => dir,
+                    Err(message) => return reply.err(Error::new(message)),
+                };
                 let index = view(&self.current, self.has_index, &self.walk);
                 let style = if substring { Style::Substring } else { Style::Fuzzy };
-                let result = self.matcher.query_styled(index, &text, style, limit, positions);
+                let result = self.matcher.query_styled(index, &dir, &text, style, limit, positions);
                 reply.ok(QueryReply {
                     paths: result.paths,
                     positions: result.positions,
@@ -638,11 +672,11 @@ mod tests {
     }
 
     fn args(root: &Path) -> Args {
-        Args { root: root.to_str().unwrap().to_string(), include_hidden: true, ignores: Vec::new() }
+        Args { root: root.to_str().unwrap().to_string(), include_hidden: true, ignores: Vec::new(), watch: true }
     }
 
     fn query(text: &str, limit: usize, positions: bool) -> Request {
-        Request::Query { text: text.to_string(), limit, positions, substring: false }
+        Request::Query { text: text.to_string(), limit, positions, substring: false, dir: None }
     }
 
     fn status(host: &mut Host<IndexService>) -> Status {
@@ -771,11 +805,67 @@ mod tests {
         let mut host = started(t.path());
         let fuzzy = host.call::<QueryReply>(query("act man", 10, true)).unwrap();
         assert_eq!(fuzzy.total, 2);
-        let request = Request::Query { text: "man act".into(), limit: 10, positions: true, substring: true };
+        let request = Request::Query { text: "man act".into(), limit: 10, positions: true, substring: true, dir: None };
         let reply = host.call::<QueryReply>(request).unwrap();
         assert_eq!(reply.paths, vec!["src/act/manager.rs".to_string()]);
         assert_eq!(reply.positions, Some(vec![vec![4, 5, 6, 8, 9, 10]]));
         assert_eq!(reply.groups, Some(vec![vec![1, 1, 1, 0, 0, 0]]));
+    }
+
+    fn query_in(dir: Option<&str>, text: &str, positions: bool) -> Request {
+        Request::Query { text: text.into(), limit: 10, positions, substring: false, dir: dir.map(str::to_string) }
+    }
+
+    #[test]
+    fn query_dir_paths_are_relative_and_counted_below_it() {
+        let t = tree(&["src/main.rs", "src/a/src.rs", "srcx/a.rs", "lib/src.rs", "README.md"]);
+        let mut host = started(t.path());
+        let reply = host.call::<QueryReply>(query_in(Some("src/"), "", false)).unwrap();
+        assert_eq!(reply.paths, vec!["main.rs".to_string(), "a/src.rs".to_string()]);
+        assert_eq!(reply.total, 2);
+        assert!(!reply.indexing);
+        let reply = host.call::<QueryReply>(query_in(Some("srcx"), "", false)).unwrap();
+        assert_eq!(reply.paths, vec!["a.rs".to_string()]);
+        let reply = host.call::<QueryReply>(query_in(Some("nothing/here"), "", true)).unwrap();
+        assert_eq!((reply.paths.len(), reply.total), (0, 0));
+        // The directory's own characters do not match.
+        assert_eq!(host.call::<QueryReply>(query_in(None, "src", false)).unwrap().total, 4);
+        let reply = host.call::<QueryReply>(query_in(Some("src/"), "src", true)).unwrap();
+        assert_eq!(reply.paths, vec!["a/src.rs".to_string()]);
+        assert_eq!(reply.total, 1);
+        assert_eq!(reply.positions, Some(vec![vec![2, 3, 4]]));
+    }
+
+    #[test]
+    fn query_dir_positions_with_non_ascii_dir() {
+        let t = tree(&["dä/src/act/manager.rs", "dä/ñame.rs", "other.rs"]);
+        let mut host = started(t.path());
+        let reply = host.call::<QueryReply>(query_in(Some("dä"), "man act", true)).unwrap();
+        assert_eq!(reply.paths, vec!["src/act/manager.rs".to_string()]);
+        assert_eq!(reply.positions, Some(vec![vec![4, 5, 6, 8, 9, 10]]));
+        assert_eq!(reply.groups, Some(vec![vec![1, 1, 1, 0, 0, 0]]));
+        let reply = host.call::<QueryReply>(query_in(Some("dä/"), "ñame", true)).unwrap();
+        assert_eq!(reply.paths, vec!["ñame.rs".to_string()]);
+        assert_eq!(reply.positions, Some(vec![vec![0, 1, 2, 3]]));
+    }
+
+    #[test]
+    fn query_dir_forms() {
+        let t = tree(&["src/main.rs", "src/lib.rs", "doc/x.md"]);
+        let mut host = started(t.path());
+        for text in ["", "rs", "s"] {
+            let whole = host.call::<QueryReply>(query(text, 10, true)).unwrap();
+            assert_eq!(host.call::<QueryReply>(query_in(Some(""), text, true)).unwrap(), whole);
+            assert_eq!(whole.total, if text.is_empty() { 3 } else { 2 });
+            let slash = host.call::<QueryReply>(query_in(Some("src/"), text, true)).unwrap();
+            assert_eq!(host.call::<QueryReply>(query_in(Some("src"), text, true)).unwrap(), slash);
+        }
+        for bad in ["/src", "a//b", "./a", "a/../b", "/", "src//"] {
+            let error = host.call::<QueryReply>(query_in(Some(bad), "", false)).unwrap_err();
+            assert!(error.to_string().contains("invalid :dir"), "{bad:?}: {error}");
+        }
+        // The instance keeps answering.
+        assert_eq!(host.call::<QueryReply>(query_in(Some("doc"), "", false)).unwrap().paths, vec!["x.md".to_string()]);
     }
 
     #[test]
@@ -1464,6 +1554,38 @@ mod tests {
             }
         }
         assert!(!status(&mut host).watching);
+    }
+
+    #[test]
+    fn watch_nil_creates_no_watcher() {
+        let t = tree(&["a", "d/b"]);
+        let r = t.path();
+        let mut a = args(r);
+        a.watch = false;
+        let mut host = Host::<IndexService>::start(a);
+        // `:indexed` is the first and only event of the start.
+        match host.next_event() {
+            Some(Event::Indexed { files, .. }) => assert_eq!(files, 2),
+            other => panic!("expected :indexed, got {other:?}"),
+        }
+        let st = status(&mut host);
+        assert_eq!((st.files, st.watching), (2, false));
+        assert!(watch_hook::watched(r).is_none(), "a watcher exists");
+        // A new file is not picked up, however long the debouncer would have needed.
+        write(r, "c");
+        std::thread::sleep(Duration::from_secs(1));
+        assert_eq!(view_paths(&mut host), set(&["a", "d/b"]));
+        // A rescan picks it up; its walk emits `:indexed` and nothing else.
+        assert_eq!(host.call::<usize>(Request::Rescan).unwrap(), 3);
+        match host.next_event() {
+            Some(Event::Indexed { files, .. }) => assert_eq!(files, 3),
+            other => panic!("expected :indexed, got {other:?}"),
+        }
+        // Nothing follows: no `:changed`, no `:watch-failed`.
+        assert!(host.next_event().is_none(), "an event after the last :indexed");
+        assert_eq!(view_paths(&mut host), set(&["a", "c", "d/b"]));
+        assert_eq!(all_paths(&mut host), set(&["a", "c", "d/b"]));
+        assert!(!host.logs().iter().any(|l| l.contains("not watching")));
     }
 
     /// The recursive mode used on macOS and Windows, exercised with inotify.

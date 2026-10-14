@@ -19,10 +19,13 @@
 ;; `project-find-file' and other `completing-read' prompts.
 ;;
 ;; This file holds the core: one service instance per project root
-;; (started lazily), event and exit handling, the query entry points and
-;; the user commands.  The module is the file quarry-build.el installs
-;; next to this one, or `quarry-module' plus `module-file-suffix' on
-;; `load-path'.
+;; (started lazily) and one-shot instances for single prompts, event and exit handling, the query entry points and
+;; the user commands.  `quarry-find-file-in-directory' answers a
+;; directory below a project root from that project's index, and any
+;; other local directory from a one-shot instance: one walk without a
+;; watcher, stopped when the prompt ends.  The module is the file
+;; quarry-build.el installs next to this one, or `quarry-module' plus
+;; `module-file-suffix' on `load-path'.
 
 ;;; Code:
 
@@ -119,8 +122,11 @@ This is a safety net against a stuck instance, not a latency budget."
   "Counter giving each instance record a unique id.")
 
 (cl-defstruct (quarry--rec (:constructor quarry--make-rec) (:copier nil))
-  "State of the service instance of one project root."
-  instance root (files 0) indexing watching (epoch 0) warned
+  "State of the service instance of one project root.
+A record with `one-shot' non-nil belongs to an instance started for a
+single prompt (see `quarry--start'); `quarry--instances' never holds
+it."
+  instance root (files 0) indexing watching (epoch 0) warned one-shot
   (id (cl-incf quarry--next-id)))
 
 (defvar quarry--instances (make-hash-table :test 'equal)
@@ -163,30 +169,45 @@ This is a safety net against a stuck instance, not a latency budget."
                   "")))))))
 
 (defun quarry--on-exit (rec status err)
-  "Forget the record REC after its instance exited with STATUS and ERR."
-  (let ((root (quarry--rec-root rec)))
-    (when (eq (gethash root quarry--instances) rec)
-      (remhash root quarry--instances))
-    (when (eq status 'failed)
-      (let ((message (or (plist-get err :message) "unknown error")))
+  "Forget the record REC after its instance exited with STATUS and ERR.
+A one-shot record is in neither table; its failure only warns, since
+the calls on it see no more than that the instance terminated."
+  (let ((root (quarry--rec-root rec))
+        (message (or (plist-get err :message) "unknown error")))
+    (cond
+     ((quarry--rec-one-shot rec)
+      (when (eq status 'failed)
+        (display-warning
+         'quarry (format "The walk of %s failed: %s" root message))))
+     (t
+      (when (eq (gethash root quarry--instances) rec)
+        (remhash root quarry--instances))
+      (when (eq status 'failed)
         (puthash root message quarry--failures)
         (display-warning
-         'quarry (format "Instance for %s failed: %s" root message))))))
+         'quarry (format "Instance for %s failed: %s" root message)))))))
 
-(defun quarry--start (root)
-  "Start an instance for ROOT and return its record."
+(defun quarry--start (root &optional one-shot)
+  "Start an instance for ROOT and return its record.
+With ONE-SHOT, start it without a file watcher, for a single prompt:
+the record is not put into `quarry--instances' and its failure not
+into `quarry--failures', and the caller stops it with `emrs-stop'."
   (quarry--load-module)
-  (remhash root quarry--failures)
-  (let ((rec (quarry--make-rec :root root :indexing t :watching t)))
+  (unless one-shot
+    (remhash root quarry--failures))
+  (let ((rec (quarry--make-rec :root root :indexing t :watching (not one-shot)
+                               :one-shot (and one-shot t))))
     (setf (quarry--rec-instance rec)
           (emrs-start 'quarry "index"
-                      (list :root root
-                            :include-hidden (and quarry-include-hidden t)
-                            :ignores quarry-ignores)
+                      (append (list :root root
+                                    :include-hidden (and quarry-include-hidden t)
+                                    :ignores quarry-ignores)
+                              (and one-shot '(:watch nil)))
                       :on-event (lambda (_inst event) (quarry--on-event rec event))
                       :on-exit (lambda (_inst status err)
                                  (quarry--on-exit rec status err))))
-    (puthash root rec quarry--instances)
+    (unless one-shot
+      (puthash root rec quarry--instances))
     rec))
 
 (defun quarry--ensure (root)
@@ -202,6 +223,18 @@ This is a safety net against a stuck instance, not a latency budget."
   "Return the record for ROOT, or nil when no instance exists."
   (gethash (quarry--root root) quarry--instances))
 
+(defun quarry--target-rec (target)
+  "Return the record of TARGET, a project root or a one-shot record.
+For a root, that is `quarry--ensure', which may start an instance.  A
+one-shot record is returned while its instance is starting or running;
+otherwise signal a `user-error', since it is never restarted."
+  (if (stringp target)
+      (quarry--ensure target)
+    (if (memq (emrs-instance-state (quarry--rec-instance target))
+              '(starting running))
+        target
+      (user-error "quarry: the walk of %s has ended" (quarry--rec-root target)))))
+
 ;;;; Queries
 
 (defun quarry--drop (rec)
@@ -209,48 +242,61 @@ This is a safety net against a stuck instance, not a latency budget."
   (when (eq (gethash (quarry--rec-root rec) quarry--instances) rec)
     (remhash (quarry--rec-root rec) quarry--instances)))
 
-(defun quarry--request (text limit positions)
+(defun quarry--request (text limit positions &optional dir)
   "Return the query request for TEXT, LIMIT and POSITIONS.
-The match style is `quarry-match-style'."
-  (list :query :text text :limit limit :positions (and positions t)
-        :substring (eq quarry-match-style 'substring)))
+The match style is `quarry-match-style'.  With DIR, a directory
+relative to the root, the request asks for the paths below it only."
+  (append (list :query :text text :limit limit :positions (and positions t)
+                :substring (eq quarry-match-style 'substring))
+          (and dir (list :dir dir))))
 
-(defun quarry--call-sync (root request)
-  "Send REQUEST to the instance of ROOT and return the reply.
-Signal a `user-error' when the instance failed or stopped."
-  (let ((rec (quarry--ensure root)))
+(defun quarry--call-sync (target request)
+  "Send REQUEST to the instance of TARGET and return the reply.
+TARGET is a project root or a one-shot record.  Signal a `user-error'
+when the instance failed or stopped."
+  (let ((rec (quarry--target-rec target)))
     (condition-case err
         (emrs-call-sync (quarry--rec-instance rec) request quarry-query-timeout)
       (emrs-error
        (pcase (cadr err)
          ((or 'failed 'stopped)
-          (quarry--drop rec)
-          (user-error "quarry: %s"
-                      (or (gethash (quarry--rec-root rec) quarry--failures)
-                          (nth 2 err))))
+          (if (quarry--rec-one-shot rec)
+              (user-error "quarry: %s" (nth 2 err))
+            (quarry--drop rec)
+            (user-error "quarry: %s"
+                        (or (gethash (quarry--rec-root rec) quarry--failures)
+                            (nth 2 err)))))
          (_ (signal (car err) (cdr err))))))))
 
-(defun quarry-query (root text limit &optional positions)
+(defun quarry-query (root text limit &optional positions dir)
   "Query the index of ROOT for TEXT, returning at most LIMIT paths.
 Return the reply plist (:paths :positions :groups :total :indexing).
 With POSITIONS, also return the matched character indices and, in
 :groups, the number of the query term that matched each of them.
-Plain terms match as `quarry-match-style' says.  Signal a
-`user-error' when the instance failed or stopped."
-  (quarry--call-sync root (quarry--request text limit positions)))
+With DIR, a directory relative to ROOT, `/'-separated, only the paths
+below it are matched, and they are returned relative to it.  Plain
+terms match as `quarry-match-style' says.  Signal a `user-error' when
+the instance failed or stopped.  ROOT may also be a one-shot record,
+as `quarry--call-sync' takes."
+  (quarry--call-sync root (quarry--request text limit positions dir)))
 
-(defun quarry-query-async (root text limit positions callback)
+(defun quarry-query-async (root text limit positions callback &optional dir)
   "Query the index of ROOT for TEXT like `quarry-query', asynchronously.
-CALLBACK is called as (CALLBACK REPLY ERR); ERR is nil on success and an
-error plist otherwise.  Return the call, which `emrs-cancel' cancels."
-  (emrs-call (quarry--rec-instance (quarry--ensure root))
-             (quarry--request text limit positions)
+DIR is as for `quarry-query'.  CALLBACK is called as (CALLBACK REPLY
+ERR); ERR is nil on success and an error plist otherwise.  Return the
+call, which `emrs-cancel' cancels.  ROOT may also be a one-shot record,
+as `quarry--target-rec' takes."
+  (emrs-call (quarry--rec-instance (quarry--target-rec root))
+             (quarry--request text limit positions dir)
              callback))
 
 ;;;; Completion
 
 (defvar quarry-file-history nil
   "Minibuffer history of `quarry-find-file'.")
+
+(defvar quarry-directory-file-history nil
+  "Minibuffer history of `quarry-find-file-in-directory'.")
 
 (defconst quarry--cache-size 4
   "Number of recent query results a completion table keeps.")
@@ -268,13 +314,16 @@ term N gets face N of `quarry-match-faces', modulo their number."
                                         nil copy))
     copy))
 
-(defun quarry--table (root)
-  "Return a completion table for the files of the project at ROOT.
-The whole input is the query; the candidates keep the order of the
-index.  Results are cached per input, instance, epoch, limit, highlighting
-and match style; replies of a still indexing instance are not cached.
-When the instance cannot be started or failed, the table reports it once
-and has no candidates from then on."
+(defun quarry--table (target &optional dir)
+  "Return a completion table for the files of TARGET.
+TARGET is a project root or a one-shot record.  With DIR, a directory
+relative to the root, the candidates are the files below it, relative
+to it.  The whole input is the query; the candidates keep the order of
+the index.  Results are cached per input, instance, epoch, limit,
+highlighting and match style; replies of a still indexing instance are
+not cached.  When the instance cannot be started or failed, or a
+one-shot instance has ended, the table reports it once and has no
+candidates from then on."
   (let ((cache nil)
         (warned nil)
         (failed nil))
@@ -282,7 +331,7 @@ and has no candidates from then on."
                 ;; Return a list of (PATH POSITIONS GROUPS), best first.
                 (unless failed
                   (condition-case err
-                      (let* ((rec (quarry--ensure root))
+                      (let* ((rec (quarry--target-rec target))
                              (limit quarry-limit)
                              (highlight (and quarry-highlight t))
                              (key (list string (quarry--rec-id rec)
@@ -291,7 +340,8 @@ and has no candidates from then on."
                              (hit (assoc key cache)))
                         (if hit
                             (cdr hit)
-                          (let* ((reply (quarry-query root string limit highlight))
+                          (let* ((reply (quarry-query target string limit highlight
+                                                      dir))
                                  (paths (plist-get reply :paths))
                                  (none (make-list (length paths) nil))
                                  (value (cl-mapcar #'list paths
@@ -417,41 +467,121 @@ The next command starts a new one, with the current options."
 (defvar quarry--first-page-wait 1.0
   "Seconds `quarry-find-file' waits at most for a first page of files.")
 
-(defun quarry--await-first-page (root)
-  "Wait until the index of ROOT can fill the first page of a prompt.
-That is when no walk runs or the index holds `quarry-limit' files, or
-after `quarry--first-page-wait' seconds.  Completion UIs ask for the
-empty input once and do not refresh, so a prompt opened on a new
-instance would otherwise stay empty until the user types.  Signal a
+(defun quarry--await-first-page (target)
+  "Wait until the index of TARGET can fill the first page of a prompt.
+TARGET is a project root or a one-shot record.  That is when no walk
+runs or the index holds `quarry-limit' files, or after
+`quarry--first-page-wait' seconds.  Completion UIs ask for the empty
+input once and do not refresh, so a prompt opened on a new instance
+would otherwise stay empty until the user types.  Signal a
 `user-error' when the instance failed or stopped."
   (let ((deadline (+ (float-time) quarry--first-page-wait)))
-    (while (let ((status (quarry--call-sync root '(:status))))
+    (while (let ((status (quarry--call-sync target '(:status))))
              (and (plist-get status :indexing)
                   (< (or (plist-get status :files) 0) quarry-limit)
                   (< (float-time) deadline)))
       (sleep-for 0.02))))
 
-(defun quarry--prepare (root &optional no-wait)
-  "Make the instance for ROOT ready for a prompt.
-Ensure the instance, rescan when it is not watching, and wait for a
-first page of files.  With NO-WAIT, do not wait: probe the instance
-once instead.  That suits a prompt that refreshes its candidates while
-the index fills, as `quarry-consult-find-file' does; the wait is for
-completion UIs that ask for the empty input once.  Signal a
-`user-error' when the instance cannot be started or failed, including
-the offer to build a missing module.  Callers run this before their
-prompt, so that nothing starts an instance from inside the minibuffer."
-  (let ((rec (quarry--ensure root)))
-    (unless (quarry--rec-watching rec)
+(defun quarry--prepare (target &optional no-wait)
+  "Make the instance of TARGET ready for a prompt.
+TARGET is a project root or a one-shot record.  Ensure the instance,
+rescan when it is not watching, and wait for a first page of files.
+A one-shot record is not rescanned: it is not watching by design, and
+its first walk is the only one.  With NO-WAIT, do not wait: probe the
+instance once instead.  That suits a prompt that refreshes its
+candidates while the index fills, as `quarry-consult-find-file' does;
+the wait is for completion UIs that ask for the empty input once.
+Signal a `user-error' when the instance cannot be started or failed,
+including the offer to build a missing module.  Callers run this
+before their prompt, so that nothing starts an instance from inside
+the minibuffer."
+  (let ((rec (quarry--target-rec target)))
+    (unless (or (quarry--rec-watching rec) (quarry--rec-one-shot rec))
       (emrs-send (quarry--rec-instance rec) '(:rescan))))
   ;; `:status' probes, so that an instance that cannot be started or
   ;; failed is reported here, before the prompt, as a `user-error',
   ;; and a new instance has files to show.  `:status' does not score
   ;; the index, unlike an empty query.
   (if no-wait
-      (quarry--call-sync root '(:status))
-    (quarry--await-first-page root))
+      (quarry--call-sync target '(:status))
+    (quarry--await-first-page target))
   nil)
+
+(defun quarry--check-directory (dir)
+  "Return DIR as an absolute directory name, as `quarry--root' does.
+Signal a `user-error' when it is remote or not an existing directory."
+  (let ((dir (quarry--root dir)))
+    (when (file-remote-p dir)
+      (user-error "quarry finds files in local directories only: %s" dir))
+    (cond ((file-directory-p dir))
+          ((file-exists-p (directory-file-name dir))
+           (user-error "Not a directory: %s" (directory-file-name dir)))
+          (t (user-error "Directory does not exist: %s" dir)))
+    dir))
+
+(defun quarry--dir-target (dir &optional no-wait)
+  "Return (TARGET . REL) for finding files below DIR.
+DIR is an absolute, local, existing directory name.  When DIR is the
+root of the current project, that is (ROOT . nil).  When it is below
+the root (compared as true names) and the project index has files below
+it, it is (ROOT . REL), REL being DIR relative to the root with a
+trailing slash.  Otherwise, also when the index is still walking and
+has not reached DIR, it is (REC . nil), REC a one-shot record for DIR.
+The target is prepared with `quarry--prepare' and NO-WAIT; a one-shot
+instance that cannot be prepared is stopped.  Callers stop a one-shot
+target with `emrs-stop' when their prompt ends."
+  (let* ((project (project-current nil dir))
+         (root (and project (quarry--root (project-root project))))
+         (true-dir (and root (not (file-remote-p root))
+                        (file-name-as-directory (file-truename dir))))
+         (true-root (and true-dir (file-name-as-directory (file-truename root)))))
+    (cond
+     ((and true-dir (equal true-dir true-root))
+      (quarry--prepare root no-wait)
+      (cons root nil))
+     ((and true-dir
+           (string-prefix-p true-root true-dir)
+           (let ((rel (substring true-dir (length true-root))))
+             (quarry--prepare root no-wait)
+             (let ((reply (quarry-query root "" 1 nil rel)))
+               (and (> (or (plist-get reply :total) 0) 0)
+                    (cons root rel))))))
+     (t
+      (let ((rec (quarry--start (quarry--root dir) t))
+            (ready nil))
+        (unwind-protect
+            (progn (quarry--prepare rec no-wait)
+                   (setq ready t))
+          (unless ready
+            (emrs-stop (quarry--rec-instance rec))))
+        (cons rec nil))))))
+
+(defun quarry--read-file (prompt target dir history)
+  "Read a file of TARGET with PROMPT and HISTORY; return its path.
+TARGET and DIR are as for `quarry--table'; the path is relative to the
+root, or to DIR when given.  Only the `quarry' completion style applies
+in the prompt."
+  (let* ((completion-category-overrides
+          (cons '(project-file (styles quarry)) completion-category-overrides))
+         (table (quarry--table target dir))
+         (path (minibuffer-with-setup-hook
+                   ;; Appended, so it runs after UIs that set styles in
+                   ;; their own setup hook (fido-mode sets `flex').
+                   (:append
+                    (lambda ()
+                      ;; The override only puts `quarry' first: Emacs
+                      ;; appends `completion-styles', which would run
+                      ;; when quarry finds nothing and, since the table
+                      ;; ignores `completion-regexp-list', list every
+                      ;; file.  Buffer-local, so other minibuffers keep
+                      ;; the user's styles.
+                      (setq-local completion-styles '(quarry))))
+                 (completing-read prompt table nil 'confirm nil history)))
+         ;; With `confirm', RET accepts the input as typed.  When it
+         ;; is not a file of the index but completes to exactly one,
+         ;; visit that one rather than a new file.
+         (match (and (not (equal path "")) (funcall table path nil nil))))
+    (if (stringp match) match path)))
 
 ;;;###autoload
 (defun quarry-find-file (&optional include-all)
@@ -464,30 +594,34 @@ with INCLUDE-ALL."
     (if (or include-all (file-remote-p root))
         (project-find-file include-all)
       (quarry--prepare root)
-      (let* ((completion-category-overrides
-              (cons '(project-file (styles quarry)) completion-category-overrides))
-             (table (quarry--table root))
-             (path (minibuffer-with-setup-hook
-                       ;; Appended, so it runs after UIs that set styles in
-                       ;; their own setup hook (fido-mode sets `flex').
-                       (:append
-                        (lambda ()
-                         ;; The override only puts `quarry' first: Emacs
-                         ;; appends `completion-styles', which would run
-                         ;; when quarry finds nothing and, since the table
-                         ;; ignores `completion-regexp-list', list every
-                         ;; file.  Buffer-local, so other minibuffers keep
-                         ;; the user's styles.
-                         (setq-local completion-styles '(quarry))))
-                     (completing-read (format "Find file in %s: " (project-name project))
-                                      table nil 'confirm nil
-                                      'quarry-file-history)))
-             ;; With `confirm', RET accepts the input as typed.  When it
-             ;; is not a file of the index but completes to exactly one,
-             ;; visit that one rather than a new file.
-             (match (and (not (equal path "")) (funcall table path nil nil))))
+      (let ((path (quarry--read-file (format "Find file in %s: " (project-name project))
+                                     root nil 'quarry-file-history)))
         ;; Not `expand-file-name': a path like "~/x" must stay below ROOT.
-        (find-file (concat root (if (stringp match) match path)))))))
+        (find-file (concat root path))))))
+
+;;;###autoload
+(defun quarry-find-file-in-directory (&optional dir)
+  "Visit a file below DIR, chosen with quarry's matcher and ranking.
+DIR is `default-directory' by default; with a prefix argument, ask for
+it.  A directory below the root of the current project is answered from
+the project's index when that has files below it.  Any other local
+directory is walked once for the prompt, without a watcher, and the
+walk is stopped when the prompt ends.  The candidates are relative to
+DIR."
+  (interactive
+   (list (and current-prefix-arg
+              (read-directory-name "Find file in directory: "))))
+  (let* ((dir (quarry--check-directory (or dir default-directory)))
+         (target (quarry--dir-target dir))
+         (path (unwind-protect
+                   (quarry--read-file (format "Find file in %s: "
+                                              (abbreviate-file-name dir))
+                                      (car target) (cdr target)
+                                      'quarry-directory-file-history)
+                 (unless (stringp (car target))
+                   (emrs-stop (quarry--rec-instance (car target)))))))
+    ;; Not `expand-file-name': a path like "~/x" must stay below DIR.
+    (find-file (concat dir path))))
 
 ;;;; project-files
 

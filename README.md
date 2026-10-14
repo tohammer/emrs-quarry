@@ -221,7 +221,8 @@ where it must be installed. An invalid pattern in `quarry-ignores` also
 makes the first command fail, with the pattern in the message.
 
 For other front ends, `quarry-query` and `quarry-query-async` return the
-ranked paths of a project directly (see their docstrings).
+ranked paths of a project directly (see their docstrings); an optional last
+argument limits them to the paths below a directory of the project.
 
 ## Usage
 
@@ -229,6 +230,8 @@ ranked paths of a project directly (see their docstrings).
 |---|---|
 | `quarry-find-file` | Visit a file of the current project, chosen from the index. Starts the project's instance on first use. |
 | `quarry-consult-find-file` | The same in a consult prompt that queries the index asynchronously (see "consult front end"). Needs consult 2.0 or later. |
+| `quarry-find-file-in-directory` | Visit a file below a directory, `default-directory` or, with a prefix argument, one it asks for. Candidates are relative to the directory (see "Files below a directory"). |
+| `quarry-consult-find-file-in-directory` | The same in a consult prompt that fills while a directory is walked. Needs consult 2.0 or later. |
 | `quarry-mode` | Global minor mode. Remaps `project-find-file` to `quarry-find-file-command` (default `quarry-find-file`); with `quarry-provide-project-files` set, it also serves `project-files` from the index. |
 | `quarry-rescan` | Walk the current project again and report the file count when done. |
 | `quarry-stop` | Stop the current project's instance. The next command starts a new one with the current options. |
@@ -240,7 +243,9 @@ ranked paths of a project directly (see their docstrings).
 too) and in remote (TRAMP) projects. With `quarry-mode` the same applies
 to `project-find-file`, since it is remapped to one of them.
 
-One instance runs per project root, started lazily on first use. While the
+One instance runs per project root, started lazily on first use (a
+directory outside the index gets one for a single prompt; see "Files
+below a directory"). While the
 first walk runs, queries answer from the files seen so far.
 
 `quarry-provide-project-files`: when non-nil and `quarry-mode` is on,
@@ -339,6 +344,64 @@ Differences from `quarry-find-file`:
   `filter` locally, using your completion styles. With the style `none`
   the whole input is the query and nothing is filtered locally.
 - The history is separate: `quarry-consult-history`.
+
+### Files below a directory
+
+`quarry-find-file-in-directory` and `quarry-consult-find-file-in-directory`
+find a file below a directory, in the manner of Doom's
+`+default/find-file-under-here`, `consult-fd` and `consult-find`, but with
+quarry's matcher and ranking and without a process per input. The
+directory is `default-directory`; with a prefix argument the command asks
+for it. The candidates are paths relative to the directory, ranked and
+highlighted as in `quarry-find-file` (the directory's own name never
+matches), and the chosen one is visited below the directory. The query
+syntax is the one above. The plain command reads as `quarry-find-file`
+does; the consult command is `quarry-consult-find-file` on this directory
+(see "consult front end"), with the same differences from the plain one
+and the history `quarry-consult-directory-history`. The plain command's
+history is `quarry-directory-file-history`.
+
+Where the directory is answered from:
+
+- A directory below the root of the current project (compared as true
+  names, so a symlink does not matter) is answered by the project's
+  index, as fast as `quarry-find-file`, when the index has files below
+  it (not while the project's first walk has yet to reach the directory:
+  then it is walked on its own, as below). The directory need not be a
+  project of its own.
+- Any other local directory, including a directory the project ignores
+  such as `node_modules/` and a directory outside every project, gets an
+  instance of its own for the one prompt: it walks the directory once, with
+  no file watcher, and is stopped when the prompt ends, also on `C-g` or
+  an error. Nothing stays running and nothing is reused by the next
+  prompt, which walks again. The walk follows the rules of "What is
+  indexed", ignore files above the directory included, so from inside an
+  ignored directory it lists what `rg --files` there would.
+
+The plain prompt waits up to a second for a first page of files, like
+`quarry-find-file`. The consult prompt opens at once and fills as the
+walk goes on. A walk takes as long as the directory is large: `~` can
+take seconds and memory in proportion to its number of files. In the
+consult prompt the list fills meanwhile and `C-g` ends the walk. The plain
+prompt does not refresh by itself: it shows the files found when it opens,
+and a typed input is matched against those found so far.
+
+Only local directories: for a remote (TRAMP) directory the commands signal
+an error, as `quarry-grep` does. The package binds no keys. To put the
+commands in place of `+default/find-file-under-here` (`SPC f F`) in Doom,
+in `config.el`:
+
+```elisp
+(map! [remap +default/find-file-under-here] #'quarry-find-file-in-directory)
+```
+
+or, for the consult prompt:
+
+```elisp
+(map! [remap +default/find-file-under-here] #'quarry-consult-find-file-in-directory)
+```
+
+A remap changes keys only, not calls from Lisp.
 
 ## Grep
 

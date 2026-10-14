@@ -19,9 +19,8 @@ architecture.md or an ADR.
   checks not done yet"), including context lines (`C`, `B`, `A`), the
   menu (`?`) and path globs in the files prompt (`f`).
 - Next feature: pick from the survey (grep backlog, "Survey: find and
-  grep features worth making native"; finding a file below a directory
-  is the cheapest) or from "Further features weighed before
-  the spec", where regexp replace with preview is the strongest
+  grep features worth making native") or from "Further features weighed
+  before the spec", where regexp replace with preview is the strongest
   candidate.
 
 ## Watch out for

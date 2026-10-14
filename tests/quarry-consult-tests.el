@@ -246,18 +246,20 @@ the path \"fN\" and `:indexing' as (funcall INDEXING N) says."
 (defvar quarry-test-consult--failure nil
   "Why `quarry-test-consult--settle' gave up, or nil.")
 
-(defun quarry-test-consult--track (orig root text limit positions callback)
-  "Call ORIG with ROOT, TEXT, LIMIT, POSITIONS and a wrapped CALLBACK.
+(defun quarry-test-consult--track (orig root text limit positions callback
+                                        &optional dir)
+  "Call ORIG with ROOT, TEXT, LIMIT, POSITIONS, a wrapped CALLBACK and DIR.
 The wrapper records replies, not cancellations, in
 `quarry-test-consult--answered' and `quarry-test-consult--done'."
   (let ((n (cl-incf quarry-test-consult--queries)))
     (setq quarry-test-consult--last-text text)
-    (funcall orig root text limit positions
-             (lambda (reply err)
-               (funcall callback reply err)
-               (unless (eq (plist-get err :kind) 'cancelled)
-                 (push text quarry-test-consult--answered)
-                 (push n quarry-test-consult--done))))))
+    (apply orig root text limit positions
+           (lambda (reply err)
+             (funcall callback reply err)
+             (unless (eq (plist-get err :kind) 'cancelled)
+               (push text quarry-test-consult--answered)
+               (push n quarry-test-consult--done)))
+           (and dir (list dir)))))
 
 (defun quarry-test-consult--async-input ()
   "Return the part of the minibuffer input consult sends to the step."
@@ -451,6 +453,230 @@ The step re-queries while indexing, so no first page is waited for."
         (cl-letf (((symbol-function 'file-remote-p) (lambda (&rest _) "/ssh:x:")))
           (quarry-consult-find-file nil))
         (should (equal args '((nil) (t))))))))
+
+;;;; `quarry-consult-find-file-in-directory'
+
+(ert-deftest quarry-test-consult-step-dir ()
+  "The step sends :dir when given, and reports a stopped one-shot target."
+  (let ((requests nil)
+        (msgs nil))
+    (cl-letf (((symbol-function 'quarry-query-async)
+               (lambda (&rest args)
+                 (push args requests)
+                 'fake-call))
+              ((symbol-function 'emrs-cancel) #'ignore))
+      (funcall (funcall (quarry-consult--async "/x/" "sub/")
+                        (lambda (_) nil))
+               "a")
+      (funcall (funcall (quarry-consult--async "/x/")
+                        (lambda (_) nil))
+               "b")
+      ;; ROOT TEXT LIMIT POSITIONS CALLBACK [DIR]
+      (should (equal (nth 5 (cadr requests)) "sub/"))
+      (should (= (length (car requests)) 5)))
+    ;; A one-shot record whose walk has ended: the failure message is
+    ;; the error's text, and there is no root to look a failure up for.
+    (let* ((rec (quarry--make-rec :root "/x/" :one-shot t))
+           (step (funcall (quarry-consult--async rec)
+                          (lambda (action) (push action quarry-test-consult--log) nil))))
+      (setq quarry-test-consult--log nil)
+      (cl-letf (((symbol-function 'quarry--target-rec)
+                 (lambda (_) (user-error "quarry: the walk of /x/ has ended")))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) msgs))))
+        (funcall step "a")
+        (should (equal msgs '("quarry: the walk of /x/ has ended")))
+        (should (equal (seq-take quarry-test-consult--log 2)
+                       '([indicator failed] flush)))))
+    ;; The same through an `emrs-error' for the stopped instance.
+    (setq msgs nil)
+    (let* ((rec (quarry--make-rec :root "/x/" :one-shot t))
+           (step (funcall (quarry-consult--async rec) (lambda (_) nil))))
+      (cl-letf (((symbol-function 'quarry-query-async)
+                 (lambda (&rest _)
+                   (signal 'emrs-error '(stopped "the instance is not running" nil))))
+                ((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) msgs))))
+        (funcall step "a")
+        (should (equal msgs '("quarry: the instance is not running")))))))
+
+(defvar quarry-test-consult--paths nil
+  "Paths of the replies to the queries, newest first.")
+
+(defun quarry-test-consult--collect (orig root text limit positions callback
+                                          &optional dir)
+  "Call ORIG, recording the paths of each reply in `quarry-test-consult--paths'."
+  (apply orig root text limit positions
+         (lambda (reply err)
+           (when reply (push (plist-get reply :paths) quarry-test-consult--paths))
+           (funcall callback reply err))
+         (and dir (list dir))))
+
+(defun quarry-test-consult--in-directory-with-keys (dir keys)
+  "Run `quarry-consult-find-file-in-directory' in DIR typing KEYS.
+The prompt has the keys of `quarry-test-consult--find-file-with-keys'.
+Return the visited file."
+  (let* ((map (define-keymap
+                "C-c w" #'quarry-test-consult--settle
+                "C-c x" #'quarry-test-consult--choose-first))
+         (minibuffer-setup-hook minibuffer-setup-hook)
+         (consult-async-split-style 'none)
+         (buf nil))
+    (add-hook 'minibuffer-setup-hook
+              (lambda () (use-local-map (make-composed-keymap map (current-local-map))))
+              90)
+    (setq quarry-test-consult--answered nil
+          quarry-test-consult--queries 0
+          quarry-test-consult--done nil
+          quarry-test-consult--last-text nil
+          quarry-test-consult--failure nil
+          quarry-test-consult--paths nil)
+    (advice-add 'quarry-query-async :around #'quarry-test-consult--track)
+    (advice-add 'quarry-query-async :around #'quarry-test-consult--collect)
+    (unwind-protect
+        (progn
+          (condition-case err
+              (with-current-buffer (window-buffer)
+                (let ((default-directory dir))
+                  (execute-kbd-macro
+                   (kbd (concat "M-x quarry-consult-find-file-in-directory RET "
+                                keys)))))
+            (quit (if quarry-test-consult--failure
+                      (ert-fail quarry-test-consult--failure)
+                    (signal (car err) (cdr err)))))
+          (setq buf (window-buffer))
+          (buffer-file-name buf))
+      (advice-remove 'quarry-query-async #'quarry-test-consult--track)
+      (advice-remove 'quarry-query-async #'quarry-test-consult--collect)
+      (when (and buf (buffer-file-name buf))
+        (kill-buffer buf)))))
+
+(ert-deftest quarry-test-consult-find-file-in-directory-index ()
+  "A project subdirectory: relative candidates, visited below it."
+  (skip-unless (quarry-test-consult--consult-p))
+  (quarry-test--with-dir-project dir
+    (let ((sub (concat dir "sub/"))
+          (prompts nil)
+          (minibuffer-setup-hook minibuffer-setup-hook)
+          (quarry-consult-directory-history nil))
+      (add-hook 'minibuffer-setup-hook (lambda () (push (minibuffer-prompt) prompts)))
+      (should (equal (quarry-test-consult--in-directory-with-keys
+                      sub "txt C-c w C-c x")
+                     (concat sub "a.txt")))
+      (should (equal (car prompts)
+                     (format "Find file in %s: " (abbreviate-file-name sub))))
+      ;; Not top.txt or subx/c.txt, which match "txt" too.
+      (should (member '("a.txt" "deep/b.txt") quarry-test-consult--paths))
+      (should-not (seq-find (lambda (paths) (member "top.txt" paths))
+                            quarry-test-consult--paths))
+      (should (equal quarry-consult-directory-history '("txt")))
+      (should (= (hash-table-count quarry--instances) 1)))))
+
+(ert-deftest quarry-test-consult-find-file-in-directory-one-shot-visits ()
+  "A directory outside any project: its files are offered and visited."
+  (skip-unless (quarry-test-consult--consult-p))
+  (let ((dir (quarry-test--make-tree '("o1.txt" "d/o2.txt")))
+        (project-find-functions nil))
+    (unwind-protect
+        (progn
+          (should (equal (quarry-test-consult--in-directory-with-keys
+                          dir "o2 C-c w C-c x")
+                         (concat dir "d/o2.txt")))
+          (should (member '("d/o2.txt") quarry-test-consult--paths))
+          (should (zerop (hash-table-count quarry--instances))))
+      (quarry-stop-all)
+      (delete-directory dir t))))
+
+(ert-deftest quarry-test-consult-find-file-in-directory-one-shot-stops ()
+  "The one-shot instance runs during the prompt; RET, quit and error stop it."
+  (skip-unless (quarry-test-consult--consult-p))
+  (let ((dir (quarry-test--make-tree '("o1.txt" "d/o2.txt")))
+        (project-find-functions nil))
+    (unwind-protect
+        (pcase-dolist (`(,reply ,expected)
+                       `((,(lambda () "d/o2.txt") ,(concat dir "d/o2.txt"))
+                         (,(lambda () (signal 'quit nil)) (quit))
+                         (,(lambda () (error "Boom")) (error "Boom"))))
+          (let ((rec nil) (state nil) (rel 'unset) (bound nil) (result nil))
+            (cl-letf (((symbol-function 'consult--read)
+                       (lambda (&rest _)
+                         (setq state (emrs-instance-state (quarry--rec-instance rec))
+                               bound default-directory)
+                         (funcall reply)))
+                      ((symbol-function 'consult--async-pipeline) #'ignore)
+                      ((symbol-function 'consult--async-split) #'ignore)
+                      ((symbol-function 'consult--async-throttle) #'ignore)
+                      ((symbol-function 'consult--async-indicator) #'ignore)
+                      ((symbol-function 'consult--async-refresh) #'ignore))
+              (advice-add 'quarry--dir-target :filter-return
+                          (lambda (target) (setq rec (car target) rel (cdr target)) target)
+                          '((name . quarry-test-capture)))
+              (unwind-protect
+                  (setq result
+                        (condition-case err
+                            (progn (quarry-consult-find-file-in-directory dir)
+                                   (prog1 (buffer-file-name) (kill-buffer)))
+                          ((error quit) err)))
+                (advice-remove 'quarry--dir-target 'quarry-test-capture)))
+            (should (quarry--rec-one-shot rec))
+            (should-not rel)
+            (should (eq state 'running))
+            (should (equal bound dir))
+            (should (equal result expected))
+            (should (quarry-test--stopped-p rec))
+            (should (zerop (hash-table-count quarry--instances)))))
+      (quarry-stop-all)
+      (delete-directory dir t))))
+
+;;;; The command's own checks
+
+(ert-deftest quarry-test-consult-find-file-in-directory-refused ()
+  "Remote and missing directories are refused before any instance starts."
+  (skip-unless (quarry-test-consult--consult-p))
+  (let ((dir (quarry-test--make-tree '("file")))
+        (count (hash-table-count quarry--instances))
+        (starts 0))
+    (advice-add 'emrs-start :before (lambda (&rest _) (cl-incf starts))
+                '((name . quarry-test-count-start)))
+    (unwind-protect
+        (progn
+          (let ((err (should-error (quarry-consult-find-file-in-directory
+                                    "/ssh:quarry-test-host:/tmp/")
+                                   :type 'user-error)))
+            (should (equal (cadr err) "quarry finds files in local directories only: /ssh:quarry-test-host:/tmp/")))
+          (let ((err (should-error (quarry-consult-find-file-in-directory
+                                    (concat dir "nope"))
+                                   :type 'user-error)))
+            (should (string-match-p (regexp-quote (concat dir "nope")) (cadr err))))
+          (let ((err (should-error (quarry-consult-find-file-in-directory
+                                    (concat dir "file"))
+                                   :type 'user-error)))
+            (should (string-match-p "Not a directory" (cadr err))))
+          (should (= starts 0))
+          (should (= (hash-table-count quarry--instances) count)))
+      (advice-remove 'emrs-start 'quarry-test-count-start)
+      (delete-directory dir t))))
+
+(ert-deftest quarry-test-consult-find-file-in-directory-prefix-argument ()
+  "With a prefix argument the command asks for the directory and uses it."
+  (skip-unless (quarry-test-consult--consult-p))
+  (let ((dir (quarry-test--make-tree '("o1.txt")))
+        (project-find-functions nil)
+        (asked nil) (visited nil) (prompt nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'read-directory-name)
+                   (lambda (&rest _) (setq asked t) dir))
+                  ((symbol-function 'quarry-consult--read)
+                   (lambda (p &rest _) (setq prompt p) "o1.txt"))
+                  ((symbol-function 'find-file)
+                   (lambda (file &rest _) (setq visited file))))
+          (let ((current-prefix-arg '(4)))
+            (call-interactively #'quarry-consult-find-file-in-directory))
+          (should asked)
+          (should (equal prompt (format "Find file in %s: " (abbreviate-file-name dir))))
+          (should (equal visited (concat dir "o1.txt"))))
+      (quarry-stop-all)
+      (delete-directory dir t))))
 
 ;;;; Without consult
 

@@ -23,7 +23,8 @@ Events to Emacs: `:indexed`, `:changed`, `:watch-failed`. The exact shapes
 are in the module docs of `src/service.rs`.
 
 `start` validates the root, creates the watcher (a failure only disables
-watching), and spawns the first walk without waiting for it.
+watching; with the start argument `:watch nil` there is none, see
+"Watching"), and spawns the first walk without waiting for it.
 
 ## Generations and rescans
 
@@ -54,20 +55,42 @@ a leading `'` marks a fuzzy one. Match positions are computed only for the
 returned paths, atom by atom, so each position carries its term number
 (`:groups`).
 
+`:dir` (ADR 0020) limits a query to the paths below a directory. The
+service normalizes it (nil and `""` mean the whole index; a missing
+trailing `/` is added; a `D` that starts with `/` or has an empty, `.` or
+`..` component is the error `invalid :dir`). A candidate is an index path
+that starts with `D` plus a `/`, so only whole components count: `src/`
+does not take `srcx/a`. Each candidate is matched on the part after `D`: its
+`Utf32String` haystack is sliced after the number of characters of `D`, so
+the directory's own characters neither match nor rank. Scores, positions
+and `:groups` refer to that part, and `:paths` are relative to `D`.
+`:total` counts the matches below `D` only; a `D` with nothing below it is
+`:total 0`, not an error. The ranking is the same (score, then path
+length, then path): with a common prefix the full paths order as the parts
+do. The filter runs inside the scoring, so the 10,000-path threshold for
+scoring in parallel counts the candidates before the filter.
+
 The matcher remembers the last query, the index version and the full set of
-matching paths, and the style. The next query of the same style scores only
-that set when the index is unchanged and the new text extends the old text
+matching paths, the style and the directory. The next query of the same
+style and directory scores only that set when the index is unchanged and the new text extends the old text
 in a way that cannot match more (`matcher::narrows`: no `!` or `$`
 involved, the old text does not end in `\` or `$`, not both the last
 atom and the appended text are non-ASCII, and not a backslash in the last
-atom with non-ASCII appended text). Otherwise it scores the whole
-index. When more than 10,000 paths are scored, the set is split into one
+atom with non-ASCII appended text). Otherwise it scores the whole index. When more than 10,000 paths are
+scored, the set is split into one
 chunk per core, each chunk is scored on a scoped thread with its own
 matcher, and the per-chunk top results are merged. Both optimisations
 return exactly what single-threaded scoring of the whole index returns; a
 Rust test checks it.
 
 ## Watching
+
+With the start argument `:watch nil` no `Watcher` is created: `(:status)`
+reports `:watching nil`, no `(:watch-failed)` event is emitted, and the
+walks report their directories to nobody. Everything else is as with a
+watcher: walks, generations, `(:rescan)`, queries. The index then changes
+only by walks. The Elisp side starts a one-shot instance this way
+([elisp.md](elisp.md), "Targets and one-shot records").
 
 The watcher covers exactly the directories the walk visits. On Linux that
 is one non-recursive inotify watch per directory, plus `<dir>/.git/info`
