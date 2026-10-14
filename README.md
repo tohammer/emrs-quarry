@@ -1170,6 +1170,15 @@ about 800 MB and 1.2 million inodes for 1m, more with the git repository for
 the baseline, and go to `target/bench-trees` or `$QUARRY_BENCH_DIR`. The
 script exits non-zero if quarry's p99 exceeds 50 ms (100k) or 150 ms (1m).
 
+`bench/run-bench.sh replace` measures grep's replace instead: it builds
+the release module, generates trees of 1,000 and 10,000 files with 5
+matched lines each and one of 1,000 files with 100,000 matches, and
+times the preview and the writing, twice each. Every file is compared
+with the expected content afterwards; the script exits non-zero when
+one differs. The trees go to a temporary directory under
+`$QUARRY_BENCH_TMP`, `$TMPDIR` or `/tmp` and are removed. The numbers
+are in `docs/architecture/grep.md`, "Cost of large change sets".
+
 ## Development
 
 Work in a checkout, for example `~/src/emacs-quarry`. With Doom, keep the

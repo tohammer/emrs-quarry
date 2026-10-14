@@ -606,7 +606,25 @@ preview. The commands check with the same functions or their helpers.
 
 #### Cost of large change sets
 
-Measured in task 6.
+`bench/run-bench.sh replace` (`bench/replace-bench.el`) generates C-like
+trees, searches with a template, applies, and compares every file with
+the expected content. Measured on 2026-10-14: release build, Emacs 31.1,
+Intel Core i5-8365U (8 threads), tree on tmpfs, two runs each, about 10%
+apart. *Preview* is from the start of the search to its end with
+everything rendered; *work* is collecting the switched-on lines
+(`quarry-grep--replace-work`); *apply* is the write loop
+(`quarry-grep--apply`).
+
+| Tree | Files | Matches | Preview | Work | Apply |
+|---|---|---|---|---|---|
+| 5 matched lines per file | 1,000 | 5,000 | 0.2 s | 0.1 s | 0.5–0.6 s |
+| 5 matched lines per file | 10,000 | 50,000 | 1.9 s | 0.9–1.3 s | 5.4–5.7 s |
+| 100 matched lines per file | 1,000 | 100,000 | 2.9 s | 1.7–2.0 s | 2.2–2.4 s |
+
+Applying costs about 0.5 ms per file plus about 20 µs per line on this
+machine; on a disk rather than tmpfs it will be more. 10,000 files stay
+well under the 30 seconds at which the spec would have recorded writing
+in the service as a backlog item.
 
 ### Editing with wgrep
 

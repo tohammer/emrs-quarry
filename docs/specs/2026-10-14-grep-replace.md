@@ -308,7 +308,7 @@ in Emacs, with undo in those buffers afterwards.
   table in `docs/architecture.md`. *Done when* the menu test passes and
   `devflow:doc-checker` finds nothing missing. Can run in parallel with
   task 6. Needs task 4.
-- [ ] 6. **Measurement.** `bench/replace-bench.el` and its entry in
+- [x] 6. **Measurement.** `bench/replace-bench.el` and its entry in
   `bench/run-bench.sh`; run it on 1,000 and 10,000 files and on 100,000
   matches; numbers in `docs/architecture/grep.md`, and a backlog item if
   10,000 files take over 30 seconds. *Done when* the script runs and
