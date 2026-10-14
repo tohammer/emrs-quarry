@@ -145,6 +145,18 @@ A context line is a line before or after a hit, shown for its sake.")
 (defface quarry-grep-header-value '((t :inherit bold))
   "Face for the values in the header line.")
 
+(defface quarry-grep-replace-old '((t :inherit quarry-grep-match :strike-through t))
+  "Face for the old text of a match in the preview of a replacement.")
+
+;; The colours of `diff-refine-added', which cannot be inherited: it is
+;; undefined until diff-mode is loaded.
+(defface quarry-grep-replace-new
+  '((((class color) (min-colors 88) (background light)) :background "#bbffbb")
+    (((class color) (min-colors 88) (background dark)) :background "#22aa22")
+    (((class color)) :foreground "green")
+    (t :inverse-video t))
+  "Face for the new text of a match in the preview of a replacement.")
+
 ;;;; The search
 
 ;; Searches and filters are values: a command that changes a search
@@ -172,7 +184,8 @@ A context line is a line before or after a hit, shown for its sake.")
   (hidden t)                            ; non-nil: hidden files are searched
   (before 0)                            ; lines of context before each hit
   (after 0)                             ; lines of context after each hit
-  filters)                              ; list of `quarry-grep--filter'
+  filters                               ; list of `quarry-grep--filter'
+  replace)                              ; replacement template, or nil
 
 (defun quarry-grep--primary (search)
   "Return the primary filter of SEARCH, or nil.
@@ -193,7 +206,8 @@ That is its first enabled include line filter."
 See the module docs of src/grep/service.rs for the fields."
   (let ((types (quarry-grep--search-types search))
         (globs (quarry-grep--search-globs search))
-        (no-ignore (quarry-grep--search-no-ignore search)))
+        (no-ignore (quarry-grep--search-no-ignore search))
+        (replace (quarry-grep--search-replace search)))
     (append
      (list :search
            :dir (quarry-grep--search-dir search)
@@ -220,7 +234,8 @@ See the module docs of src/grep/service.rs for the fields."
            :max-lines quarry-grep-max-lines
            :max-columns quarry-grep-max-columns
            :before (quarry-grep--search-before search)
-           :after (quarry-grep--search-after search)))))
+           :after (quarry-grep--search-after search))
+     (and replace (list :replace replace)))))
 
 ;;;; The instance
 
@@ -349,6 +364,19 @@ See `quarry-grep--edit-sync'.")
 (defvar-local quarry-grep--status-marker nil
   "Marker at the start of the status line.  File blocks go before it.")
 
+(defvar-local quarry-grep--replace-total 0
+  "Number of matches in the buffer that the replacement can change.")
+
+(defvar-local quarry-grep--replace-on 0
+  "Number of those matches that are switched on.")
+
+(defvar-local quarry-grep--replace-inexact 0
+  "Number of result lines the replacement cannot change.
+Those are the lines shown shortened or with bytes that are not UTF-8.")
+
+(defvar-local quarry-grep--replace-applied nil
+  "Non-nil when the replacement shown was applied.  A new search resets it.")
+
 ;;;; Rendering
 
 ;; Text properties, the only thing commands read:
@@ -376,9 +404,14 @@ See `quarry-grep--edit-sync'.")
 ;;                        the rest of the line is the line's text.
 ;; `quarry-grep-separator' t on the empty line that ends a file block.
 ;; `quarry-grep-status'   t on the status line.
+;; `quarry-grep-replacement' on a primary match that a replacement can
+;;                        change: its new text.
+;; `quarry-grep-replace-off' on such a match: t when it is switched off.
 ;;
 ;; The properties of a line cover its newline, so the line at point is
-;; identified at the beginning of the line.
+;; identified at the beginning of the line.  A match that is switched
+;; on also has a `display' property that shows the old and the new text;
+;; the buffer text stays the item's text.
 
 (defun quarry-grep--plural (n noun)
   "Return \"N NOUN\", with NOUN in the plural unless N is 1."
@@ -451,9 +484,42 @@ pattern is shown in it, so that the colours can be told apart."
     (insert "\n")
     (put-text-property start (point) 'quarry-grep-filter filter)))
 
+(defun quarry-grep--replace-display (start end)
+  "Return the `display' value of the switched-on match from START to END.
+That is its old text, struck through, followed by its new text."
+  (concat (propertize (buffer-substring-no-properties start end)
+                      'face 'quarry-grep-replace-old)
+          (propertize (get-text-property start 'quarry-grep-replacement)
+                      'face 'quarry-grep-replace-new)))
+
+(defun quarry-grep--put-replacement (start end new)
+  "Make the match from START to END a switched-on match with the new text NEW."
+  (add-text-properties start end (list 'quarry-grep-replacement new
+                                       'quarry-grep-replace-off nil))
+  (put-text-property start end 'display (quarry-grep--replace-display start end))
+  (cl-incf quarry-grep--replace-total)
+  (cl-incf quarry-grep--replace-on))
+
+(defun quarry-grep--switch-replacement (start end on)
+  "Switch the match from START to END on if ON is non-nil, else off.
+Only `quarry-grep-replace-off' and `display' change, and the count of
+the matches that are on."
+  (unless (eq (and on t) (not (get-text-property start 'quarry-grep-replace-off)))
+    (with-silent-modifications
+      (if on
+          (progn
+            (put-text-property start end 'quarry-grep-replace-off nil)
+            (put-text-property start end 'display
+                               (quarry-grep--replace-display start end))
+            (cl-incf quarry-grep--replace-on))
+        (put-text-property start end 'quarry-grep-replace-off t)
+        (remove-list-of-text-properties start end '(display))
+        (cl-decf quarry-grep--replace-on)))))
+
 (defun quarry-grep--insert-file (item)
   "Insert the file block of ITEM at point.
-ITEM is the plist of a file item of the service."
+ITEM is the plist of a file item of the service.  In the preview of a
+replacement, the matches of a line with new texts get them."
   (let* ((path (plist-get item :path))
          (lines (plist-get item :lines))
          ;; Context lines are not counted.
@@ -461,6 +527,7 @@ ITEM is the plist of a file item of the service."
                                 lines))
          (gaps (or (> (quarry-grep--search-before quarry-grep--current) 0)
                    (> (quarry-grep--search-after quarry-grep--current) 0)))
+         (replace (quarry-grep--search-replace quarry-grep--current))
          (previous nil)
          (start (point)))
     (insert "File: " path (format " (%d)" hits))
@@ -509,7 +576,15 @@ ITEM is the plist of a file item of the service."
         (when quarry-grep-highlight-include-filters
           (dolist (span (plist-get line :secondary))
             (put-text-property (+ text-start (car span)) (+ text-start (cadr span))
-                               'face 'quarry-grep-match-secondary)))))
+                               'face 'quarry-grep-match-secondary)))
+        (when (and replace (not context))
+          (if (plist-member line :replacements)
+              (cl-loop for span in spans
+                       for new in (plist-get line :replacements)
+                       do (quarry-grep--put-replacement
+                           (+ text-start (car span)) (+ text-start (cadr span)) new))
+            ;; Without its new text: shortened or not UTF-8.
+            (cl-incf quarry-grep--replace-inexact)))))
     (put-text-property start (point) 'quarry-grep-file path)
     (insert (propertize "\n" 'quarry-grep-separator t))
     (cl-incf quarry-grep--files)
@@ -524,6 +599,11 @@ ITEM is the plist of a file item of the service."
 (defun quarry-grep--status-text ()
   "Return the text of the status line for the buffer's state."
   (concat (quarry-grep--search-status-text)
+          (if (and (memq quarry-grep--state '(done cancelled))
+                   (> quarry-grep--replace-inexact 0))
+              (format ", %s cannot be replaced (shortened or not UTF-8)"
+                      (quarry-grep--plural quarry-grep--replace-inexact "line"))
+            "")
           (if quarry-grep--edited
               "\nThe results were edited; g searches again"
             "")))
@@ -718,11 +798,41 @@ instance that served the search."
       ;; RET now corrects the pattern.
       (quarry-grep--goto line))))
 
+(defun quarry-grep--replace-unknown-p (items)
+  "Return non-nil when ITEMS come from a module that does not know `:replace'.
+Such a module searches as usual and sends no `:replacements'.  A kept
+line with its exact text always has the key, nil when its matches were
+all empty."
+  (cl-some (lambda (item)
+             (and (eq (car-safe item) :file)
+                  (cl-some (lambda (line)
+                             (not (or (plist-get line :context)
+                                       (plist-get line :inexact)
+                                       (plist-member line :replacements))))
+                           (plist-get (cdr item) :lines))))
+           items))
+
+(defun quarry-grep--replace-unsupported ()
+  "Run the current search without its template; the module is too old.
+The search with the template does not become a history entry: it
+cannot run as long as that module is loaded."
+  (let ((search (quarry-grep--copy-search quarry-grep--current)))
+    (setf (quarry-grep--search-replace search) nil)
+    (setq quarry-grep--current (if (equal search (car quarry-grep--past))
+                                   (pop quarry-grep--past)
+                                 search))
+    (quarry-grep--run quarry-grep--current)
+    (message "The loaded quarry module is older than replace; rebuild it with M-x quarry-build-module and restart Emacs")))
+
 (defun quarry-grep--on-batch (buffer serial items)
   "Show ITEMS, stream items of search SERIAL, in BUFFER.
 Items of a search that BUFFER does not wait for any more are dropped."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
+      (when (and (eql serial quarry-grep--serial)
+                 (quarry-grep--search-replace quarry-grep--current)
+                 (quarry-grep--replace-unknown-p items))
+        (quarry-grep--replace-unsupported))
       (when (eql serial quarry-grep--serial)
         (quarry-grep--keeping-positions
          (lambda ()
@@ -784,7 +894,11 @@ stop the search from starting any more."
           quarry-grep--error nil
           quarry-grep--error-filter nil
           quarry-grep--dead-instance nil
-          quarry-grep--edited nil)
+          quarry-grep--edited nil
+          quarry-grep--replace-total 0
+          quarry-grep--replace-on 0
+          quarry-grep--replace-inexact 0
+          quarry-grep--replace-applied nil)
     (unless quarry-grep--status-marker
       (setq quarry-grep--status-marker (make-marker)))
     ;; As `compilation-start' does: `next-error' now means these results.
@@ -1269,13 +1383,50 @@ Does not signal."
 Does not signal."
   (eq quarry-grep--state 'running))
 
+(defun quarry-grep--replace-p ()
+  "Return non-nil when the search has a replacement template.
+That is during the preview of a replacement.  Does not signal."
+  (and quarry-grep--current
+       (quarry-grep--search-replace quarry-grep--current)
+       t))
+
 (defun quarry-grep-cancel ()
-  "Cancel the running search.  The results that arrived stay."
+  "Cancel the running search, or leave the preview of a replacement.
+The results of a cancelled search that arrived stay.  When no search
+runs and the search has a replacement template, run it without one."
   (interactive nil quarry-grep-mode)
-  (unless (and (quarry-grep--running-p) quarry-grep--call)
-    (user-error "No search is running"))
-  ;; Its `:on-end' runs at once and shows the cancellation.
-  (emrs-cancel quarry-grep--call))
+  (cond ((and (quarry-grep--running-p) quarry-grep--call)
+         ;; Its `:on-end' runs at once and shows the cancellation.
+         (emrs-cancel quarry-grep--call))
+        ((quarry-grep--replace-p)
+         (quarry-grep--change
+          (lambda (search) (setf (quarry-grep--search-replace search) nil))))
+        (t (user-error "No search is running"))))
+
+(defvar quarry-grep-replace-history nil
+  "Minibuffer history of the replacement templates of quarry-grep.")
+
+(defun quarry-grep-replace (template)
+  "Show what replacing the primary filter's matches with TEMPLATE changes.
+TEMPLATE is a template in the syntax of `rg -r': $0 is the whole match,
+$1 or ${1} a group by number, $name or ${name} a group by name, $$ a
+dollar sign.  A name runs as far as letters, digits and _ go, so write
+${1}a for group 1 followed by a.  The search runs again with TEMPLATE
+and shows each match as old and new text; \\<quarry-grep-mode-map>\\[quarry-grep-toggle-filter]
+switches matches off and on, \\[quarry-grep-cancel] leaves the preview.
+Interactively, read TEMPLATE, starting from the current one.  A
+template with a newline is a `user-error'."
+  (interactive
+   (let ((search (quarry-grep--current)))
+     (unless (quarry-grep--primary search)
+       (user-error "The search has no primary filter"))
+     (list (read-string "Replace matches with: " (quarry-grep--search-replace search)
+                        'quarry-grep-replace-history)))
+   quarry-grep-mode)
+  (when (string-search "\n" template)
+    (user-error "A replacement template cannot hold a newline"))
+  (quarry-grep--change
+   (lambda (search) (setf (quarry-grep--search-replace search) template))))
 
 (defun quarry-grep--read-edit (filter regexp)
   "Read a new pattern for FILTER, starting from its pattern.
@@ -1646,14 +1797,77 @@ Signal a `user-error' when that leaves no enabled include line filter."
    (mapcar (lambda (filter) (if (eq filter old) new filter))
            (quarry-grep--search-filters quarry-grep--current))))
 
+(defun quarry-grep--replacement-spans (start end)
+  "Return the matches with a new text between START and END.
+Each is (BEG . FIN), in buffer order."
+  (let ((pos start)
+        (spans nil))
+    (while (and (< pos end)
+                (setq pos (text-property-not-all pos end 'quarry-grep-replacement nil)))
+      (let ((next (next-single-property-change pos 'quarry-grep-replacement nil end)))
+        (push (cons pos next) spans)
+        (setq pos next)))
+    (nreverse spans)))
+
+(defun quarry-grep--next-replacement-line (from)
+  "Return the start of the first visible line after FROM with a match to replace.
+Nil when there is none."
+  (let ((pos from)
+        (found nil))
+    (while (and (not found)
+                (setq pos (text-property-not-all pos (point-max)
+                                                 'quarry-grep-replacement nil)))
+      (if (invisible-p pos)
+          ;; A folded block.
+          (setq pos (next-single-char-property-change pos 'invisible))
+        (setq found (save-excursion (goto-char pos) (pos-bol)))))
+    found))
+
+(defun quarry-grep--toggle-replacements ()
+  "Switch matches of the preview off or on; see `quarry-grep-toggle-filter'."
+  (when quarry-grep--replace-applied
+    (user-error "The replacement was applied; g searches again"))
+  (let* ((bol (pos-bol))
+         (heading (get-text-property bol 'quarry-grep-heading))
+         (range (cond (heading (quarry-grep--block-at bol))
+                      ((get-text-property bol 'quarry-grep-line) (cons bol (pos-eol)))))
+         (spans (and range (quarry-grep--replacement-spans (car range) (cdr range))))
+         (at (and (not heading)
+                  (cl-find-if (lambda (span) (and (<= (car span) (point)) (< (point) (cdr span))))
+                              spans))))
+    (unless spans
+      (user-error (if heading
+                      "No match in this file can be replaced"
+                    "No match on this line can be replaced")))
+    (if at
+        (quarry-grep--switch-replacement
+         (car at) (cdr at) (get-text-property (car at) 'quarry-grep-replace-off))
+      ;; Off when any is on, else on.
+      (let ((on (cl-every (lambda (span)
+                            (get-text-property (car span) 'quarry-grep-replace-off))
+                          spans)))
+        (pcase-dolist (`(,start . ,end) spans)
+          (quarry-grep--switch-replacement start end on))))
+    (force-mode-line-update)
+    (when-let* ((next (quarry-grep--next-replacement-line (cdr range))))
+      (goto-char next))))
+
 (defun quarry-grep-toggle-filter ()
-  "Switch the filter at point off or on.
-A filter that is off stays in the list and is not applied."
+  "Switch the filter at point off or on, or matches of a replacement.
+A filter that is off stays in the list and is not applied.
+While the results preview a replacement (see `quarry-grep-replace'),
+on a result line switch the match at point off or on, or all matches
+of the line when point is not on a match; on a file heading switch all
+matches of the file off when any is on, else on.  Then move to the next
+line with a match to replace.  A match that is off is not replaced."
   (interactive nil quarry-grep-mode)
-  (let* ((filter (quarry-grep--filter-at-point))
-         (new (quarry-grep--copy-filter filter)))
-    (setf (quarry-grep--filter-enabled new) (not (quarry-grep--filter-enabled filter)))
-    (quarry-grep--replace-filter-checked filter new)))
+  (quarry-grep--current)
+  (if (and (quarry-grep--replace-p) (not (quarry-grep--filter-at-point-p)))
+      (quarry-grep--toggle-replacements)
+    (let* ((filter (quarry-grep--filter-at-point))
+           (new (quarry-grep--copy-filter filter)))
+      (setf (quarry-grep--filter-enabled new) (not (quarry-grep--filter-enabled filter)))
+      (quarry-grep--replace-filter-checked filter new))))
 
 (defun quarry-grep-flip-filter ()
   "Make the filter at point exclude what it included, or the reverse."
@@ -1881,9 +2095,10 @@ Does not load it and does not signal."
 
 (defun quarry-grep--editable-p ()
   "Return non-nil when `quarry-grep-edit' can start.
-That is when no search is running, there are results and wgrep is
-installed.  Does not signal."
+That is when no search is running, there are results, no replacement
+is previewed and wgrep is installed.  Does not signal."
   (and (not (quarry-grep--running-p))
+       (not (quarry-grep--replace-p))
        (quarry-grep--has-results-p)
        (quarry-grep--wgrep-available-p)))
 
@@ -1894,11 +2109,14 @@ C-c C-c applies the changes to the buffers of the files and C-c C-k
 discards them.  Lines that are shown cut or that hold bytes that are
 not valid UTF-8 cannot be edited.  When a result file changed since the
 search, ask whether to search again first; after that search, run this
-command again.  Needs the package wgrep."
+command again.  Not while the results preview a replacement.  Needs
+the package wgrep."
   (interactive nil quarry-grep-mode)
   (quarry-grep--current)
   (when (quarry-grep--running-p)
     (user-error "A search is running; wait for it or cancel it with C-c C-k"))
+  (when (quarry-grep--replace-p)
+    (user-error "The results preview a replacement; leave it with C-c C-k first"))
   (unless (quarry-grep--has-results-p)
     (user-error "There are no results to edit"))
   (unless (require 'wgrep nil t)
@@ -1981,20 +2199,38 @@ Does not signal."
         (push (cons command map) quarry-grep--header-maps)
         map)))
 
-(defun quarry-grep--header-part (label value &optional command help)
-  "Return \"LABEL: VALUE\" for the header line.
+(defun quarry-grep--header-value (value &optional command help)
+  "Return VALUE for the header line, in the face of a value.
 With COMMAND, a click on VALUE runs it and HELP is its tooltip.  Each %
 in VALUE is doubled: Emacs takes the string an `:eval' form returns as
 a mode line format again."
   (setq value (string-replace "%" "%%" value))
-  (concat label ": "
-          (if command
-              (propertize value
-                          'face 'quarry-grep-header-value
-                          'mouse-face 'header-line-highlight
-                          'help-echo (concat "mouse-1: " help)
-                          'keymap (quarry-grep--header-map command))
-            (propertize value 'face 'quarry-grep-header-value))))
+  (if command
+      (propertize value
+                  'face 'quarry-grep-header-value
+                  'mouse-face 'header-line-highlight
+                  'help-echo (concat "mouse-1: " help)
+                  'keymap (quarry-grep--header-map command))
+    (propertize value 'face 'quarry-grep-header-value)))
+
+(defun quarry-grep--header-part (label value &optional command help)
+  "Return \"LABEL: VALUE\" for the header line.
+COMMAND and HELP are as for `quarry-grep--header-value'."
+  (concat label ": " (quarry-grep--header-value value command help)))
+
+(defun quarry-grep--header-replace (template)
+  "Return the part of the header line for the preview of TEMPLATE.
+That is \"→ TEMPLATE\", which runs `quarry-grep-replace' when clicked,
+and how many of the matches are switched on.  An empty template is
+shown as (empty)."
+  (concat "→ "
+          (quarry-grep--header-value
+           (if (equal template "") "(empty)" template)
+           #'quarry-grep-replace "change the replacement (R)")
+          "   "
+          (quarry-grep--header-value
+           (format "%d of %d" quarry-grep--replace-on quarry-grep--replace-total))
+          " matches on"))
 
 (defun quarry-grep--context-text (search)
   "Return the lines of context of SEARCH as shown to the user.
@@ -2048,6 +2284,8 @@ being edited: `?' is text then."
           (quarry-grep--header-part
            "hits" (format "%d in %s" quarry-grep--lines
                           (quarry-grep--plural quarry-grep--files "file")))
+          (when-let* ((template (quarry-grep--search-replace search)))
+            (quarry-grep--header-replace template))
           (unless quarry-grep--editing
             (quarry-grep--header-hint))))
           "   ")))))
@@ -2099,6 +2337,7 @@ being edited: `?' is text then."
   "C-c <" #'quarry-grep-history-back
   "C-c >" #'quarry-grep-history-forward
   "C-c C-k" #'quarry-grep-cancel
+  "R" #'quarry-grep-replace
   "e" #'quarry-grep-edit)
 
 (defun quarry-grep--after-clone ()

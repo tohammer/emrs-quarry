@@ -695,6 +695,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
                    ("- L" . quarry-grep-exclude-line-regexp)
                    ("+ L" . quarry-grep-include-line-regexp)
                    ("e" . quarry-grep-edit)
+                   ("R" . quarry-grep-replace)
                    ("q" . quit-window)))
     (should (eq (keymap-lookup quarry-grep-mode-map key) command)))
   (should (eq (get 'quarry-grep-mode 'derived-mode-parent) 'special-mode)))
@@ -3075,7 +3076,7 @@ wgrep are replaced, so the test does not depend on the environment."
     quarry-grep--running-p quarry-grep--has-results-p
     quarry-grep--wgrep-available-p quarry-grep--editable-p
     quarry-grep--earlier-search-p quarry-grep--later-search-p
-    quarry-grep--other-filters-p)
+    quarry-grep--other-filters-p quarry-grep--replace-p)
   "The functions that say whether a command applies; none signals.")
 
 (ert-deftest quarry-test-grep-condition-at-point ()
@@ -3222,7 +3223,8 @@ wgrep are replaced, so the test does not depend on the environment."
                                            quarry-grep--editable-p
                                            quarry-grep--earlier-search-p
                                            quarry-grep--later-search-p
-                                           quarry-grep--other-filters-p))
+                                           quarry-grep--other-filters-p
+                                           quarry-grep--replace-p))
                          (funcall predicate)))))))
 
 ;;;; The menu
@@ -3457,6 +3459,314 @@ That is what the entry's own `:inapt-if-not' function says at point."
                      (lambda () (interactive) (setq called t))))
             (funcall run click))
           (should called))))))
+
+;;;; Replace
+
+(defconst quarry-test-grep--replace-files
+  `(("a.txt" . "foo_1 and foo_2\nnothing\nfoo_3\n")
+    ("b.txt" . "über foo_4\n")
+    ("long.txt" . ,(concat "foo_5 " (make-string 40 ?x) "\n"))
+    ("none.txt" . "nothing\n"))
+  "A tree for the preview: `foo_([0-9])' matches five times.
+With `quarry-grep-max-columns' 20 the line of long.txt is shortened,
+so its match cannot be replaced.")
+
+(defmacro quarry-test-grep--with-preview (spec &rest body)
+  "Run BODY with the tree of the preview searched; SPEC is (DIR).
+The result buffer is current, its search is `foo_([0-9])' without a
+template, and lines are cut at 20 characters."
+  (declare (indent 1))
+  `(quarry-test-grep--with-tree (,(car spec) quarry-test-grep--replace-files)
+     (let ((quarry-grep-max-columns 20)
+           (quarry-grep-replace-history nil))
+       (quarry-test-grep--search ,(car spec) "foo_([0-9])")
+       ,@body)))
+
+(defun quarry-test-grep--text-start (path line)
+  "Return where the text of the result line LINE of PATH starts."
+  (with-current-buffer (quarry-test-grep--buffer)
+    (next-single-property-change (quarry-test-grep--line-pos path line)
+                                 'quarry-grep-prefix)))
+
+(defun quarry-test-grep--results-text ()
+  "Return the text of the result buffer before the status line."
+  (with-current-buffer (quarry-test-grep--buffer)
+    (buffer-substring-no-properties
+     (point-min) (text-property-any (point-min) (point-max) 'quarry-grep-status t))))
+
+(defun quarry-test-grep--replacement (pos)
+  "Return the replacement of the match at POS as (NEW OFF DISPLAY).
+DISPLAY is the text of the `display' property, or nil."
+  (with-current-buffer (quarry-test-grep--buffer)
+    (let ((display (get-text-property pos 'display)))
+      (list (get-text-property pos 'quarry-grep-replacement)
+            (get-text-property pos 'quarry-grep-replace-off)
+            (and display (substring-no-properties display))))))
+
+(defun quarry-test-grep--replace-counts ()
+  "Return the counts of the header line, \"N of M\", or nil without one."
+  (let ((header (quarry-test-grep--header)))
+    (and (string-match "\\([0-9]+ of [0-9]+\\) matches on" header)
+         (match-string 1 header))))
+
+(ert-deftest quarry-test-grep-replace-preview ()
+  "R shows old and new text per match; the buffer text stays the same."
+  (quarry-test-grep--with-preview (dir)
+    (let ((text (quarry-test-grep--results-text)))
+      (should-not (plist-member (cdr (quarry-test-grep--request)) :replace))
+      (should-not (quarry-grep--replace-p))
+      (should-not (quarry-test-grep--replace-counts))
+      (goto-char (point-min))
+      (quarry-test-grep--keys "R bar_$1 RET")
+      (should (equal (quarry-test-grep--request :replace) "bar_$1"))
+      (should (equal (quarry-grep--search-replace quarry-grep--current) "bar_$1"))
+      (should (quarry-grep--replace-p))
+      (should (equal quarry-grep-replace-history '("bar_$1")))
+      ;; Exactly the text of the search without a template.
+      (should (equal (quarry-test-grep--results-text) text)))
+    (let ((a1 (quarry-test-grep--text-start "a.txt" 1))
+          (b1 (quarry-test-grep--text-start "b.txt" 1)))
+      (should (equal (quarry-test-grep--replacement a1) '("bar_1" nil "foo_1bar_1")))
+      (should (equal (quarry-test-grep--replacement (+ a1 4)) '("bar_1" nil "foo_1bar_1")))
+      ;; Between the matches.
+      (should (equal (quarry-test-grep--replacement (+ a1 5)) '(nil nil nil)))
+      (should (equal (quarry-test-grep--replacement (+ a1 10)) '("bar_2" nil "foo_2bar_2")))
+      (should (equal (quarry-test-grep--replacement (quarry-test-grep--text-start "a.txt" 3))
+                     '("bar_3" nil "foo_3bar_3")))
+      ;; A multibyte character before the match.
+      (should (equal (quarry-test-grep--replacement (+ b1 5)) '("bar_4" nil "foo_4bar_4")))
+      (should (equal (quarry-test-grep--replacement (+ b1 4)) '(nil nil nil)))
+      ;; The faces of the display, and the match face kept below it.
+      (let ((display (get-text-property a1 'display)))
+        (should (eq (get-text-property 0 'face display) 'quarry-grep-replace-old))
+        (should (eq (get-text-property 4 'face display) 'quarry-grep-replace-old))
+        (should (eq (get-text-property 5 'face display) 'quarry-grep-replace-new)))
+      (should (quarry-test-grep--has-face a1 'quarry-grep-match))
+      ;; The shortened line has its match face and nothing to replace.
+      (let* ((long (quarry-test-grep--line-pos "long.txt" 1))
+             (end (save-excursion (goto-char long) (pos-eol))))
+        (should (get-text-property long 'quarry-grep-inexact))
+        (should (quarry-test-grep--has-face (quarry-test-grep--text-start "long.txt" 1)
+                                            'quarry-grep-match))
+        (should-not (text-property-not-all long end 'quarry-grep-replacement nil))
+        (should-not (text-property-not-all long end 'display nil))))
+    (should (equal (quarry-test-grep--replace-counts) "4 of 4"))
+    (should (string-match-p "hits: 4 in 3 files   → bar_\\$1   4 of 4 matches on   \\? menu\\'"
+                            (quarry-test-grep--header)))
+    (should (string-match-p
+             "\\`Search finished: 4 lines in 3 files, .*, 1 line cannot be replaced (shortened or not UTF-8)\\'"
+             (quarry-test-grep--status)))
+    ;; The template in the header runs R on a click; a % is doubled.
+    (let* ((header (quarry-grep--header))
+           (pos (string-search "bar_" header)))
+      (should (eq (lookup-key (get-text-property pos 'keymap header) [header-line mouse-1])
+                  (lookup-key (quarry-grep--header-map #'quarry-grep-replace)
+                              [header-line mouse-1])))
+      (should (equal (get-text-property pos 'help-echo header)
+                     "mouse-1: change the replacement (R)")))
+    ;; R starts from the current template.
+    (should (equal (quarry-test-grep--prompts
+                    (lambda () (quarry-test-grep--keys "R C-e % RET")))
+                   '(("Replace matches with: " . "bar_$1"))))
+    (should (equal (quarry-test-grep--request :replace) "bar_$1%"))
+    (should (string-search "→ bar_$1%%   " (quarry-grep--header)))
+    ;; An empty template deletes the matches.
+    (quarry-grep-replace "")
+    (quarry-test-grep--wait)
+    (should (equal (quarry-test-grep--request :replace) ""))
+    (should (equal (quarry-test-grep--replacement (quarry-test-grep--text-start "a.txt" 3))
+                   '("" nil "foo_3")))
+    (should (string-search "→ (empty)   4 of 4 matches on" (quarry-test-grep--header)))))
+
+(ert-deftest quarry-test-grep-replace-toggle ()
+  "x switches a match, a line or a file off and on, and moves on."
+  (quarry-test-grep--with-preview (dir)
+    (quarry-grep-replace "bar_$1")
+    (quarry-test-grep--wait)
+    (let ((a1 (quarry-test-grep--text-start "a.txt" 1))
+          (a3 (quarry-test-grep--line-pos "a.txt" 3))
+          (b1 (quarry-test-grep--line-pos "b.txt" 1)))
+      ;; On the second match of a line: only that one, then the next line.
+      (goto-char (+ a1 12))
+      (quarry-test-grep--keys "x")
+      (should (equal (quarry-test-grep--replacement (+ a1 10)) '("bar_2" t nil)))
+      (should (equal (quarry-test-grep--replacement a1) '("bar_1" nil "foo_1bar_1")))
+      (should (equal (quarry-test-grep--replace-counts) "3 of 4"))
+      (should (= (point) a3))
+      ;; Again: on.
+      (goto-char (+ a1 10))
+      (quarry-test-grep--keys "x")
+      (should (equal (quarry-test-grep--replacement (+ a1 10)) '("bar_2" nil "foo_2bar_2")))
+      (should (equal (quarry-test-grep--replace-counts) "4 of 4"))
+      ;; Outside a match: the whole line, off while any is on.
+      (goto-char (quarry-test-grep--line-pos "a.txt" 1))
+      (quarry-test-grep--keys "x")
+      (should (equal (mapcar #'cadr (list (quarry-test-grep--replacement a1)
+                                          (quarry-test-grep--replacement (+ a1 10))))
+                     '(t t)))
+      (should (equal (quarry-test-grep--replace-counts) "2 of 4"))
+      (should (= (point) a3))
+      (goto-char (+ a1 10))
+      (quarry-test-grep--keys "x")
+      (should (equal (quarry-test-grep--replace-counts) "3 of 4"))
+      ;; One of two on: the line goes off.
+      (goto-char (+ a1 6))
+      (quarry-test-grep--keys "x")
+      (should (equal (quarry-test-grep--replace-counts) "2 of 4"))
+      (goto-char (+ a1 6))
+      (quarry-test-grep--keys "x")
+      (should (equal (quarry-test-grep--replace-counts) "4 of 4"))
+      ;; A heading: the file off, then on; then the next file's line.
+      (goto-char (quarry-test-grep--heading-pos "a.txt"))
+      (quarry-test-grep--keys "x")
+      (should (equal (quarry-test-grep--replace-counts) "1 of 4"))
+      (should (equal (quarry-test-grep--replacement (quarry-test-grep--text-start "a.txt" 3))
+                     '("bar_3" t nil)))
+      (should (= (point) b1))
+      (goto-char (+ a1 10))
+      (quarry-test-grep--keys "x")
+      (should (equal (quarry-test-grep--replace-counts) "2 of 4"))
+      ;; One is on: all go off.
+      (goto-char (quarry-test-grep--heading-pos "a.txt"))
+      (quarry-test-grep--keys "x")
+      (should (equal (quarry-test-grep--replace-counts) "1 of 4"))
+      (goto-char (quarry-test-grep--heading-pos "a.txt"))
+      (quarry-test-grep--keys "x")
+      (should (equal (quarry-test-grep--replace-counts) "4 of 4"))
+      (should (equal (quarry-test-grep--replacement a1) '("bar_1" nil "foo_1bar_1")))
+      ;; The last line with a match: point stays.
+      (goto-char b1)
+      (quarry-test-grep--keys "x")
+      (should (= (point) b1))
+      (should (equal (quarry-test-grep--replace-counts) "3 of 4"))
+      ;; A folded file is passed over.
+      (goto-char (quarry-test-grep--heading-pos "b.txt"))
+      (quarry-test-grep--keys "TAB")
+      (goto-char (quarry-test-grep--line-pos "a.txt" 1))
+      (quarry-test-grep--keys "x")
+      (should (= (point) a3))
+      (quarry-test-grep--keys "x")
+      (should (= (point) a3))
+      ;; Nothing was searched again, and the text is the same.
+      (should (= (length quarry-test-grep--requests) 2))
+      ;; Lines with nothing to replace.
+      (dolist (pos (list (quarry-test-grep--line-pos "long.txt" 1)
+                         (quarry-test-grep--heading-pos "long.txt")
+                         (point-max)))
+        (goto-char pos)
+        (quarry-test-grep--refused "No match \\(on this line\\|in this file\\) can be replaced"
+          (quarry-grep-toggle-filter)))
+      ;; On a filter line, x is the filter's.
+      (goto-char (quarry-test-grep--filter-pos 0))
+      (quarry-test-grep--refused "enabled include line filter" (quarry-grep-toggle-filter))
+      ;; Applied: refused.
+      (setq quarry-grep--replace-applied t)
+      (goto-char a1)
+      (quarry-test-grep--refused "g searches again" (quarry-grep-toggle-filter))))
+  ;; Outside a preview, as before.
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--search dir)
+    (goto-char (quarry-test-grep--line-pos "notes.txt" 1))
+    (quarry-test-grep--refused "No filter at point" (quarry-grep-toggle-filter))))
+
+(ert-deftest quarry-test-grep-replace-search-changes ()
+  "A change keeps the template; C-c < and C-c C-k go back to the search."
+  (quarry-test-grep--with-preview (dir)
+    (quarry-grep-replace "bar_$1")
+    (quarry-test-grep--wait)
+    (should (= (length quarry-grep--past) 1))
+    ;; A filter change and a switch keep the template.
+    (quarry-test-grep--keys "+ l and RET")
+    (should (equal (quarry-test-grep--request :replace) "bar_$1"))
+    (should (equal (quarry-test-grep--results) '(("a.txt" 1 "foo_1 and foo_2"))))
+    (should (equal (quarry-test-grep--replace-counts) "2 of 2"))
+    (quarry-test-grep--keys "c")
+    (should (equal (quarry-test-grep--request :replace) "bar_$1"))
+    (should (= (length quarry-grep--past) 3))
+    ;; Back to the search before R: no template.
+    (quarry-test-grep--keys "C-c < C-c < C-c <")
+    (should-not (quarry-grep--replace-p))
+    (should-not (plist-member (cdr (quarry-test-grep--request)) :replace))
+    (should-not (quarry-test-grep--replace-counts))
+    (should-not (text-property-not-all (point-min) (point-max) 'quarry-grep-replacement nil))
+    (should-not (text-property-not-all (point-min) (point-max) 'display nil))
+    (quarry-test-grep--keys "C-c >")
+    (should (equal (quarry-test-grep--request :replace) "bar_$1"))
+    ;; C-c C-k leaves the preview: a search without the template.
+    (quarry-test-grep--keys "C-c C-k")
+    (should-not (quarry-grep--replace-p))
+    (should-not (plist-member (cdr (quarry-test-grep--request)) :replace))
+    (should (equal (quarry-grep--search-filters quarry-grep--current)
+                   (quarry-grep--search-filters (car quarry-grep--past))))
+    (should-not (text-property-not-all (point-min) (point-max) 'display nil))
+    (quarry-test-grep--refused "No search is running" (quarry-grep-cancel))
+    ;; A template with a newline.
+    (quarry-test-grep--refused "newline" (quarry-grep-replace "a\nb"))
+    (quarry-grep-replace "bar")
+    (quarry-test-grep--wait)
+    ;; e during a preview.
+    (quarry-test-grep--with-wgrep t
+      (should-not (quarry-grep--editable-p)))
+    (quarry-test-grep--refused "C-c C-k" (quarry-grep-edit))
+    ;; R while editing.
+    (cl-letf (((symbol-function 'quarry-grep--in-edit-mode-p) #'always))
+      (setq quarry-grep--editing t)
+      (unwind-protect
+          (quarry-test-grep--refused "being edited" (quarry-grep-replace "x"))
+        (setq quarry-grep--editing nil)))
+    ;; A running preview: C-c C-k cancels it and keeps the template; the
+    ;; next one leaves the preview.
+    (quarry-test-grep--with-fake-stream
+      (quarry-grep-rerun)
+      (should (eq (quarry-test-grep--state) 'running))
+      (execute-kbd-macro (kbd "C-c C-k"))
+      (funcall (nth 2 (car quarry-test-grep--fake)) 'cancelled nil)
+      (should (eq (quarry-test-grep--state) 'cancelled))
+      (should (quarry-grep--replace-p))
+      (execute-kbd-macro (kbd "C-c C-k"))
+      (should-not (quarry-grep--replace-p))
+      (should-not (plist-member (cdr (car (car quarry-test-grep--fake))) :replace)))))
+
+(ert-deftest quarry-test-grep-replace-old-module ()
+  "A module that ignores :replace: the search runs without the template."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--with-fake-stream
+      (quarry-grep "needle" nil dir)
+      (set-buffer (quarry-test-grep--buffer))
+      (funcall (nth 2 (car quarry-test-grep--fake)) 'done nil)
+      (let ((plain quarry-grep--current))
+        ;; Lines with the key, a nil one, and an inexact line without it.
+        (quarry-grep-replace "x")
+        (funcall (nth 1 (car quarry-test-grep--fake))
+                 (list (list :file :path "a.txt" :path-spans nil :mtime nil
+                             :lines '((:n 1 :text "needle" :spans ((0 6)) :secondary nil
+                                       :inexact nil :replacements ("x"))
+                                      (:n 2 :text "" :spans nil :secondary nil
+                                       :inexact nil :replacements nil)
+                                      (:n 3 :text "needle…" :spans ((0 6)) :secondary nil
+                                       :inexact t)))))
+        (should (= (length quarry-test-grep--fake) 2))
+        (should (equal (quarry-test-grep--headings) '("a.txt")))
+        (should (equal (quarry-test-grep--replace-counts) "1 of 1"))
+        ;; An exact line without the key: an older module.
+        (quarry-grep-rerun)
+        (let ((messages
+               (quarry-test-grep--messages
+                (lambda ()
+                  (funcall (nth 1 (car quarry-test-grep--fake))
+                           (list (quarry-test-grep--item "a.txt" '(1 "needle" 0 6))))))))
+          (should (equal messages
+                         '("The loaded quarry module is older than replace; rebuild it with M-x quarry-build-module and restart Emacs"))))
+        (should (= (length quarry-test-grep--fake) 4))
+        (should-not (plist-member (cdr (car (car quarry-test-grep--fake))) :replace))
+        (should (eq (quarry-test-grep--state) 'running))
+        ;; The item was not shown; the search without the template replaced
+        ;; the one with it, also in the history.
+        (should-not (quarry-test-grep--headings))
+        (should (equal quarry-grep--current plain))
+        (should-not quarry-grep--past)
+        (should-not quarry-grep--future)
+        (should-not (quarry-test-grep--replace-counts))))))
 
 (provide 'quarry-grep-tests)
 ;;; quarry-grep-tests.el ends here

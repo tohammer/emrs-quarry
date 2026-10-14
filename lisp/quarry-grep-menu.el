@@ -151,7 +151,8 @@ goes to the command that is run."
      :inapt-if-not quarry-grep--later-search-p)]
    ["Edit"
     ("e" "edit the results (wgrep)" quarry-grep-edit
-     :inapt-if-not quarry-grep--editable-p)]]
+     :inapt-if-not quarry-grep--editable-p)
+    ("R" "replace the matches" quarry-grep-replace)]]
   (interactive nil quarry-grep-mode)
   (quarry-grep--current)
   (transient-setup 'quarry-grep-menu)

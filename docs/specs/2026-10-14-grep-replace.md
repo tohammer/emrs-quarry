@@ -134,9 +134,10 @@ UTF-8)". A file whose matches are all of that kind is still shown.
 
 The two faces are `defface`s in the group of quarry-grep. Defaults:
 `quarry-grep-replace-old` inherits `quarry-grep-match` and adds
-`:strike-through t`. `quarry-grep-replace-new` inherits
-`diff-refine-added`, so it follows the theme; if `diff-mode` has not
-been loaded, it uses a plain foreground fallback.
+`:strike-through t`. `quarry-grep-replace-new` has the colours of
+`diff-refine-added` as its own (changed in task 2: inheriting that face
+fails while diff-mode is not loaded, and loading it is not wanted), so
+it does not follow the theme.
 
 ### Applying
 
@@ -284,14 +285,14 @@ in Emacs, with undo in those buffers afterwards.
   this spec's Error handling. *Done when* the Rust tests above pass,
   `cargo clippy --all-targets -- -D warnings` is clean and a search
   without `:replace` gives the same items as before.
-- [ ] 2. **Search value, `R` and the preview.** The `replace` slot, the
+- [x] 2. **Search value, `R` and the preview.** The `replace` slot, the
   request, `R` with its history and checks, rendering with the
   properties and faces, the header part and counts, the status line
   count of lines that cannot be replaced, `C-c C-k` leaving the
   preview, `e` refused, the detection of an old module. *Done when* the
   preview, filter-change, history and refusal tests pass and
   `tests/run-ert.sh` is green. Needs task 1.
-- [ ] 3. **`x` on matches and headings.** *Done when* the toggle tests
+- [x] 3. **`x` on matches and headings.** *Done when* the toggle tests
   pass. Needs task 2.
 - [ ] 4. **Applying.** `quarry-grep-replace-apply`, the per-file
   procedure, the overlays and faces of the results, the applied state,
