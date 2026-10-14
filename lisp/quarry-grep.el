@@ -1397,6 +1397,13 @@ Does not signal."
 Does not signal."
   (eq quarry-grep--state 'running))
 
+(defun quarry-grep--cancellable-p ()
+  "Return non-nil when `quarry-grep-cancel' can do something.
+That is while a search runs or during a preview.  Does not signal."
+  (and (or (and (quarry-grep--running-p) quarry-grep--call)
+           (quarry-grep--replace-p))
+       t))
+
 (defun quarry-grep--replace-p ()
   "Return non-nil when the search has a replacement template.
 That is during the preview of a replacement.  Does not signal."
@@ -1837,20 +1844,38 @@ Nil when there is none."
         (setq found (save-excursion (goto-char pos) (pos-bol)))))
     found))
 
-(defun quarry-grep--toggle-replacements ()
-  "Switch matches of the preview off or on; see `quarry-grep-toggle-filter'."
-  (when quarry-grep--replace-applied
-    (user-error "The replacement was applied; g searches again"))
+(defun quarry-grep--replacement-target ()
+  "Return what `x' switches at point during a preview, or nil.
+That is (HEADING RANGE SPANS): whether point is on a file heading, the
+region of the heading's file or of the line, and the matches in it that
+have a new text.  Does not signal."
   (let* ((bol (pos-bol))
          (heading (get-text-property bol 'quarry-grep-heading))
          (range (cond (heading (quarry-grep--block-at bol))
                       ((get-text-property bol 'quarry-grep-line) (cons bol (pos-eol)))))
-         (spans (and range (quarry-grep--replacement-spans (car range) (cdr range))))
-         (at (and (not heading)
-                  (cl-find-if (lambda (span) (and (<= (car span) (point)) (< (point) (cdr span))))
-                              spans))))
+         (spans (and range (quarry-grep--replacement-spans (car range) (cdr range)))))
+    (and spans (list heading range spans))))
+
+(defun quarry-grep--toggle-at-point-p ()
+  "Return non-nil when `quarry-grep-toggle-filter' can switch something at point.
+That is on a filter line, or during a preview that was not applied on a
+line or a heading with a match that has a new text.  Does not signal."
+  (and (or (quarry-grep--filter-at-point-p)
+           (and (quarry-grep--replace-p)
+                (not quarry-grep--replace-applied)
+                (quarry-grep--replacement-target)))
+       t))
+
+(defun quarry-grep--toggle-replacements ()
+  "Switch matches of the preview off or on; see `quarry-grep-toggle-filter'."
+  (when quarry-grep--replace-applied
+    (user-error "The replacement was applied; g searches again"))
+  (pcase-let* ((`(,heading ,range ,spans) (quarry-grep--replacement-target))
+               (at (and (not heading)
+                        (cl-find-if (lambda (span) (and (<= (car span) (point)) (< (point) (cdr span))))
+                                    spans))))
     (unless spans
-      (user-error (if heading
+      (user-error (if (get-text-property (pos-bol) 'quarry-grep-heading)
                       "No match in this file can be replaced"
                     "No match on this line can be replaced")))
     (if at

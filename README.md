@@ -532,11 +532,13 @@ rest follows in the order it is found.
 | `- P`, `+ P`, `- L`, `+ L` | The same, with the pattern as a regexp |
 | `- f` | Exclude the file at point, and only that file |
 | `- d`, `+ d` | Exclude, or search only, the directory of the file at point |
-| `k`, `x`, `!`, `%` | On a filter line: remove it; switch it off or on; flip it between including and excluding; switch it between literal and regexp |
+| `k`, `x`, `!`, `%` | On a filter line: remove it; switch it off or on; flip it between including and excluding; switch it between literal and regexp. During a replace preview `x` also switches matches off and on |
 | `K` | Remove all filters except the primary one |
 | `C-c <`, `C-c >` | Go back or forward in the buffer's search history |
-| `C-c C-k` | Cancel the running search |
+| `C-c C-k` | Cancel the running search; during a replace preview, leave the preview |
 | `e` | Edit the results with wgrep (see "Editing results") |
+| `R` | Preview a replacement of the primary filter's matches (see "Replacing matches") |
+| `C-c C-c` | Write the previewed replacement into the files |
 | `?` | Show a menu of all these keys with the current value of each switch (see below) |
 | `h`, `C-h m` | Show the help of the mode |
 | `q` | Quit the window |
@@ -738,6 +740,74 @@ in it.
 - After a commit the result lines show the edited text and the status
   line says that the results were edited; `g` searches again, which
   shows what is on disk.
+
+### Replacing matches
+
+`R` replaces what the primary filter matched, across all files of the
+result, after you have seen every change. It is for mechanical changes
+such as a rename or a moved module path. It asks for a template, with
+the current one as initial input, and searches again with it. The buffer
+text does not change; each match shows the old text struck through
+(`quarry-grep-replace-old`) followed by the new text
+(`quarry-grep-replace-new`). The header shows `→ TEMPLATE`, which `R`
+edits when clicked, and `N of M matches switched on`. Lines that cannot
+be replaced (shown cut, or not valid UTF-8) are shown as before and
+counted in the status line.
+
+The template is the syntax of `rg -r`:
+
+| Template | Is |
+|---|---|
+| `$0` | the whole match |
+| `$1`, `${1}` | capture group 1 |
+| `$name`, `${name}` | the group named `name` (`(?P<name>...)`) |
+| `$$` | a dollar sign |
+
+A name runs as far as letters, digits and `_` go, so `$1a` is the group
+named `1a`, which does not exist. Write `${1}a` for group 1 followed by
+`a`. A group that does not exist or did not take part gives empty text.
+A literal filter has only `$0`. A template cannot contain a newline.
+The search with a template is an entry in the search history of its own:
+`C-c <` goes back to the search without it. Filter commands during a
+preview keep the template and update the preview.
+
+- `x` switches matches off and on, and only the switched-on matches are
+  written. On a match it switches that match; on a result line outside a
+  match, all matches of the line; on a file heading, all matches of the
+  file (off when any is on, else on). Then point moves to the next line
+  with a match.
+- `C-c C-k` leaves the preview when no search runs. `e` is refused
+  during a preview; leave it first.
+- `C-c C-c` writes the switched-on matches. It is refused while a search
+  runs, after a failed or cancelled search, when no match is switched
+  on, and when the result is truncated at `quarry-grep-max-lines`: only
+  what is shown is written, so narrow the search or raise the option. If
+  a result file changed since the search (or a modified buffer visits
+  it), it asks whether to search again, and writes nothing either way.
+  Otherwise it asks `Replace N matches on L lines in F files?`.
+- Every line is compared with the text the search found and rejected
+  when it differs, or when its buffer is read-only or not up to date
+  with its file, when the file cannot be read or written, or when the
+  new text has a character that the file's encoding cannot hold. The
+  other lines go on. Afterwards each result line is marked as applied or
+  rejected (the reason is in its `help-echo`; faces
+  `quarry-grep-replace-applied` and `quarry-grep-replace-rejected`), and
+  the echo area says `Replaced N lines in F files; R rejected`. `g`
+  searches again and shows what still matches; until then `x`, `C-c C-c`
+  and `e` are refused. `C-g` stops after the file being written; the
+  files written stay written.
+- A file that an Emacs buffer visits is changed in that buffer and
+  saved with `save-buffer`, so your save hooks run and a backup file may
+  be made. It is one undo step in that buffer. Other files are read,
+  changed and written back in their own encoding, line ends and byte
+  order mark, with no undo: use git.
+- Empty matches (`^`, `\b`, `x*` matching nothing) are not replaced.
+  To insert text at the start of lines, match something: `^(.)` with
+  `PREFIX$1`.
+
+The replace needs the new module: rebuild it with `M-x
+quarry-build-module` and restart Emacs. An older module is detected when
+`R` runs; the search then runs without the template and says to rebuild.
 
 ### Live grep
 
@@ -968,7 +1038,9 @@ Faces: `quarry-grep-match`, `quarry-grep-match-secondary`,
 `quarry-grep-filter-include`,
 `quarry-grep-filter-exclude`, `quarry-grep-filter-kind`,
 `quarry-grep-filter-pattern`, `quarry-grep-filter-disabled`,
-`quarry-grep-status`, `quarry-grep-error` and `quarry-grep-header-value`.
+`quarry-grep-status`, `quarry-grep-error`, `quarry-grep-header-value`,
+`quarry-grep-replace-old`, `quarry-grep-replace-new`,
+`quarry-grep-replace-applied` and `quarry-grep-replace-rejected`.
 
 ### Limits
 

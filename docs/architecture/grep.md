@@ -3,7 +3,8 @@
 The interactive grep: first the Rust service (threads, messages, what is
 searched, order, cap and cancellation), then the Elisp side
 (`lisp/quarry-grep.el`). Part of [the architecture](../architecture.md).
-Results are edited through wgrep (ADR 0013), described at the end.
+Results are edited through wgrep (ADR 0013) or replaced by a preview and
+Elisp (ADR 0021), described at the end.
 
 ## Threads
 
@@ -34,6 +35,21 @@ items) and spawns the search.
 
 The stream carries one file item per file with kept lines, and one summary
 item at the end.
+
+With `:replace` (a template string) the line items of exact kept lines
+also carry `:replacements`, one string per entry of `:spans`. The
+service only computes them; it never writes a file (ADR 0021). They are
+made in `Filters::replacements` (`filter.rs`), called by the sink for
+each kept line whose `:inexact` is nil: the template is interpolated
+with `grep-matcher`'s capture interpolation (the syntax of `rg -r`) for
+each non-empty match of the primary filter on the whole line, found by
+the iteration that also gives `:spans`, so both lists have the same
+length and order. A match's groups come from a search that starts at the
+match. Inexact lines and context lines have no `:replacements`, and
+without `:replace` no line has them. A request is not checked for the
+template: every string is valid. An older module skips the unknown key
+(emrs's deserializer ignores keys a request type does not name) and
+searches without replacements.
 
 ## What is searched
 
@@ -188,7 +204,8 @@ trailing slash), `types` (a list of file type names, nil for all files) and `glo
 list of path globs), `case` (`smart`, `sensitive`, `insensitive`), `no-ignore`,
 `hidden`, `before` and `after` (the lines of context, 0 by default), and
 `filters`, an ordered list of `quarry-grep--filter` records
-(`target` `line` or `path`, `exclude`, `pattern`, `regexp`, `enabled`).
+(`target` `line` or `path`, `exclude`, `pattern`, `regexp`, `enabled`),
+and `replace`, a replacement template or nil (see "Replace").
 The pattern a command asks for is the first filter. A search of the four
 commands takes `before` and `after` from `quarry-grep-context-before` and
 `quarry-grep-context-after`; `C`, `B` and `A` change them through
@@ -217,7 +234,8 @@ sent is kept in `quarry-grep--sent`, because the `(:filter INDEX)` of a
 filter error counts in that list, not in the search's. `:ignores` is
 `quarry-ignores`, and nil when ignore files are off. `:max-lines` and
 `:max-columns` come from the options at the time of the request,
-`:before` and `:after` from the search. The
+`:before` and `:after` from the search, `:replace` from its `replace`
+slot (nil: not sent). The
 primary filter (`quarry-grep--primary`) is the first enabled include line
 filter, as in the service.
 
@@ -312,6 +330,9 @@ first character.
 | `quarry-grep-prefix` | the line number and the space after it | t; what follows on the line is exactly the item's `:text` |
 | `quarry-grep-separator` | the empty line that ends a file block | t |
 | `quarry-grep-status` | the status line | t |
+| `quarry-grep-replacement` | the span of a primary match with a new text, during a preview | the new text of this match |
+| `quarry-grep-replace-off` | the same span | t when the match is switched off |
+| `display` | the same span, when the match is on | the old text in `quarry-grep-replace-old` followed by the new text in `quarry-grep-replace-new` |
 
 Faces are put on with the `face` property; the mode has no font-lock
 keywords. Filter lines, headings and result lines have `mouse-face` and
@@ -465,7 +486,8 @@ loaded on the first `?`.
   point.
 - An entry that does not apply is inactive (`:inapt-if-not`). The
   predicates live in `quarry-grep.el` and end in `-p`
-  (`quarry-grep--filter-at-point-p`, `quarry-grep--editable-p`, ...);
+  (`quarry-grep--filter-at-point-p`, `quarry-grep--editable-p`,
+  `quarry-grep--toggle-at-point-p`, ...);
   they do not signal, and the commands use the same functions for their
   `user-error` checks, so the menu and the commands cannot disagree.
   `quarry-grep--wgrep-available-p` asks with `featurep` and
@@ -483,6 +505,108 @@ loaded on the first `?`.
   differs between 0.7.2 and 0.13; the test handles both and is the place
   to fix after a transient change.
 - Only what transient 0.7.2 has (Emacs 30.1) is used.
+
+### Replace
+
+`R` (`quarry-grep-replace`) sets the `replace` slot of a copy of the
+search through `quarry-grep--change` and runs it. A template with a
+newline is a `user-error`; so is a search without a primary filter. The
+template is part of the value, so it is in the history (`C-c <` goes to
+the search without it) and filter commands keep it. `C-c C-k` with no
+search running and a template sets the slot to nil and runs the search.
+`quarry-grep--replace-p` says whether the slot is set.
+
+**Rendering.** The buffer text is what it is without a template. For
+each primary span of a line item with `:replacements`,
+`quarry-grep--put-replacement` puts `quarry-grep-replacement` (the new
+text) and `display` over the span (`quarry-grep--replace-display`); a switched-off
+match has `quarry-grep-replace-off` t and no `display`. Three buffer
+local counters feed the header and the status line:
+`quarry-grep--replace-total` and `quarry-grep--replace-on` (matches that
+have a new text, and those switched on) and `quarry-grep--replace-inexact`
+(lines without `:replacements`, which show as without a template). A
+file whose lines are all inexact is shown.
+
+**`x`.** `quarry-grep-toggle-filter` on a filter line works as before.
+During a preview that was not applied it goes to
+`quarry-grep--toggle-replacements`, which takes its target from
+`quarry-grep--replacement-target`: the matches (found through
+`quarry-grep-replacement`) of the line, or of the whole block when point
+is on a heading. On a match it switches that one, otherwise all of them
+(off when any is on, else on). Only `quarry-grep-replace-off` and
+`display` change, with `inhibit-read-only`, and the counters. Then point
+moves to the next visible line with a match.
+
+**Old module.** `quarry-grep--on-batch` checks the first items of a
+search that has a template (`quarry-grep--replace-unknown-p`): a kept
+line without `:inexact` that has no `:replacements` key (checked with
+`plist-member`; the key is present and nil for a line whose matches were
+all empty) means the module ignored `:replace`. The search is cancelled
+and run again without the template, which is not kept in the history,
+and a message says to rebuild the module.
+
+**Applying.** `quarry-grep--apply-refusal` returns why `C-c C-c` cannot
+run (no preview, applied, running, failed, cancelled, truncated, nothing
+switched on) and nil otherwise; `quarry-grep--applicable-p` is its
+negation and the menu's predicate. Then the stale check of `e` runs;
+stale files lead to the question to search again, and nothing is written
+either way (a modified visiting buffer would be saved with its edits).
+`quarry-grep--replace-work` reads the buffer, widened, into a list of
+(PATH . LINES) per file block, each line (BOL N OLD NEW): OLD is the text
+after the prefix, NEW the same with each switched-on span replaced by its
+`quarry-grep-replacement`, in ascending line order.
+
+`quarry-grep--replace-in-file` handles one file:
+
+- The target is the buffer that visits the file, or else a temporary
+  buffer filled with `insert-file-contents`, which decodes the file and
+  sets `buffer-file-coding-system`.
+- `quarry-grep--replace-lines` goes to each line N, counted from the
+  start of the widened buffer, and compares it with OLD. A mismatch is
+  rejected with "line changed since the search". A template has no
+  newline, so replacing a line never changes the line count. A line is
+  changed by `quarry-grep--replace-text`, which replaces only what
+  differs between old and new line, so markers (point) in the rest of
+  the line stay.
+- A visiting buffer is rejected as a whole when it is read-only or not up
+  to date with its file (a modified buffer never gets here: the stale
+  check refused it). Otherwise its changes are one undo step
+  (`with-undo-amalgamate`) and, when a line changed, `save-buffer` runs.
+  If `save-buffer` fails, the error rejects all the file's lines but the
+  buffer stays modified with the changes (backlog, "Replace: left out").
+- A temporary buffer is written with `write-region`, with
+  `coding-system-for-write` bound to the coding system it was read with.
+  `undecided` (a file with ASCII only) is changed to UTF-8 with the same
+  line ends (`quarry-grep--write-coding`), since the new text can hold
+  other characters. A character that the coding cannot encode rejects the
+  file's lines (checked with `unencodable-char-position`) instead of
+  writing `?` or a replacement.
+- A read or write error rejects all the file's lines with the error
+  message; the other files go on.
+
+`quarry-grep--apply` loops over the files with `inhibit-quit` t and
+looks at `quit-flag` after each file: `C-g` ends the loop with the
+files written so far. A message every 100 files shows the progress. Each
+line gets an overlay (`quarry-grep--mark-result`) with the property
+`quarry-grep-replaced` t, `quarry-grep-replace-result` `applied` or
+`rejected`, the face `quarry-grep-replace-applied` or
+`quarry-grep-replace-rejected` and `help-echo` (the reason). Then
+`quarry-grep--replace-applied` holds the plist `(:lines L :files F
+:rejected R :skipped S)` (`S` the files not processed after `C-g`); the
+status line and the echo area show it (`quarry-grep--applied-text`).
+While it is set, `x`, `C-c C-c` and `e` are refused; any search, `g`
+included, resets it and erases the overlays with the buffer.
+
+**Menu predicates.** `R` has none. `C-c C-c` uses
+`quarry-grep--applicable-p`. `x` uses `quarry-grep--toggle-at-point-p`:
+a filter line, or a preview that was not applied with a match to
+replace on the line or the heading at point. `C-c C-k` uses
+`quarry-grep--cancellable-p`: a running search with an open stream, or a
+preview. The commands check with the same functions or their helpers.
+
+#### Cost of large change sets
+
+Measured in task 6.
 
 ### Editing with wgrep
 

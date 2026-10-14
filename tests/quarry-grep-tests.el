@@ -3078,7 +3078,8 @@ wgrep are replaced, so the test does not depend on the environment."
     quarry-grep--wgrep-available-p quarry-grep--editable-p
     quarry-grep--earlier-search-p quarry-grep--later-search-p
     quarry-grep--other-filters-p quarry-grep--replace-p
-    quarry-grep--applicable-p)
+    quarry-grep--applicable-p quarry-grep--toggle-at-point-p
+    quarry-grep--cancellable-p)
   "The functions that say whether a command applies; none signals.")
 
 (ert-deftest quarry-test-grep-condition-at-point ()
@@ -3227,8 +3228,54 @@ wgrep are replaced, so the test does not depend on the environment."
                                            quarry-grep--later-search-p
                                            quarry-grep--other-filters-p
                                            quarry-grep--replace-p
-                                           quarry-grep--applicable-p))
+                                           quarry-grep--applicable-p
+                                           quarry-grep--toggle-at-point-p
+                                           quarry-grep--cancellable-p))
                          (funcall predicate)))))))
+
+(ert-deftest quarry-test-grep-condition-toggle-and-cancel ()
+  "The `x' and `C-c C-k' conditions follow the state and point."
+  (quarry-test-grep--with-tree (dir quarry-test-grep--apply-files)
+    (quarry-test-grep--search dir "foo_([0-9])")
+    (let ((filter (quarry-test-grep--filter-pos 0))
+          (result (quarry-test-grep--line-pos "a.txt" 1))
+          (heading (quarry-test-grep--heading-pos "a.txt")))
+      ;; No preview: `x' works on a filter line only; nothing to cancel.
+      (goto-char filter)
+      (should (quarry-grep--toggle-at-point-p))
+      (dolist (pos (list result heading (point-max)))
+        (goto-char pos)
+        (should-not (quarry-grep--toggle-at-point-p)))
+      (should-not (quarry-grep--cancellable-p))
+      ;; A preview: also on result lines and headings; `C-c C-k' leaves it.
+      (quarry-grep-replace "bar_$1")
+      (quarry-test-grep--wait)
+      (dolist (pos (list filter (quarry-test-grep--line-pos "a.txt" 1)
+                         (quarry-test-grep--heading-pos "a.txt")))
+        (goto-char pos)
+        (should (quarry-grep--toggle-at-point-p)))
+      (goto-char (point-max))
+      (should-not (quarry-grep--toggle-at-point-p))
+      (should (quarry-grep--cancellable-p))
+      ;; Running: cancel applies.
+      (quarry-test-grep--with-fake-stream
+        (quarry-grep-rerun)
+        (should (quarry-grep--cancellable-p))
+        (funcall (nth 2 (car quarry-test-grep--fake)) 'cancelled nil))
+      (should (quarry-grep--cancellable-p))
+      (quarry-test-grep--keys "g")
+      ;; Applied: `x' is refused, `C-c C-k' still leaves the preview.
+      (quarry-test-grep--answering t (quarry-grep-replace-apply))
+      (goto-char (quarry-test-grep--line-pos "a.txt" 1))
+      (should-not (quarry-grep--toggle-at-point-p))
+      (goto-char filter)
+      (should (quarry-grep--toggle-at-point-p))
+      (should (quarry-grep--cancellable-p)))
+    (let ((make-backup-files nil))
+      (quarry-grep-cancel)
+      (quarry-test-grep--wait)
+      (should-not (quarry-grep--replace-p))
+      (should-not (quarry-grep--cancellable-p)))))
 
 ;;;; The menu
 

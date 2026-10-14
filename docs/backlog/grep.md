@@ -209,9 +209,6 @@ it.
 
 Candidates, each one line; none is designed.
 
-- **Regexp replace with preview across files.** The strongest
-  candidate: the engine has the capture groups, and it complements
-  wgrep for mechanical changes.
 - **Saved and named searches**, and a list of search buffers, as rg.el
   has. Today there is one result buffer; `clone-buffer` keeps a result.
 - **Export to a plain `grep-mode` buffer**, as a bridge to embark and
@@ -232,3 +229,32 @@ project of its own; the search is fast enough below AOSP size), and
 
 Origin: evaluation before the grep spec (2026-10-10). Pick from here
 when the items above it in this file are done or a need shows up.
+
+## Replace: left out
+
+The replace spec (2026-10-14) left these out on purpose. Origin: spec
+2026-10-14-grep-replace, "Scope", "Out", and ADR 0021.
+
+- **Writing in the service** (option 3 of ADR 0021). Revisit if the
+  measured cost of large change sets (`docs/architecture/grep.md`, "Cost
+  of large change sets") is too high, for instance when applying 10,000
+  files takes over 30 seconds.
+- **Replace in the live grep** (`quarry-consult-grep`). The hand-over
+  (`C-c C-o`) to the result buffer is the way today. Revisit when going
+  through the result buffer first gets in the way.
+- **Filling the replaced text into wgrep's edit mode.** `e` stays as it
+  is and is refused during a preview. Revisit if one wants to edit a
+  replacement by hand line by line.
+- **Empty matches** (`^`, `\b`, `x*` matching nothing). The service drops
+  them, so they get no replacement; match something and use `$1`.
+  Revisit if inserting at line starts or word boundaries comes up often.
+- **Case-preserving replacement**, as `query-replace` does it. Revisit
+  on the first rename of a name that occurs in several cases.
+- **Undo for files that were not visited.** git is the undo. Revisit if
+  a change set is lost to a mistake; a backup of the changed files
+  before writing would be the way.
+
+A gap: if `save-buffer` fails after a visiting buffer was changed (a
+save hook, a full disk), the lines of that file are shown as rejected
+with the error, but the buffer stays modified with the changes. Revisit
+if it happens; undoing the change in that buffer would be the fix.

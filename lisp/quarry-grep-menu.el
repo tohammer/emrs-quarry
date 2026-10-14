@@ -99,8 +99,8 @@ goes to the command that is run."
     ("t" "edit the primary filter as literal" quarry-grep-change-literal)
     ("d" quarry-grep-change-directory :description quarry-grep-menu--directory)
     ("f" quarry-grep-change-files :description quarry-grep-menu--files)
-    ("C-c C-k" "cancel the search" quarry-grep-cancel
-     :inapt-if-not quarry-grep--running-p)]
+    ("C-c C-k" "cancel the search, or leave the preview" quarry-grep-cancel
+     :inapt-if-not quarry-grep--cancellable-p)]
    ["Switches"
     ("c" quarry-grep-cycle-case :description quarry-grep-menu--case)
     ("i" quarry-grep-toggle-ignore :description quarry-grep-menu--ignore)
@@ -127,8 +127,8 @@ goes to the command that is run."
    ["Filters"
     ("%" quarry-grep-toggle-regexp :description quarry-grep-menu--regexp
      :inapt-if-not quarry-grep--filter-at-point-p)
-    ("x" "switch the filter at point off or on" quarry-grep-toggle-filter
-     :inapt-if-not quarry-grep--filter-at-point-p)
+    ("x" "switch the filter, or the replacement, at point off or on"
+     quarry-grep-toggle-filter :inapt-if-not quarry-grep--toggle-at-point-p)
     ("!" "flip the filter at point" quarry-grep-flip-filter
      :inapt-if-not quarry-grep--filter-at-point-p)
     ("k" "remove the filter at point" quarry-grep-remove-filter

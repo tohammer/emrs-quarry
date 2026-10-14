@@ -301,7 +301,7 @@ in Emacs, with undo in those buffers afterwards.
   procedure, the overlays and faces of the results, the applied state,
   progress and `C-g`. *Done when* the applying, rejection, encoding and
   500-file tests pass. Needs task 3.
-- [ ] 5. **Menu, README, architecture.** Menu entries and predicate,
+- [x] 5. **Menu, README, architecture.** Menu entries and predicate,
   the menu test; README section on replace (keys, template syntax with
   the `${1}a` pitfall, that only previewed matches are written, that
   unvisited files have no undo); `docs/architecture/grep.md` and the

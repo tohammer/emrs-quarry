@@ -6,8 +6,9 @@ architecture.md or an ADR.
 ## Next
 
 - Rebuild the module (`M-x quarry-build-module`) and restart Emacs: path
-  globs and context lines need the new module. An older one refuses a
-  glob with `/` and shows no context.
+  globs, context lines and replace need the new module. An older one
+  refuses a glob with `/`, shows no context, and ignores a replace
+  template (quarry-grep detects that and says so).
 - Update the `emrs` package before that restart (`doom sync -u`, or pull
   a local checkout): `project-files` from the index now needs
   `emrs-call-stream-sync`, which an older `emrs.el` does not have.
@@ -18,10 +19,15 @@ architecture.md or an ADR.
 - Use quarry-grep daily and do its manual checks (grep backlog, "Manual
   checks not done yet"), including context lines (`C`, `B`, `A`), the
   menu (`?`) and path globs in the files prompt (`f`).
+- Do the manual checks of replace (spec 2026-10-14-grep-replace,
+  "Testing"): the faces `quarry-grep-replace-old` and `-new` in a GUI
+  frame and in a terminal; `x` through a long preview; a real `C-g`
+  during a large apply; a replace in files that are open in Emacs, then
+  undo in those buffers.
 - Next feature: pick from the survey (grep backlog, "Survey: find and
   grep features worth making native") or from "Further features weighed
-  before the spec", where regexp replace with preview is the strongest
-  candidate.
+  before the spec". Regexp replace is done; none of the candidates is
+  marked as the strongest.
 
 ## Watch out for
 
