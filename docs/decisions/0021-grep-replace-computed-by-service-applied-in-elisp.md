@@ -35,8 +35,8 @@ exactly the item text, and each match can be switched off. Applying is
 Elisp: an unmodified visiting buffer is changed and saved, any other
 file is read into a temporary buffer (`insert-file-contents`, which
 decodes as Emacs does), changed and written back with the coding system
-it was read with. Every line is compared with the text of the search
-before it is changed.
+it was read with (reading and writing: superseded by ADR 0022). Every
+line is compared with the text of the search before it is changed.
 
 A result that reached the line cap cannot be applied: only what was
 previewed is written.

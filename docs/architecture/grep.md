@@ -4,7 +4,7 @@ The interactive grep: first the Rust service (threads, messages, what is
 searched, order, cap and cancellation), then the Elisp side
 (`lisp/quarry-grep.el`). Part of [the architecture](../architecture.md).
 Results are edited through wgrep (ADR 0013) or replaced by a preview and
-Elisp (ADR 0021), described at the end.
+Elisp (ADRs 0021, 0022, 0023), described at the end.
 
 ## Threads
 
@@ -46,7 +46,8 @@ each match of the primary filter on the whole line that is not empty as
 a character range, found by the iteration that also gives `:spans`, so
 both lists have the same length and order. (A byte-level pattern such as
 `(?-u:\xA4)` can match inside a character; `line_spans` drops that span
-after mapping bytes to characters, and `replacements` drops it too.) A match's groups come from a search that starts at the
+after mapping bytes to characters, and `replacements` drops it too. A
+group that ends inside a character gives U+FFFD in the new text.) A match's groups come from a search that starts at the
 match. Inexact lines and context lines have no `:replacements`, and
 without `:replace` no line has them. A request is not checked for the
 template: every string is valid. An older module skips the unknown key
@@ -313,7 +314,10 @@ that (`quarry-grep--on-batch`, `quarry-grep--finish`,
 `quarry-grep--edit-restore`); the user's narrowing is theirs and stays. A
 new search and `e` widen for good.
 
-Commands read these properties and never the text (ADR 0012). The
+Commands read these properties and never parse the text (ADR 0012).
+The one use of the text is in applying a replacement, which compares
+each result line's text with the file's line and builds the new line
+from it (see "Replace", ADR 0023). The
 properties of a line cover its newline, so a line is identified at its
 first character.
 
@@ -517,7 +521,9 @@ newline is a `user-error`; so is a search without a primary filter. The
 template is part of the value, so it is in the history (`C-c <` goes to
 the search without it) and filter commands keep it. `C-c C-k` with no
 search running and a template sets the slot to nil and runs the search.
-`quarry-grep--replace-p` says whether the slot is set.
+`quarry-grep--replace-p` says whether the slot is set. `R`, like every
+command that changes the search, is refused while the results are
+edited with wgrep.
 
 **Rendering.** The buffer text is what it is without a template. For
 each primary span of a line item with `:replacements`,

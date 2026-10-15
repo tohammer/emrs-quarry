@@ -99,16 +99,26 @@ if [ "$mode" = replace ]; then
     status=0
     for run in 1 2; do
         for label in 1k-5 10k-5 1k-100k; do
+            # Not through a pipe: sh has no pipefail, and the exit status
+            # of Emacs says whether every file was as expected.
+            rc=0
             "$emacs" --batch -L "$emrs_el" -L "$out" \
                 -l "$out/replace-bench.elc" \
-                --eval "(quarry-replace-bench-run)" "$label" "$tmp" |
-                tee -a "$tmp/log" || status=1
+                --eval "(quarry-replace-bench-run)" "$label" "$tmp" \
+                >"$tmp/run.log" 2>&1 || rc=$?
+            cat "$tmp/run.log"
+            cat "$tmp/run.log" >>"$tmp/log"
+            [ "$rc" -eq 0 ] || status=1
         done
     done
     echo
     echo "Run  case      files  matches  preview(s)  work(s)  apply(s)  verified"
     grep '^RESULT' "$tmp/log" | awk '{ split($3,f,"="); split($4,m,"="); split($5,p,"="); split($6,w,"="); split($7,a,"=");
         split($8,v,"="); printf "%-4d %-9s %-6s %-8s %-11s %-8s %-9s %s\n", ++n, $2, f[2], m[2], p[2], w[2], a[2], v[2] }'
+    if [ "$(grep -c '^RESULT' "$tmp/log")" -ne 6 ]; then
+        echo "run-bench.sh: not every case printed a result" >&2
+        status=1
+    fi
     exit $status
 fi
 

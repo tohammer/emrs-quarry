@@ -1,7 +1,7 @@
 # 0022 — Grep replace reads files raw, writes them through a renamed file, and saves buffers without before-save hooks
 
 Date: 2026-10-15
-Status: accepted
+Status: accepted; amended by ADR 0023 (UTF-16, round-trip check, locks, cost with sync)
 
 ## Context
 

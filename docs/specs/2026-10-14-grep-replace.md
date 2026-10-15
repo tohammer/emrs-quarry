@@ -1,6 +1,6 @@
 # Grep: regexp replace with preview
 
-Status: approved
+Status: implemented
 Date: 2026-10-14
 
 ## Purpose
@@ -143,6 +143,13 @@ it does not follow the theme.
 
 ### Applying
 
+Deviations from the approved text, made after the two reviews and noted
+in place below: files are read raw and written through a renamed file,
+and open buffers are saved without the before-save hooks (ADR 0022);
+the round-trip check, the lock handling, the UTF-16 exemption and
+syncing as `write-region-inhibit-fsync` says (ADR 0023); `C-g` handling
+and how "written" is decided for a visiting buffer.
+
 `quarry-grep-replace-apply` is refused (`user-error`, saying why) when:
 there is no template, a search runs, the search failed or was
 cancelled, the summary says `truncated` (only what was previewed is
@@ -222,8 +229,7 @@ For each file block with switched-on matches, in buffer order:
    is untouched, so a full disk no longer truncates the file. A symbolic
    link is followed and stays a link. A file with more than one hard
    link, or for which the new file would have another owner or group, is
-   written in place, with its old bytes written back if that fails. A
-   file in a directory that cannot be written is rejected.)
+   written in place, with its old bytes written back if that fails.)
    (Changed after the second review: whether a visiting buffer's file
    was written is decided from the save, not from `buffer-modified-p`,
    which an `after-save-hook` can set again: a buffer-local
@@ -387,7 +393,7 @@ in Emacs, with undo in those buffers afterwards.
   the `${1}a` pitfall, that only previewed matches are written, that
   unvisited files have no undo); `docs/architecture/grep.md` and the
   table in `docs/architecture.md`. *Done when* the menu test passes and
-  `devflow:doc-checker` finds nothing missing. Can run in parallel with
+  a doc check of the branch finds nothing missing. Can run in parallel with
   task 6. Needs task 4.
 - [x] 6. **Measurement.** `bench/replace-bench.el` and its entry in
   `bench/run-bench.sh`; run it on 1,000 and 10,000 files and on 100,000

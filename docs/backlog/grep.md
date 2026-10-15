@@ -243,7 +243,8 @@ The replace spec (2026-10-14) left these out on purpose. Origin: spec
 - **Writing in the service** (option 3 of ADR 0021). Revisit if the
   measured cost of large change sets (`docs/architecture/grep.md`, "Cost
   of large change sets") is too high, for instance when applying 10,000
-  files takes over 30 seconds.
+  files takes over 30 seconds. With a sync of every file that was the
+  case on 2026-10-15; see "No sync before the rename by default" below.
 - **Replace in the live grep** (`quarry-consult-grep`). The hand-over
   (`C-c C-o`) to the result buffer is the way today. Revisit when going
   through the result buffer first gets in the way.
@@ -269,8 +270,9 @@ The replace spec (2026-10-14) left these out on purpose. Origin: spec
   replace branch (2026-10-15). Revisit if binary-ish text files are
   replaced in; the fix is the same rejection as for literal buffers.
 - **Leftover `.quarry-XXXXXX` files.** A crash between creating the new
-  file and the rename leaves the temporary file. Revisit on the first
-  leftover file.
+  file and the rename leaves the temporary file. Origin: second review
+  of the replace branch (2026-10-15). Revisit on the first leftover
+  file.
 - **Untested: the owner fallback and extended attributes.** Writing in
   place when the new file would get another owner or group needs a
   second user to test; extended attributes were only copied for files

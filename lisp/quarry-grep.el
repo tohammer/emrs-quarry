@@ -16,7 +16,8 @@
 ;; `quarry-grep-literal' and `quarry-grep-project' ask for a pattern,
 ;; file types and globs and a directory, `quarry-grep-dwim' takes the
 ;; symbol at point, and they show the matching lines in a result buffer,
-;; from which the search is changed and run again.
+;; from which the search is changed and run again, and the matches
+;; replaced after a preview (`R', `C-c C-c').
 ;;
 ;; The search runs in the `grep' service of the quarry module and its
 ;; results arrive as structured values.  The result buffer is therefore

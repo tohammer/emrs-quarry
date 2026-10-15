@@ -18,7 +18,8 @@ quarry is built on [emrs](https://github.com/tohammer/emrs), which runs the
 Rust side as a message-passing service outside the Emacs thread.
 
 Status: version 1. It was built and used on Linux only, with Emacs 31.1
-and, for the benchmark, Emacs 31.0.50. CI runs the ERT suite on Linux and
+and, for the file finder's benchmark, Emacs 31.0.50 (the replace
+benchmark ran on 31.1). CI runs the ERT suite on Linux and
 macOS with Emacs 30.1 and 31.1, and `cargo test` on Linux; beyond that,
 Emacs 30 and macOS have not been used by hand, and the watcher code for
 macOS is known only from those tests (`docs/backlog.md`). Windows is
@@ -32,7 +33,9 @@ terminal Emacs; the live grep by the ERT suite in batch and in the
 author's Doom setup. It has not been run in a GUI frame, its faces were not
 looked at in any theme, and it shares the Emacs 30 gap. Editing results
 with wgrep is untested on files with `\r\n` line ends and on files in
-encodings other than UTF-8.
+encodings other than UTF-8. Replace (`R`, `C-c C-c`) is tested by the
+ERT suite and the benchmark only: it has not been used by hand, and its
+faces have not been looked at in a GUI frame or a terminal.
 
 ## Requirements
 
@@ -752,7 +755,7 @@ text does not change; each match shows the old text struck through
 (`quarry-grep-replace-old`) followed by the new text
 (`quarry-grep-replace-new`). The header shows `→ TEMPLATE`, which `R`
 edits when clicked, and `N of M matches on`. Lines that cannot
-be replaced (shown cut, or not valid UTF-8) are shown as before and
+be replaced (shortened, or not valid UTF-8) are shown as before and
 counted in the status line.
 
 The template is the syntax of `rg -r`:
@@ -764,7 +767,7 @@ The template is the syntax of `rg -r`:
 | `$name`, `${name}` | the group named `name` (`(?P<name>...)`) |
 | `$$` | a dollar sign |
 
-A name runs as far as letters, digits and `_` go, so `$1a` is the group
+A name runs as far as ASCII letters, digits and `_` go, so `$1a` is the group
 named `1a`, which does not exist. Write `${1}a` for group 1 followed by
 `a`. A group that does not exist or did not take part gives empty text.
 A literal filter has only `$0`. A template cannot contain a newline.
@@ -839,7 +842,7 @@ preview keep the template and update the preview.
 
 The replace needs the new module: rebuild it with `M-x
 quarry-build-module` and restart Emacs. An older module is detected when
-`R` runs; the search then runs without the template and says to rebuild.
+the search with the template gets its first results; the search then runs without the template and says to rebuild.
 
 ### Live grep
 
@@ -1204,7 +1207,8 @@ script exits non-zero if quarry's p99 exceeds 50 ms (100k) or 150 ms (1m).
 
 `bench/run-bench.sh replace` measures grep's replace instead: it builds
 the release module, generates trees of 1,000 and 10,000 files with 5
-matched lines each and one of 1,000 files with 100,000 matches, and
+matched lines each and one of 1,000 files with 100 matched lines each
+(100,000 matches), and
 times the preview and the writing, twice each. Every file is compared
 with the expected content afterwards; the script exits non-zero when
 one differs. The trees go to a temporary directory under
@@ -1265,6 +1269,7 @@ cargo test              # Rust unit and service tests
 tests/run-ert.sh        # builds the module and runs the ERT suite in Emacs
 ERT_SELECTOR=cache tests/run-ert.sh   # only tests whose name matches the regexp
 bench/run-bench.sh      # benchmark, run by hand
+bench/run-bench.sh replace   # grep replace benchmark; checks every file
 QUARRY_TEST_LOAD_PATH=~/.emacs.d/straight/build/consult:~/.emacs.d/straight/build/compat tests/run-ert.sh
 ```
 

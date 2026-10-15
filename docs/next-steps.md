@@ -26,10 +26,17 @@ architecture.md or an ADR.
   undo in those buffers.
 - Next feature: pick from the survey (grep backlog, "Survey: find and
   grep features worth making native") or from "Further features weighed
-  before the spec". Regexp replace is done; none of the candidates is
-  marked as the strongest.
+  before the spec". Decide after a while of daily use; the survey's
+  second item, definitions across a project by pattern, is the cheapest
+  of the useful ones (Elisp and data only).
 
 ## Watch out for
+
+- Replace writes a file through a new file renamed over it and syncs
+  only as `write-region-inhibit-fsync` says (default t), as any Emacs
+  save (ADRs 0022, 0023). A power loss right after a replace can leave
+  empty files off ext4. Rerun `bench/run-bench.sh replace` after a change
+  to the write path; it checks every file.
 
 - emrs is pinned to a commit in `Cargo.toml`. Bump it deliberately; after a
   bump, rerun `tests/run-ert.sh`, which also picks up the matching `emrs.el`.
