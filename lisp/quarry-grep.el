@@ -587,13 +587,17 @@ replacement, the matches of a line with new texts get them."
             (put-text-property (+ text-start (car span)) (+ text-start (cadr span))
                                'face 'quarry-grep-match-secondary)))
         (when (and replace (not context))
-          (if (plist-member line :replacements)
-              (cl-loop for span in spans
-                       for new in (plist-get line :replacements)
-                       do (quarry-grep--put-replacement
-                           (+ text-start (car span)) (+ text-start (cadr span)) new))
-            ;; Without its new text: shortened or not UTF-8.
-            (cl-incf quarry-grep--replace-inexact)))))
+          (let ((replacements (plist-get line :replacements)))
+            (if (and (plist-member line :replacements)
+                     ;; The service sends one per span; a line where
+                     ;; they do not pair up is not touched.
+                     (= (length replacements) (length spans)))
+                (cl-loop for span in spans
+                         for new in replacements
+                         do (quarry-grep--put-replacement
+                             (+ text-start (car span)) (+ text-start (cadr span)) new))
+              ;; Without its new text: shortened or not UTF-8.
+              (cl-incf quarry-grep--replace-inexact))))))
     (put-text-property start (point) 'quarry-grep-file path)
     (insert (propertize "\n" 'quarry-grep-separator t))
     (cl-incf quarry-grep--files)
@@ -1222,9 +1226,7 @@ With FOUND, tell `next-error' about the visit."
          (path (get-text-property bol 'quarry-grep-file))
          (line (get-text-property bol 'quarry-grep-line))
          (column (or (get-text-property bol 'quarry-grep-column) 0))
-         ;; Not `expand-file-name': a path like "~/x" must stay below
-         ;; the search directory.
-         (file (concat default-directory path)))
+         (file (quarry-grep--result-file path)))
     (unless (file-exists-p file)
       (user-error "File no longer exists: %s" file))
     (let ((buffer (find-file-noselect file)))
@@ -2004,9 +2006,7 @@ and the lines whose text is not exactly the file's line
   (while (not (eobp))
     (let* ((bol (point))
            (path (get-text-property bol 'quarry-grep-file))
-           ;; Not `expand-file-name': a path like "~/x" must stay below
-           ;; the search directory.
-           (file (and path (concat default-directory path)))
+           (file (and path (quarry-grep--result-file path)))
            (text (and (get-text-property bol 'quarry-grep-line)
                       (not (get-text-property bol 'quarry-grep-inexact))
                       (next-single-property-change bol 'quarry-grep-prefix nil
@@ -2088,6 +2088,14 @@ changes were committed."
     (setq quarry-grep--edited t))
   (quarry-grep--update-status))
 
+(defun quarry-grep--result-file (path)
+  "Return the file name of the result file PATH.
+PATH is relative to the directory of the current search, which stays
+the base when `default-directory' of the result buffer changes."
+  ;; Not `expand-file-name': a path like "~/x" must stay below the
+  ;; search directory.
+  (concat (quarry-grep--search-dir quarry-grep--current) path))
+
 (defun quarry-grep--file-mtime (file)
   "Return the modification time of FILE in milliseconds, rounded down.
 That is how the service reports it.  Nil when FILE does not exist."
@@ -2114,7 +2122,7 @@ as unchanged."
       (dolist (block (quarry-grep--blocks))
         (let* ((path (get-text-property (car block) 'quarry-grep-file))
                (seen (get-text-property (car block) 'quarry-grep-mtime))
-               (file (concat default-directory path))
+               (file (quarry-grep--result-file path))
                (now (quarry-grep--file-mtime file)))
           (when (or (null now)
                     (and seen (/= seen now))
@@ -2308,6 +2316,20 @@ replaced, else the reason why not."
                quarry-grep--line-changed)))
          lines)))))
 
+(defconst quarry-grep--ambiguous
+  "the file's encoding is ambiguous (UTF-8 mixed with other bytes)"
+  "The reason for the lines of a file that is UTF-8 with stray bytes.")
+
+(defconst quarry-grep--utf-8-sequence
+  (concat "[\xc2-\xdf][\x80-\xbf]"
+          "\\|\xe0[\xa0-\xbf][\x80-\xbf]"
+          "\\|[\xe1-\xec\xee\xef][\x80-\xbf][\x80-\xbf]"
+          "\\|\xed[\x80-\x9f][\x80-\xbf]"
+          "\\|\xf0[\x90-\xbf][\x80-\xbf][\x80-\xbf]"
+          "\\|[\xf1-\xf3][\x80-\xbf][\x80-\xbf][\x80-\xbf]"
+          "\\|\xf4[\x80-\x8f][\x80-\xbf][\x80-\xbf]")
+  "A regexp for a valid UTF-8 sequence of two or more bytes, in unibyte text.")
+
 (defun quarry-grep--write-coding (coding)
   "Return the coding system to write a file with that was read with CODING.
 A file that held only ASCII was read as `undecided'; it is written as
@@ -2316,38 +2338,172 @@ UTF-8, the encoding of the new text, with its line ends."
       (coding-system-change-text-conversion coding 'utf-8)
     coding))
 
+(defun quarry-grep--read-file (file)
+  "Insert FILE into the current buffer, which is empty, and decode it.
+The bytes are decoded with the coding system `insert-file-contents'
+would choose, but nothing else converts them: no format decoding, no
+`after-insert-file-functions', no handler of compressed or encrypted
+files.  So the lines are the file's lines.  Return (CODING . UTF-8):
+the coding system they were decoded with, and non-nil when the bytes
+hold a valid UTF-8 sequence of more than one byte."
+  (set-buffer-multibyte nil)
+  (insert-file-contents-literally file)
+  (let ((utf-8 (let ((case-fold-search nil))
+                 (re-search-forward quarry-grep--utf-8-sequence nil t))))
+    ;; Each byte becomes a character of its own, which the decoding reads.
+    (set-buffer-multibyte 'to)
+    (decode-coding-inserted-region (point-min) (point-max) file)
+    (cons last-coding-system-used (and utf-8 t))))
+
+(defun quarry-grep--write-region (file)
+  "Write the current buffer to FILE as it is, with no conversion.
+The buffer holds bytes, as eight-bit characters or ASCII."
+  (let ((coding-system-for-write 'no-conversion)
+        (write-region-annotate-functions nil)
+        (write-region-post-annotation-function nil)
+        (buffer-file-format nil))
+    (write-region nil nil file nil 'silent)))
+
+(defun quarry-grep--write-in-place (file)
+  "Write the current buffer over FILE in place, as `quarry-grep--write-region'.
+When that fails, write the bytes FILE had back and signal the error."
+  (let ((old (with-temp-buffer
+               (set-buffer-multibyte nil)
+               (insert-file-contents-literally file)
+               (buffer-string))))
+    (condition-case err
+        (quarry-grep--write-region file)
+      (error
+       (with-temp-buffer
+         (set-buffer-multibyte nil)
+         (insert old)
+         (ignore-errors (quarry-grep--write-region file)))
+       (signal (car err) (cdr err))))))
+
+(defun quarry-grep--write-file (file)
+  "Write the current buffer, the bytes of FILE's new content, over FILE.
+They go into a new file in the directory of FILE, which gets the modes
+and extended attributes of FILE and is renamed over it; a symbolic link
+is followed and stays a link.  A file with more than one name, or one
+that the new file would give another owner or group, is written in
+place instead; when that fails, its old bytes are written back.  Signal
+an error when FILE cannot be written; it is then as it was.  \\`C-g'
+does not interrupt the writing."
+  (let* ((inhibit-quit t)
+         ;; Only a link as the last part of the name matters for the
+         ;; renaming; `file-truename' of every name costs.
+         (target (if (file-symlink-p file) (file-truename file) file))
+         (attributes (file-attributes target 'integer)))
+    (unless (and attributes (file-writable-p target))
+      (signal 'file-error (list "Writing" "Permission denied" target)))
+    (if (> (file-attribute-link-number attributes) 1)
+        (quarry-grep--write-in-place target)
+      (let ((temp (make-temp-file (expand-file-name ".quarry-" (file-name-directory target)))))
+        (condition-case err
+            (let ((new (file-attributes temp 'integer)))
+              (if (not (and (eql (file-attribute-user-id new) (file-attribute-user-id attributes))
+                            (eql (file-attribute-group-id new) (file-attribute-group-id attributes))))
+                  (progn
+                    (delete-file temp)
+                    (quarry-grep--write-in-place target))
+                (quarry-grep--write-region temp)
+                (set-file-extended-attributes temp (file-extended-attributes target))
+                (set-file-modes temp (file-modes target))
+                (rename-file temp target t)))
+          (error
+           (ignore-errors (delete-file temp))
+           (signal (car err) (cdr err))))))))
+
+(defun quarry-grep--replace-in-buffer (lines)
+  "Replace LINES in the current buffer, which visits a file, and save it.
+LINES and the result are as for `quarry-grep--replace-lines'.  The
+changes are one undo step.  The buffer is saved without
+`before-save-hook' and `require-final-newline'.  When the changes or the
+saving fail or are interrupted before the file is written, they are
+undone and the buffer is unmodified again; the error or `quit' is
+signalled.  A `quit' after the file was written, in `after-save-hook',
+is kept in `quit-flag' for the caller."
+  (cond
+   (buffer-read-only
+    (make-list (length lines) "buffer is read-only"))
+   ((not (verify-visited-file-modtime))
+    (make-list (length lines) "buffer is not up to date with its file"))
+   ((and (or (not enable-multibyte-characters)
+             (eq (coding-system-type buffer-file-coding-system) 'raw-text))
+         (cl-some (lambda (line) (string-match-p "[^[:ascii:]]" (nth 3 line))) lines))
+    ;; Its bytes are characters: new text would be written as Emacs
+    ;; holds it, not as the file's encoding.
+    (make-list (length lines) "buffer is visited literally"))
+   (t
+    (let ((group (prepare-change-group))
+          (modified (buffer-modified-p))
+          ;; As `with-undo-amalgamate': the undo list is not truncated
+          ;; in the middle, so the group can be undone.
+          (undo-outer-limit nil)
+          (undo-limit most-positive-fixnum)
+          (undo-strong-limit most-positive-fixnum)
+          (done nil))
+      (unwind-protect
+          (progn
+            (activate-change-group group)
+            (let ((results (let ((inhibit-quit nil))
+                             (quarry-grep--replace-lines lines))))
+              (when (memq nil results)
+                (condition-case err
+                    (let ((inhibit-quit nil)
+                          (before-save-hook nil)
+                          (require-final-newline nil))
+                      (save-buffer))
+                  ((quit error)
+                   ;; The buffer is unmodified once its file is written.
+                   (cond ((buffer-modified-p)
+                          (signal (car err) (cdr err)))
+                         ((eq (car err) 'quit)
+                          (setq quit-flag t))
+                         (t
+                          (message "Error after saving %s: %s"
+                                   (buffer-name) (error-message-string err)))))))
+              (setq done t)
+              results))
+        (if done
+            (progn
+              (accept-change-group group)
+              (undo-amalgamate-change-group group))
+          (cancel-change-group group)
+          (restore-buffer-modified-p modified)))))))
+
 (defun quarry-grep--replace-in-file (file lines)
   "Replace LINES in FILE; return the result of each line.
 LINES and the result are as for `quarry-grep--replace-lines'.  The
-buffer that visits FILE is changed and saved; otherwise FILE is read
-into a temporary buffer and written back with the coding system it was
-read with.  When FILE cannot be read or written, every line has the
-error message as its reason."
+buffer that visits FILE is changed and saved
+\(`quarry-grep--replace-in-buffer').  Otherwise FILE is read into a
+temporary buffer (`quarry-grep--read-file') and written back with the
+coding system it was read with (`quarry-grep--write-file'); a file read
+as other than UTF-8 that holds UTF-8 sequences is left alone.  When FILE
+cannot be read or written, every line has the error message as its
+reason.  \\`C-g' signals `quit' while FILE is read, changed or saved,
+with nothing written; it waits while FILE is written."
   (condition-case err
       (if-let* ((buffer (find-buffer-visiting file)))
           (with-current-buffer buffer
-            (cond (buffer-read-only
-                   (make-list (length lines) "buffer is read-only"))
-                  ((not (verify-visited-file-modtime buffer))
-                   (make-list (length lines) "buffer is not up to date with its file"))
-                  (t
-                   (let ((results (with-undo-amalgamate
-                                    (quarry-grep--replace-lines lines))))
-                     (when (memq nil results)
-                       (save-buffer))
-                     results))))
+            (quarry-grep--replace-in-buffer lines))
         (with-temp-buffer
-          (insert-file-contents file)
-          (let* ((coding (quarry-grep--write-coding buffer-file-coding-system))
-                 (results (let ((inhibit-modification-hooks t))
-                            (quarry-grep--replace-lines lines))))
-            (when (memq nil results)
-              (when-let* ((pos (unencodable-char-position (point-min) (point-max) coding)))
-                (error "The new text has a character that %s cannot encode: %c"
-                       coding (char-after pos)))
-              (let ((coding-system-for-write coding))
-                (write-region nil nil file nil 'silent)))
-            results)))
+          (pcase-let ((`(,coding . ,utf-8) (let ((inhibit-quit nil))
+                                             (quarry-grep--read-file file))))
+            (if (and utf-8 (not (memq (coding-system-type coding) '(utf-8 undecided))))
+                ;; New UTF-8 text would be written in the other encoding.
+                (make-list (length lines) quarry-grep--ambiguous)
+              (let* ((coding (quarry-grep--write-coding coding))
+                     (results (let ((inhibit-quit nil)
+                                    (inhibit-modification-hooks t))
+                                (quarry-grep--replace-lines lines))))
+                (when (memq nil results)
+                  (when-let* ((pos (unencodable-char-position (point-min) (point-max) coding)))
+                    (error "The new text has a character that %s cannot encode: %c"
+                           coding (char-after pos)))
+                  (encode-coding-region (point-min) (point-max) coding)
+                  (quarry-grep--write-file file))
+                results)))))
     (error (make-list (length lines) (error-message-string err)))))
 
 (defun quarry-grep--mark-result (bol reason)
@@ -2384,7 +2540,8 @@ other files are read, changed and written back in their encoding, with
 no undo.  When a result file changed since the search, ask whether to
 search again instead.  Afterwards each result line shows whether it was
 applied, and \\<quarry-grep-mode-map>\\[quarry-grep-rerun] searches again.
-\\`C-g' stops after the file being written."
+\\`C-g' stops: a file being read, changed or saved is left as it was,
+one being written is finished first."
   (interactive nil quarry-grep-mode)
   (quarry-grep--current)
   (when-let* ((refusal (quarry-grep--apply-refusal)))
@@ -2420,14 +2577,19 @@ applied, and \\<quarry-grep-mode-map>\\[quarry-grep-rerun] searches again.
         (stopped nil))
     (save-restriction
       (widen)
-      ;; `C-g' only sets `quit-flag'; it is looked at between files.
+      ;; Here `C-g' only sets `quit-flag', which is looked at after each
+      ;; file.  `quarry-grep--replace-in-file' lets it quit while a file
+      ;; is read, changed or saved, which changes nothing, but not while
+      ;; one is written.
       (let ((inhibit-quit t))
         (while (and work (not stopped))
           (pcase-let* ((`(,path . ,lines) (pop work))
-                       ;; Not `expand-file-name': a path like "~/x" must
-                       ;; stay below the search directory.
-                       (results (quarry-grep--replace-in-file
-                                 (concat default-directory path) lines)))
+                       (results (condition-case nil
+                                    (quarry-grep--replace-in-file
+                                     (quarry-grep--result-file path) lines)
+                                  (quit
+                                   (setq stopped t)
+                                   (make-list (length lines) "stopped")))))
             (cl-loop for line in lines
                      for reason in results
                      do (quarry-grep--mark-result (car line) reason)

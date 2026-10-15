@@ -789,19 +789,39 @@ preview keep the template and update the preview.
 - Every line is compared with the text the search found and rejected
   when it differs, or when its buffer is read-only or not up to date
   with its file, when the file cannot be read or written, or when the
-  new text has a character that the file's encoding cannot hold. The
-  other lines go on. Afterwards each result line is marked as applied or
+  new text has a character that the file's encoding cannot hold. A file
+  that Emacs reads as Latin-1 or another 8-bit encoding but that holds
+  UTF-8 text (UTF-8 with a stray byte) is not changed: its lines are
+  rejected as of ambiguous encoding. A buffer visited literally
+  (`find-file-literally`, or with the coding system `no-conversion` or
+  `raw-text`) takes only ASCII new text; with other new text its lines
+  are rejected. The other lines and files go on. Afterwards each result line is marked as applied or
   rejected (the reason is in its `help-echo`; faces
   `quarry-grep-replace-applied` and `quarry-grep-replace-rejected`), and
   the echo area says `Replaced N lines in F files; R rejected`. `g`
   searches again and shows what still matches; until then `x`, `C-c C-c`
-  and `e` are refused. `C-g` stops after the file being written; the
-  files written stay written.
+  and `e` are refused. `C-g` stops: a file that is being written is
+  finished first, a buffer that is being saved gets its old text back,
+  and the files written stay written.
 - A file that an Emacs buffer visits is changed in that buffer and
-  saved with `save-buffer`, so your save hooks run and a backup file may
-  be made. It is one undo step in that buffer. Other files are read,
-  changed and written back in their own encoding, line ends and byte
-  order mark, with no undo: use git.
+  saved with `save-buffer`, without `before-save-hook` (so no formatter
+  or `delete-trailing-whitespace` on save) and without
+  `require-final-newline`; `after-save-hook` runs and a backup file may
+  be made. It is one undo step in that buffer. When the saving fails or
+  is stopped, the buffer gets its old text back, unmodified, and the
+  file's lines are rejected.
+- Other files are read as their bytes, decoded as Emacs would decode
+  them but with no format conversion (such as `text/enriched`), changed,
+  and written back in their own encoding, line ends and byte order mark,
+  with no undo: use git. The new content goes to a temporary file in the
+  same directory, which gets the file's permissions and is renamed over
+  the file, so a failed write leaves the file as it was. That needs a
+  writable directory: a file in a directory you cannot write is
+  rejected. A symbolic link is followed and stays a link; the file it
+  points to is replaced. A file with more than one hard link, or one
+  owned by another user or group than the new file would be, is written
+  in place instead, so that the links and the owner stay; if that write
+  fails, the old content is written back.
 - Empty matches (`^`, `\b`, `x*` matching nothing) are not replaced.
   To insert text at the start of lines, match something: `^(.)` with
   `PREFIX$1`.

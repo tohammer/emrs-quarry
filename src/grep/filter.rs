@@ -367,14 +367,20 @@ impl Filters {
     /// not exist or did not take part gives the empty string). `text` is the whole line without terminator.
     ///
     /// One entry per primary span of [`Filters::line_spans`]`(text, text.len())`, in the same order: the
-    /// non-empty matches of the primary filter on the whole line. Each match is found by the same iteration as
-    /// there, and its groups by a search that starts at it, which sees the line before it as the first did.
+    /// matches of the primary filter on the whole line that are not empty as character ranges. (A byte-level
+    /// pattern such as `(?-u:\xA4)` can match inside a character; that span is dropped there, so it is here.)
+    /// Each match is found by the same iteration as there, and its groups by a search that starts at it, which
+    /// sees the line before it as the first did.
     pub fn replacements(&self, text: &str, template: &[u8]) -> Vec<String> {
         let haystack = text.as_bytes();
         // The error type is `NoError`, as in `find_before`.
         let Ok(mut caps) = self.primary.new_captures() else { return Vec::new() };
+        let offsets = CharOffsets::new(text);
         let mut found = Vec::new();
         for (start, end) in find_all(&self.primary, haystack) {
+            if offsets.at(start) == offsets.at(end) {
+                continue;
+            }
             let matched = self.primary.captures_at(haystack, start, &mut caps).unwrap_or(false);
             debug_assert!(matched && caps.get(0) == Some(Match::new(start, end)));
             let mut new = Vec::new();
@@ -837,6 +843,10 @@ mod tests {
         // The interpolation sees the whole line: `$` and `\b` as in the matching.
         let f = compile(&[line("(\\w+)$", true)]);
         assert_eq!(replaced(&f, "ab cd", "[$1]"), ["[cd]"]);
+        // A byte-level match inside a character is no span, so it has no replacement either.
+        let f = compile(&[line("(?-u:\\xA4)|x", true)]);
+        assert_eq!(check(&f, "äx"), ["x"]);
+        assert_eq!(replaced(&f, "äx", "<$0>"), ["<x>"]);
     }
 
     #[test]

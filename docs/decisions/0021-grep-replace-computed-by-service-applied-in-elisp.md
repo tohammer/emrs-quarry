@@ -1,7 +1,7 @@
 # 0021 — Grep replace: the service computes the new text, Elisp previews and writes it
 
 Date: 2026-10-14
-Status: accepted
+Status: accepted; reading and writing superseded by ADR 0022
 
 ## Context
 

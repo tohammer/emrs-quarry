@@ -259,7 +259,21 @@ The replace spec (2026-10-14) left these out on purpose. Origin: spec
   a change set is lost to a mistake; a backup of the changed files
   before writing would be the way.
 
-A gap: if `save-buffer` fails after a visiting buffer was changed (a
-save hook, a full disk), the lines of that file are shown as rejected
-with the error, but the buffer stays modified with the changes. Revisit
-if it happens; undoing the change in that buffer would be the fix.
+## Replace: deferred from the review
+
+- **A file decoded as `raw-text` takes non-ASCII new text.** A file that
+  no buffer visits and that Emacs decodes as `raw-text` (no UTF-8
+  sequence in it, so the ambiguity check of ADR 0022 does not fire)
+  gets new non-ASCII text as Emacs holds it. Open buffers visited
+  literally are rejected already. Origin: fix of the review of the
+  replace branch (2026-10-15). Revisit if binary-ish text files are
+  replaced in; the fix is the same rejection as for literal buffers.
+- **Leftover `.quarry-XXXXXX` files and fsync.** A crash between
+  creating the new file and the rename leaves the temporary file; the
+  new file is synced only as `write-region-inhibit-fsync` says (ADR
+  0022). Revisit on the first leftover file or lost write.
+- **Untested: the owner fallback and extended attributes.** Writing in
+  place when the new file would get another owner or group needs a
+  second user to test; extended attributes were only copied for files
+  without ACLs. Origin: as above. Revisit on a shared or SELinux
+  system.

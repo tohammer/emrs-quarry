@@ -4134,5 +4134,274 @@ and have the face of its result."
           (should (equal (list path (quarry-test-grep--bytes dir path))
                          (list path expected))))))))
 
+(ert-deftest quarry-test-grep-replace-apply-no-conversion ()
+  "A file is read and written as its bytes: no format, hook or annotation runs."
+  (let ((enriched "Content-Type: text/enriched\nText-Width: 70\n\nfoo\n\nfoo <bold>x</bold>\n\nfoo\n"))
+    (quarry-test-grep--with-replace (dir `(("e.txt" . ,enriched)) "foo" "bar")
+      (let ((after-insert-file-functions
+             (list (lambda (length) (goto-char (point-min)) (insert "inserted\n") (+ length 9))))
+            (write-region-annotate-functions
+             (list (lambda (_start _end) '((1 . "annotated\n"))))))
+        (should (equal (quarry-test-grep--apply t) '("Replace 3 matches on 3 lines in 1 file? "))))
+      (should (equal (quarry-test-grep--bytes dir "e.txt")
+                     (string-replace "foo" "bar" enriched)))
+      (should (equal (mapcar (lambda (result) (nth 2 result)) (quarry-test-grep--replace-results))
+                     '(applied applied applied))))))
+
+(ert-deftest quarry-test-grep-replace-apply-ambiguous-encoding ()
+  "A file read as Latin-1 that holds UTF-8 is not written."
+  (quarry-test-grep--with-tree (dir '(("u.txt" . "")))
+    (let ((make-backup-files nil)
+          (bytes "\xc3\xbc foo_1\nfoo_2\nbad \xff\n"))
+      (quarry-test-grep--write-bytes dir "u.txt" bytes)
+      (quarry-test-grep--search dir "foo_([0-9])")
+      (quarry-grep-replace "bär_$1")
+      (quarry-test-grep--wait)
+      (quarry-test-grep--apply t)
+      (should (equal (quarry-test-grep--bytes dir "u.txt") bytes))
+      (should (equal (quarry-test-grep--replace-results)
+                     (mapcar (lambda (n)
+                               (list "u.txt" n 'rejected
+                                     "the file's encoding is ambiguous (UTF-8 mixed with other bytes)"))
+                             '(1 2)))))))
+
+(ert-deftest quarry-test-grep-replace-apply-unencodable ()
+  "New text that the file's encoding cannot hold rejects the file's lines."
+  (quarry-test-grep--with-tree (dir '(("latin.txt" . "")))
+    (let ((make-backup-files nil)
+          (bytes "caf\xe9 x\nfoo_1\nfoo_2\n"))
+      (quarry-test-grep--write-bytes dir "latin.txt" bytes)
+      (quarry-test-grep--search dir "foo_([0-9])")
+      (quarry-grep-replace "€_$1")
+      (quarry-test-grep--wait)
+      (quarry-test-grep--apply t)
+      (should (equal (quarry-test-grep--bytes dir "latin.txt") bytes))
+      (let ((results (quarry-test-grep--replace-results)))
+        (should (equal (mapcar (lambda (result) (seq-take result 3)) results)
+                       '(("latin.txt" 2 rejected) ("latin.txt" 3 rejected))))
+        (dolist (result results)
+          (should (string-match-p "\\`The new text has a character that .*latin-1.* cannot encode: €\\'"
+                                  (nth 3 result))))))))
+
+(ert-deftest quarry-test-grep-replace-apply-save-fails ()
+  "A buffer that cannot be saved gets its old text back, unmodified."
+  (skip-unless (not (zerop (user-uid))))
+  (quarry-test-grep--with-replace (dir '(("a.txt" . "foo_1\n") ("c.txt" . "foo_2\nfoo_3\n"))
+                                       "foo_([0-9])" "bar_$1")
+    (let* ((c (expand-file-name "c.txt" dir))
+           (buffer (find-file-noselect c))
+           (undo (buffer-local-value 'buffer-undo-list buffer))
+           (asked nil))
+      (set-file-modes c #o444)
+      (unwind-protect
+          (progn
+            (with-current-buffer buffer
+              (setq buffer-read-only nil))
+            ;; No to "try to save anyway?".
+            (cl-letf (((symbol-function 'yes-or-no-p)
+                       (lambda (prompt) (push prompt asked) nil)))
+              (quarry-test-grep--apply t))
+            (should (string-match-p "write-protected" (car asked)))
+            (with-current-buffer buffer
+              (should (equal (buffer-string) "foo_2\nfoo_3\n"))
+              (should-not (buffer-modified-p))
+              (should (equal buffer-undo-list undo)))
+            (should (equal (quarry-test-grep--bytes dir "c.txt") "foo_2\nfoo_3\n"))
+            (should (equal (quarry-test-grep--bytes dir "a.txt") "bar_1\n"))
+            (let ((results (quarry-test-grep--replace-results)))
+              (should (equal (mapcar (lambda (result) (seq-take result 3)) results)
+                             '(("a.txt" 1 applied) ("c.txt" 1 rejected) ("c.txt" 2 rejected))))
+              (should (string-match-p "allowed to write" (nth 3 (nth 1 results)))))
+            (should (string-match-p "\nReplaced 1 line in 1 file; 2 rejected\\'"
+                                    (quarry-test-grep--status))))
+        (set-file-modes c #o644)))))
+
+(ert-deftest quarry-test-grep-replace-apply-quit-in-save ()
+  "C-g while a buffer is saved restores it and stops; after the writing it stops."
+  ;; Before the file is written: from `write-file-functions'.
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
+    (let ((buffer (find-file-noselect (expand-file-name "b.txt" dir))))
+      (with-current-buffer buffer
+        ;; As C-g: quits at the next chance, unless quitting is inhibited.
+        (add-hook 'write-file-functions (lambda () (setq quit-flag t) (identity nil)) nil t))
+      (quarry-test-grep--apply t)
+      (should-not quit-flag)
+      (with-current-buffer buffer
+        (should (equal (buffer-string) "x foo_5\n"))
+        (should-not (buffer-modified-p)))
+      (should (equal (quarry-test-grep--bytes dir "b.txt") "x foo_5\n"))
+      (should (equal (quarry-test-grep--bytes dir "a.txt") "bar_1 and bar_2\nnothing\nbar_3 bar_4\n"))
+      (should (equal (quarry-test-grep--bytes dir "c.txt") "keep\nfoo_6 end\nfoo_7\nlast line\n"))
+      (should (equal (quarry-test-grep--replace-results)
+                     '(("a.txt" 1 applied "replaced") ("a.txt" 3 applied "replaced")
+                       ("b.txt" 1 rejected "stopped"))))
+      (should (string-match-p
+               "\nReplaced 2 lines in 1 file; 1 rejected; stopped, 2 files not processed\\'"
+               (quarry-test-grep--status)))))
+  ;; After the file is written: from `after-save-hook'; the file counts.
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
+    (let ((buffer (find-file-noselect (expand-file-name "b.txt" dir))))
+      (with-current-buffer buffer
+        (add-hook 'after-save-hook (lambda () (setq quit-flag t) (identity nil)) nil t))
+      (quarry-test-grep--apply t)
+      (should-not quit-flag)
+      (with-current-buffer buffer
+        (should (equal (buffer-string) "x bar_5\n"))
+        (should-not (buffer-modified-p)))
+      (should (equal (quarry-test-grep--bytes dir "b.txt") "x bar_5\n"))
+      (should (equal (quarry-test-grep--bytes dir "c.txt") "keep\nfoo_6 end\nfoo_7\nlast line\n"))
+      (should (string-match-p
+               "\nReplaced 3 lines in 2 files; 0 rejected; stopped, 2 files not processed\\'"
+               (quarry-test-grep--status))))))
+
+(ert-deftest quarry-test-grep-replace-apply-undo ()
+  "The changes to a visiting buffer are one undo step."
+  (quarry-test-grep--with-replace (dir '(("c.txt" . "foo_1\nfoo_2 foo_3\n")) "foo_([0-9])" "bar_$1")
+    (let ((buffer (find-file-noselect (expand-file-name "c.txt" dir))))
+      (quarry-test-grep--apply t)
+      (with-current-buffer buffer
+        (should (equal (buffer-string) "bar_1\nbar_2 bar_3\n"))
+        (let ((pending-undo-list buffer-undo-list))
+          (while (and pending-undo-list (null (car pending-undo-list)))
+            (pop pending-undo-list))
+          (undo-more 1))
+        (should (equal (buffer-string) "foo_1\nfoo_2 foo_3\n"))))))
+
+(ert-deftest quarry-test-grep-replace-apply-literal-buffer ()
+  "A buffer visited literally takes ASCII new text only."
+  (quarry-test-grep--with-replace (dir '(("a.txt" . "foo_1\n") ("b.txt" . "foo_2\n"))
+                                       "foo_([0-9])" "bär_$1")
+    (find-file-literally (expand-file-name "a.txt" dir))
+    (with-current-buffer (find-file-noselect (expand-file-name "b.txt" dir))
+      (setq buffer-file-coding-system 'no-conversion))
+    (quarry-test-grep--apply t)
+    (should (equal (quarry-test-grep--bytes dir "a.txt") "foo_1\n"))
+    (should (equal (quarry-test-grep--bytes dir "b.txt") "foo_2\n"))
+    (should (equal (quarry-test-grep--replace-results)
+                   '(("a.txt" 1 rejected "buffer is visited literally")
+                     ("b.txt" 1 rejected "buffer is visited literally"))))
+    ;; ASCII is the same in every encoding.
+    (quarry-grep-replace "bar_$1")
+    (quarry-test-grep--wait)
+    (quarry-test-grep--apply t)
+    (should (equal (quarry-test-grep--bytes dir "a.txt") "bar_1\n"))
+    (should (equal (quarry-test-grep--bytes dir "b.txt") "bar_2\n"))))
+
+(ert-deftest quarry-test-grep-replace-apply-save-hooks ()
+  "A buffer is saved without `before-save-hook' and a final newline; after it runs."
+  (quarry-test-grep--with-replace (dir '(("c.el" . "foo_1\nfoo_2")) "foo_([0-9])" "bar_$1")
+    (let ((buffer (find-file-noselect (expand-file-name "c.el" dir)))
+          (after nil))
+      (with-current-buffer buffer
+        (should require-final-newline)
+        (add-hook 'before-save-hook
+                  (lambda () (goto-char (point-min)) (insert ";; hook\n"))
+                  nil t)
+        (add-hook 'after-save-hook (lambda () (setq after t)) nil t))
+      (quarry-test-grep--apply t)
+      (should (equal (quarry-test-grep--bytes dir "c.el") "bar_1\nbar_2"))
+      (should after)
+      (with-current-buffer buffer
+        (should (equal (buffer-string) "bar_1\nbar_2"))
+        (should-not (buffer-modified-p))))))
+
+(ert-deftest quarry-test-grep-replace-apply-unpaired-replacements ()
+  "A line whose new texts do not pair up with its matches cannot be replaced."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-test-grep--with-fake-stream
+      (quarry-grep "needle" nil dir)
+      (set-buffer (quarry-test-grep--buffer))
+      (funcall (nth 2 (car quarry-test-grep--fake)) 'done nil)
+      (quarry-grep-replace "x")
+      (funcall (nth 1 (car quarry-test-grep--fake))
+               (list (list :file :path "a.txt" :path-spans nil :mtime nil
+                           :lines '((:n 1 :text "needle needle" :spans ((0 6) (7 13))
+                                     :secondary nil :inexact nil :replacements ("x"))
+                                    (:n 2 :text "needle" :spans ((0 6)) :secondary nil
+                                     :inexact nil :replacements ("x" "y"))
+                                    (:n 3 :text "needle" :spans ((0 6)) :secondary nil
+                                     :inexact nil :replacements ("x"))))))
+      (should (equal (quarry-test-grep--replace-counts) "1 of 1"))
+      (should (= quarry-grep--replace-inexact 2))
+      (dolist (line '(1 2))
+        (let ((pos (quarry-test-grep--line-pos "a.txt" line)))
+          (should-not (text-property-not-all pos (save-excursion (goto-char pos) (pos-eol))
+                                             'quarry-grep-replacement nil))))
+      (should (equal (quarry-test-grep--replacement (quarry-test-grep--text-start "a.txt" 3))
+                     '("x" nil "needlex"))))))
+
+(ert-deftest quarry-test-grep-replace-apply-unwritable-directory ()
+  "A file in a directory that cannot be written is left as it was."
+  (skip-unless (not (zerop (user-uid))))
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
+    (let ((d (expand-file-name "d" dir)))
+      (set-file-modes d #o555)
+      (unwind-protect
+          (quarry-test-grep--apply t)
+        (set-file-modes d #o755))
+      (should (equal (quarry-test-grep--bytes dir "d/e.txt") "foo_8foo_9\n"))
+      (should (equal (directory-files d nil "\\`[^.]\\|\\`\\.[^.]") '("e.txt")))
+      (should (equal (quarry-test-grep--bytes dir "b.txt") "x bar_5\n"))
+      (let ((result (car (last (quarry-test-grep--replace-results)))))
+        (should (equal (seq-take result 3) '("d/e.txt" 1 rejected)))
+        (should (string-match-p "Permission denied" (nth 3 result)))))))
+
+(ert-deftest quarry-test-grep-replace-apply-file-kinds ()
+  "The new file keeps the modes; links stay links; a failed rename keeps the file."
+  (let* ((dir (make-temp-file "quarry-test-write" t))
+         (file (lambda (name) (expand-file-name name dir)))
+         (bytes (lambda (name)
+                  (with-temp-buffer
+                    (set-buffer-multibyte nil)
+                    (insert-file-contents-literally (funcall file name))
+                    (buffer-string))))
+         (replace (lambda (name)
+                    (quarry-grep--replace-in-file (funcall file name)
+                                                  '((nil 1 "foo_1" "bar_1"))))))
+    (unwind-protect
+        (progn
+          (dolist (name '("modes.txt" "target.txt" "hard.txt" "kept.txt"))
+            (write-region "foo_1\n" nil (funcall file name) nil 'silent))
+          ;; Modes.
+          (set-file-modes (funcall file "modes.txt") #o640)
+          (should (equal (funcall replace "modes.txt") '(nil)))
+          (should (equal (funcall bytes "modes.txt") "bar_1\n"))
+          (should (= (file-modes (funcall file "modes.txt")) #o640))
+          ;; A symbolic link: the file it points to changes.
+          (make-symbolic-link "target.txt" (funcall file "link.txt"))
+          (should (equal (funcall replace "link.txt") '(nil)))
+          (should (equal (file-symlink-p (funcall file "link.txt")) "target.txt"))
+          (should (equal (funcall bytes "target.txt") "bar_1\n"))
+          ;; A hard link: both names see the change.
+          (add-name-to-file (funcall file "hard.txt") (funcall file "hard2.txt"))
+          (should (equal (funcall replace "hard.txt") '(nil)))
+          (should (equal (funcall bytes "hard2.txt") "bar_1\n"))
+          (should (= (file-nlinks (funcall file "hard.txt")) 2))
+          ;; The new file cannot take the place of the old one.
+          (cl-letf (((symbol-function 'rename-file)
+                     (lambda (&rest _) (signal 'file-error '("Renaming" "No space left on device")))))
+            (should (equal (funcall replace "kept.txt") '("Renaming: No space left on device"))))
+          (should (equal (funcall bytes "kept.txt") "foo_1\n"))
+          ;; No new file is left.
+          (should (equal (directory-files dir nil "\\`[^.]\\|\\`\\.[^.]")
+                         '("hard.txt" "hard2.txt" "kept.txt" "link.txt" "modes.txt" "target.txt"))))
+      (delete-directory dir t))))
+
+(ert-deftest quarry-test-grep-replace-apply-search-directory ()
+  "The files are those of the search directory, wherever the buffer is."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
+    (let ((other (file-name-as-directory (make-temp-file "quarry-test-other" t))))
+      (unwind-protect
+          (progn
+            (write-region "x foo_5\n" nil (expand-file-name "b.txt" other) nil 'silent)
+            (setq default-directory other)
+            (should (equal (quarry-test-grep--apply t)
+                           '("Replace 9 matches on 6 lines in 4 files? ")))
+            (should (equal (quarry-test-grep--bytes dir "b.txt") "x bar_5\n"))
+            (should (equal (quarry-test-grep--bytes other "b.txt") "x foo_5\n"))
+            (should (string-match-p "\nReplaced 6 lines in 4 files; 0 rejected\\'"
+                                    (quarry-test-grep--status))))
+        (delete-directory other t)))))
+
 (provide 'quarry-grep-tests)
 ;;; quarry-grep-tests.el ends here

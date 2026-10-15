@@ -167,7 +167,20 @@ For each file block with switched-on matches, in buffer order:
 2. The target buffer: the buffer that visits the file, if there is one;
    it is unmodified, since the stale check passed. Otherwise a temporary
    buffer into which the file is read with `insert-file-contents`, which
-   decodes it and sets `buffer-file-coding-system`.
+   decodes it and sets `buffer-file-coding-system`. (Changed after the
+   review: the file is read with `insert-file-contents-literally` and
+   decoded with `decode-coding-inserted-region`, which picks the coding
+   system as `insert-file-contents` does but runs no format decoding,
+   `after-insert-file-functions` or file name handler of compressed or
+   encrypted files; a file starting with `Content-Type: text/enriched`
+   was decoded as enriched text and the wrong lines were replaced. A
+   file decoded as other than UTF-8 whose bytes hold a valid UTF-8
+   sequence of two or more bytes is rejected as a whole with "the file's
+   encoding is ambiguous (UTF-8 mixed with other bytes)". A visiting
+   buffer that is unibyte or has a `raw-text` or `no-conversion` coding
+   system is rejected with "buffer is visited literally" when a new text
+   is not ASCII. The file name is the path joined to the search's
+   directory, not to the result buffer's `default-directory`.)
 3. For each line, in ascending order: go to line N (counted from the
    start of the widened buffer). The line must equal the old line
    exactly; otherwise the line is rejected with "line changed since
@@ -181,6 +194,23 @@ For each file block with switched-on matches, in buffer order:
    `undecided`, that is pure ASCII, is written as UTF-8 with its line
    ends, the encoding of the new text.) A file that cannot be read or
    written rejects all its lines, with the error message.
+   (Changed after the review: a visiting buffer is saved with
+   `before-save-hook` and `require-final-newline` bound to nil, the
+   user's decision, so a formatter or whitespace cleanup on save does not
+   change other lines; `after-save-hook` and the rest of `save-buffer`
+   stay. Its changes run in a change group: when they or the saving fail
+   or are stopped before the file is written, the change group is
+   cancelled and the buffer is unmodified again, and the file's lines
+   are rejected with the error message, or "stopped". A temporary buffer
+   is encoded and written as bytes, with no
+   `write-region-annotate-functions` or format, into a new file in the
+   file's directory that gets the file's modes and extended attributes
+   and is renamed over the file; on any error it is deleted and the file
+   is untouched, so a full disk no longer truncates the file. A symbolic
+   link is followed and stays a link. A file with more than one hard
+   link, or for which the new file would have another owner or group, is
+   written in place, with its old bytes written back if that fails. A
+   file in a directory that cannot be written is rejected.)
 
 Each result line gets an overlay with the result: `applied`, or
 `rejected` with the reason as `help-echo`. The faces are
@@ -188,7 +218,13 @@ Each result line gets an overlay with the result: `applied`, or
 echo area and the status line say "Replaced N lines in F files; R
 rejected". `C-g` during the loop stops after the current file. The files
 written so far stay written, and the status line says how many files
-were not processed.
+were not processed. (Changed after the review: quitting was inhibited
+for the whole loop, so a slow save hook could not be interrupted. Now
+only the writing of a temporary buffer is not interruptible; `C-g` while
+a file is read or changed, or while a buffer is saved, stops at once,
+leaves that file as it was, rejects its lines with "stopped" and ends
+the loop. `C-g` after the file was written, in `after-save-hook`, stops
+after it.)
 
 After applying, the buffer is in the state *applied*
 (`quarry-grep--replace-applied`). The preview still shows what was
@@ -226,7 +262,11 @@ way out.
 | A visiting buffer is read-only | its lines are rejected: "buffer is read-only" |
 | A visiting buffer is not up to date with its file (added in task 4: `save-buffer` would ask in the middle of the loop) | its lines are rejected: "buffer is not up to date with its file" |
 | The new text has a character the file's coding system cannot encode (added in task 4) | the file's lines are rejected with that message; nothing is written |
-| `C-g` while applying | stops after the current file, reports what was written |
+| The file is read as an 8-bit encoding but holds UTF-8 sequences (added after the review) | the file's lines are rejected: "the file's encoding is ambiguous (UTF-8 mixed with other bytes)"; nothing is written |
+| A visiting buffer is visited literally and a new text is not ASCII (added after the review) | its lines are rejected: "buffer is visited literally" |
+| `save-buffer` of a visiting buffer fails before writing (added after the review) | the buffer's changes are undone and it is unmodified; its lines are rejected with the error message |
+| Writing a file fails (added after the review) | the temporary file is deleted and the file is untouched; its lines are rejected with the error message |
+| `C-g` while applying | stops after the current file, reports what was written (changed after the review: while a file is read or changed or a buffer saved, at once, with that file left as it was and its lines rejected with "stopped") |
 | A module older than this feature | it ignores `:replace`; the rebuild message below |
 
 emrs's deserializer skips plist keys that a request type does not name

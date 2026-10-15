@@ -85,7 +85,7 @@
 //!   one per entry of `:spans` and in the same order, each the template interpolated for that match, on the
 //!   whole line as the matching is done (`:replacements ("new_a" "new_b")`). A kept line with `:inexact` t and
 //!   a context line have no `:replacements`; without `:replace` no line has it. Empty matches are in neither
-//!   list.
+//!   list, nor is a match of a byte-level pattern that lies inside one character (empty as characters).
 //!
 //! The summary item, exactly one, the last item of a search that was not cancelled:
 //!
@@ -1086,5 +1086,136 @@ mod tests {
         (q.before, q.after) = (999, 3);
         let found = run(q);
         assert_eq!(found.lines("a").len(), 999 + 3 + 1);
+    }
+
+    /// The field names a value serializes, in order: the keywords of its Lisp plist. The `Host` hands the
+    /// items over as Rust values and emrs keeps its Lisp conversion private, so the tests see what serde gives
+    /// it through this serializer, which accepts a struct only and does not look at the field values.
+    fn field_names<T: serde::Serialize>(value: &T) -> Vec<&'static str> {
+        use serde::ser::{Impossible, SerializeStruct, Serializer};
+        use std::fmt::Error as Refused;
+
+        struct Names;
+        struct Fields(Vec<&'static str>);
+        type Never = Impossible<Vec<&'static str>, Refused>;
+
+        macro_rules! refuse {
+            ($($method:ident($($arg:ty),*);)*) => {
+                $(fn $method(self, $(_: $arg),*) -> Result<Vec<&'static str>, Refused> { Err(Refused) })*
+            };
+        }
+
+        impl SerializeStruct for Fields {
+            type Ok = Vec<&'static str>;
+            type Error = Refused;
+            fn serialize_field<V: ?Sized + serde::Serialize>(
+                &mut self,
+                key: &'static str,
+                _: &V,
+            ) -> Result<(), Refused> {
+                self.0.push(key);
+                Ok(())
+            }
+            fn end(self) -> Result<Vec<&'static str>, Refused> {
+                Ok(self.0)
+            }
+        }
+
+        impl Serializer for Names {
+            type Ok = Vec<&'static str>;
+            type Error = Refused;
+            type SerializeSeq = Never;
+            type SerializeTuple = Never;
+            type SerializeTupleStruct = Never;
+            type SerializeTupleVariant = Never;
+            type SerializeMap = Never;
+            type SerializeStruct = Fields;
+            type SerializeStructVariant = Never;
+            refuse! {
+                serialize_bool(bool); serialize_i8(i8); serialize_i16(i16); serialize_i32(i32); serialize_i64(i64);
+                serialize_u8(u8); serialize_u16(u16); serialize_u32(u32); serialize_u64(u64); serialize_f32(f32);
+                serialize_f64(f64); serialize_char(char); serialize_str(&str); serialize_bytes(&[u8]);
+                serialize_none(); serialize_unit(); serialize_unit_struct(&'static str);
+                serialize_unit_variant(&'static str, u32, &'static str);
+            }
+            fn serialize_some<V: ?Sized + serde::Serialize>(self, _: &V) -> Result<Self::Ok, Refused> {
+                Err(Refused)
+            }
+            fn serialize_newtype_struct<V: ?Sized + serde::Serialize>(
+                self,
+                _: &'static str,
+                _: &V,
+            ) -> Result<Self::Ok, Refused> {
+                Err(Refused)
+            }
+            fn serialize_newtype_variant<V: ?Sized + serde::Serialize>(
+                self,
+                _: &'static str,
+                _: u32,
+                _: &'static str,
+                _: &V,
+            ) -> Result<Self::Ok, Refused> {
+                Err(Refused)
+            }
+            fn serialize_seq(self, _: Option<usize>) -> Result<Never, Refused> {
+                Err(Refused)
+            }
+            fn serialize_tuple(self, _: usize) -> Result<Never, Refused> {
+                Err(Refused)
+            }
+            fn serialize_tuple_struct(self, _: &'static str, _: usize) -> Result<Never, Refused> {
+                Err(Refused)
+            }
+            fn serialize_tuple_variant(
+                self,
+                _: &'static str,
+                _: u32,
+                _: &'static str,
+                _: usize,
+            ) -> Result<Never, Refused> {
+                Err(Refused)
+            }
+            fn serialize_map(self, _: Option<usize>) -> Result<Never, Refused> {
+                Err(Refused)
+            }
+            fn serialize_struct(self, _: &'static str, _: usize) -> Result<Fields, Refused> {
+                Ok(Fields(Vec::new()))
+            }
+            fn serialize_struct_variant(
+                self,
+                _: &'static str,
+                _: u32,
+                _: &'static str,
+                _: usize,
+            ) -> Result<Never, Refused> {
+                Err(Refused)
+            }
+        }
+
+        value.serialize(Names).expect("a struct")
+    }
+
+    #[test]
+    fn replacements_are_in_the_lisp_form_only_with_a_template() {
+        // Line 2 is kept by empty matches only: an exact kept line without spans.
+        let t = tree(&[("a", "xax\nbbb\n")]);
+        let fields = |l: &crate::grep::search::Line| field_names(l);
+        let found = run(Query::new(t.path(), vec![line_re("a*")]));
+        for l in found.lines("a") {
+            assert_eq!(fields(l), ["n", "text", "spans", "secondary", "inexact"], "{l:?}");
+        }
+        let mut q = Query::new(t.path(), vec![line_re("a*")]);
+        q.replace = Some("<$0>".to_string());
+        let found = run(q);
+        let lines = found.lines("a");
+        assert_eq!(found.marks("a"), "1: 2:");
+        let with = ["n", "text", "spans", "secondary", "inexact", "replacements"];
+        // `:replacements ("<a>")`.
+        assert_eq!(fields(&lines[0]), with);
+        assert_eq!(lines[0].replacements, Some(vec!["<a>".to_string()]));
+        // `:replacements nil`, present: the line can be replaced, it has nothing to change.
+        assert_eq!(fields(&lines[1]), with);
+        assert!(lines[1].spans.is_empty());
+        assert_eq!(lines[1].replacements, Some(Vec::new()));
     }
 }
