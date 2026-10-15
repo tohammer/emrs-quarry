@@ -787,12 +787,16 @@ preview keep the template and update the preview.
   it), it asks whether to search again, and writes nothing either way.
   Otherwise it asks `Replace N matches on L lines in F files?`.
 - Every line is compared with the text the search found and rejected
-  when it differs, or when its buffer is read-only or not up to date
-  with its file, when the file cannot be read or written, or when the
-  new text has a character that the file's encoding cannot hold. A file
-  that Emacs reads as Latin-1 or another 8-bit encoding but that holds
-  UTF-8 text (UTF-8 with a stray byte) is not changed: its lines are
-  rejected as of ambiguous encoding. A buffer visited literally
+  when it differs, or when its buffer is read-only, has unsaved changes
+  or is not up to date with its file, when the file cannot be read or
+  written, or when the new text has a character that the file's
+  encoding (or the encoding of the buffer that visits it) cannot hold. A
+  file that Emacs reads as Latin-1 or another 8-bit encoding but that
+  holds UTF-8 text (UTF-8 with a stray byte) is not changed: its lines
+  are rejected as of ambiguous encoding. Nor is a file whose text, read
+  as Emacs would read it, does not give its bytes back when written in
+  the same encoding, such as one whose coding cookie says CRLF line ends
+  while its lines end in LF. A buffer visited literally
   (`find-file-literally`, or with the coding system `no-conversion` or
   `raw-text`) takes only ASCII new text; with other new text its lines
   are rejected. The other lines and files go on. Afterwards each result line is marked as applied or
@@ -808,20 +812,27 @@ preview keep the template and update the preview.
   or `delete-trailing-whitespace` on save) and without
   `require-final-newline`; `after-save-hook` runs and a backup file may
   be made. It is one undo step in that buffer. When the saving fails or
-  is stopped, the buffer gets its old text back, unmodified, and the
-  file's lines are rejected.
+  is stopped before the file is written, the buffer gets its old text
+  back, unmodified, and the file's lines are rejected. When a hook fails
+  or is stopped after the file was written, the lines count as replaced
+  and the buffer keeps them.
 - Other files are read as their bytes, decoded as Emacs would decode
   them but with no format conversion (such as `text/enriched`), changed,
   and written back in their own encoding, line ends and byte order mark,
-  with no undo: use git. The new content goes to a temporary file in the
-  same directory, which gets the file's permissions and is renamed over
-  the file, so a failed write leaves the file as it was. That needs a
-  writable directory: a file in a directory you cannot write is
-  rejected. A symbolic link is followed and stays a link; the file it
-  points to is replaced. A file with more than one hard link, or one
-  owned by another user or group than the new file would be, is written
-  in place instead, so that the links and the owner stay; if that write
-  fails, the old content is written back.
+  with no undo: use git. No handler of compressed or encrypted files
+  (`.gz`, `.gpg`) runs on reading or writing. The new content goes to a
+  temporary file in the same directory, which gets the file's
+  permissions and is renamed over the file, so a failed write leaves
+  the file as it was. Like any Emacs save, it is synced to the disk
+  only when `write-region-inhibit-fsync` is nil (the default is t). A symbolic link is followed
+  and stays a link; the file it points to is replaced. A file with more
+  than one hard link, one owned by another user or group than the new
+  file would be, or one in a directory you cannot write is written in
+  place instead, so that the links and the owner stay; if that write
+  fails, the old content is written back. The file is locked while it
+  is written, as Emacs locks a file you edit: when another Emacs holds
+  its lock, you are asked, and `C-g` there stops with the file as it
+  was.
 - Empty matches (`^`, `\b`, `x*` matching nothing) are not replaced.
   To insert text at the start of lines, match something: `^(.)` with
   `PREFIX$1`.

@@ -268,12 +268,32 @@ The replace spec (2026-10-14) left these out on purpose. Origin: spec
   literally are rejected already. Origin: fix of the review of the
   replace branch (2026-10-15). Revisit if binary-ish text files are
   replaced in; the fix is the same rejection as for literal buffers.
-- **Leftover `.quarry-XXXXXX` files and fsync.** A crash between
-  creating the new file and the rename leaves the temporary file; the
-  new file is synced only as `write-region-inhibit-fsync` says (ADR
-  0022). Revisit on the first leftover file or lost write.
+- **Leftover `.quarry-XXXXXX` files.** A crash between creating the new
+  file and the rename leaves the temporary file. Revisit on the first
+  leftover file.
 - **Untested: the owner fallback and extended attributes.** Writing in
   place when the new file would get another owner or group needs a
   second user to test; extended attributes were only copied for files
   without ACLs. Origin: as above. Revisit on a shared or SELinux
   system.
+- **`user.*` extended attributes are lost on the rename path.**
+  `file-extended-attributes` returns only the ACL and the SELinux
+  context, so the new file that is renamed over a file does not get its
+  `user.*` attributes (such as `user.xdg.origin.url`). Origin: second
+  review of the replace branch (2026-10-15). Revisit if a file loses
+  attributes that matter; writing such files in place would keep them.
+- **ASCII with stray high bytes takes new text as Latin-1.** A file
+  that is ASCII apart from bytes that form no UTF-8 sequence is decoded
+  as Latin-1 (the ambiguity check needs a UTF-8 sequence), so new
+  non-ASCII text is written in Latin-1, as Emacs would write it after
+  visiting the file. Origin: as above. Revisit if such a file gets
+  Latin-1 text where UTF-8 was meant.
+- **No sync before the rename by default.** The replace follows
+  `write-region-inhibit-fsync` (default t), as Emacs's own saves do;
+  syncing every file took 10,000 files 40 s to over 2 minutes on an NVMe
+  SSD under LUKS instead of about 13 s. Off ext4, a power loss right
+  after a replace can leave empty files. Origin: second review of the
+  replace branch (2026-10-15), decided by the author. Revisit if that
+  happens; the way out is writing all new files first and syncing them
+  together (`syncfs`) before the renames, or writing in the service
+  (option 3 of ADR 0021).

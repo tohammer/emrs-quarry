@@ -4331,20 +4331,235 @@ and have the face of its result."
                      '("x" nil "needlex"))))))
 
 (ert-deftest quarry-test-grep-replace-apply-unwritable-directory ()
-  "A file in a directory that cannot be written is left as it was."
+  "A writable file in a directory that cannot be written is written in place."
   (skip-unless (not (zerop (user-uid))))
   (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
     (let ((d (expand-file-name "d" dir)))
+      (set-file-modes (expand-file-name "e.txt" d) #o640)
       (set-file-modes d #o555)
       (unwind-protect
           (quarry-test-grep--apply t)
         (set-file-modes d #o755))
-      (should (equal (quarry-test-grep--bytes dir "d/e.txt") "foo_8foo_9\n"))
+      (should (equal (quarry-test-grep--bytes dir "d/e.txt") "bar_8bar_9\n"))
+      (should (= (file-modes (expand-file-name "e.txt" d)) #o640))
+      ;; No new file and no lock file.
       (should (equal (directory-files d nil "\\`[^.]\\|\\`\\.[^.]") '("e.txt")))
       (should (equal (quarry-test-grep--bytes dir "b.txt") "x bar_5\n"))
-      (let ((result (car (last (quarry-test-grep--replace-results)))))
-        (should (equal (seq-take result 3) '("d/e.txt" 1 rejected)))
-        (should (string-match-p "Permission denied" (nth 3 result)))))))
+      (should (equal (car (last (quarry-test-grep--replace-results)))
+                     '("d/e.txt" 1 applied "replaced"))))))
+
+(ert-deftest quarry-test-grep-replace-apply-written-then-signal ()
+  "A save that wrote the file and then signalled keeps the changes."
+  (quarry-test-grep--with-tree (dir '(("a.txt" . "x\nfoo\ny\n")
+                                      ("b.txt" . "x\nfoo\ny\n")
+                                      ("c.txt" . "x\nfoo\ny\n")))
+    (let ((make-backup-files nil)
+          (cases
+           `(;; `after-save-hook' changes the buffer and fails.
+             ("a.txt" after-save-hook
+              ,(lambda () (goto-char (point-max)) (insert "z") (error "Boom"))
+              "x\nbar\ny\nz" error)
+             ;; `after-save-hook' changes the buffer and quits.
+             ("b.txt" after-save-hook
+              ,(lambda () (goto-char (point-max)) (insert "z") (signal 'quit nil))
+              "x\nbar\ny\nz" quit)
+             ;; `write-contents-functions' writes the file and fails:
+             ;; `save-buffer' never gets to `after-save-hook'.
+             ("c.txt" write-contents-functions
+              ,(lambda ()
+                 (let ((coding-system-for-write 'utf-8-unix))
+                   (write-region nil nil buffer-file-name nil 'silent))
+                 (error "Late"))
+              "x\nbar\ny\n" error))))
+      (pcase-dolist (`(,name ,hook ,function ,text ,signal) cases)
+        (with-current-buffer (find-file-noselect (expand-file-name name dir))
+          (add-hook hook function nil t)
+          (let* ((result nil)
+                 (quit nil)
+                 (messages (quarry-test-grep--messages
+                            (lambda ()
+                              (let ((inhibit-quit t))
+                                (setq result (quarry-grep--replace-in-file
+                                              buffer-file-name '((nil 2 "foo" "bar")))
+                                      quit quit-flag
+                                      quit-flag nil))))))
+            (should (equal (list name result) (list name '(nil))))
+            (should (equal (quarry-test-grep--bytes dir name) "x\nbar\ny\n"))
+            ;; The changes stay, with what the hook did.
+            (should (equal (buffer-string) text))
+            (should (eq (buffer-modified-p) (not (equal text "x\nbar\ny\n"))))
+            (should (verify-visited-file-modtime))
+            ;; A `quit' is kept for the caller, an error shown.
+            (if (eq signal 'quit)
+                (progn (should quit)
+                       (should-not messages))
+              (should-not quit)
+              (should (equal messages
+                             (list (format "Error after saving %s: %s" name
+                                           (if (equal name "a.txt") "Boom" "Late")))))))
+          (remove-hook hook function t))))))
+
+(ert-deftest quarry-test-grep-replace-apply-unsaved-changes ()
+  "A visiting buffer with unsaved changes is not changed or saved."
+  ;; A hard link outside the tree: the stale check does not see it.
+  (quarry-test-grep--with-replace (dir '(("a.txt" . "foo_1\n") ("b.txt" . "foo_2\n"))
+                                       "foo_([0-9])" "bar_$1")
+    (let* ((other (make-temp-file "quarry-test-other" t))
+           (link (expand-file-name "a.txt" other)))
+      (unwind-protect
+          (progn
+            (add-name-to-file (expand-file-name "a.txt" dir) link)
+            (with-current-buffer (find-file-noselect link)
+              (goto-char (point-max))
+              (insert "edit\n"))
+            (should-not (quarry-grep--stale-files))
+            (quarry-test-grep--apply t)
+            (should (equal (quarry-test-grep--bytes dir "a.txt") "foo_1\n"))
+            (should (equal (quarry-test-grep--bytes dir "b.txt") "bar_2\n"))
+            (with-current-buffer (get-file-buffer link)
+              (should (equal (buffer-string) "foo_1\nedit\n"))
+              (should (buffer-modified-p)))
+            (should (equal (quarry-test-grep--replace-results)
+                           '(("a.txt" 1 rejected "buffer has unsaved changes")
+                             ("b.txt" 1 applied "replaced")))))
+        (when-let* ((buffer (get-file-buffer link)))
+          (with-current-buffer buffer (set-buffer-modified-p nil))
+          (kill-buffer buffer))
+        (delete-directory other t))))
+  ;; A buffer changed by the user, called directly.
+  (quarry-test-grep--with-tree (dir '(("a.txt" . "foo_1\n")))
+    (with-current-buffer (find-file-noselect (expand-file-name "a.txt" dir))
+      (goto-char (point-max))
+      (insert "edit\n")
+      (should (equal (quarry-grep--replace-in-buffer '((nil 1 "foo_1" "bar_1")))
+                     '("buffer has unsaved changes")))
+      (should (equal (buffer-string) "foo_1\nedit\n"))
+      (should (buffer-modified-p))
+      (should (equal (quarry-test-grep--bytes dir "a.txt") "foo_1\n")))))
+
+(ert-deftest quarry-test-grep-replace-apply-unencodable-in-buffer ()
+  "A visiting buffer whose encoding cannot hold a new text is not changed."
+  (quarry-test-grep--with-tree (dir '(("latin.txt" . "")))
+    (let ((make-backup-files nil)
+          (bytes "caf\xe9\nfoo\n"))
+      (quarry-test-grep--write-bytes dir "latin.txt" bytes)
+      (with-current-buffer (find-file-noselect (expand-file-name "latin.txt" dir))
+        (should (eq (coding-system-base buffer-file-coding-system) 'iso-latin-1))
+        (let ((result (quarry-grep--replace-in-file buffer-file-name '((nil 2 "foo" "€")))))
+          (should (= (length result) 1))
+          (should (string-match-p
+                   "\\`The new text has a character that .*latin-1.* cannot encode: €\\'"
+                   (car result))))
+        (should (equal (buffer-string) "café\nfoo\n"))
+        (should-not (buffer-modified-p))
+        (should (equal (quarry-test-grep--bytes dir "latin.txt") bytes))
+        ;; Text that Latin-1 holds is written.
+        (should (equal (quarry-grep--replace-in-file buffer-file-name '((nil 2 "foo" "bär")))
+                       '(nil)))
+        (should (equal (quarry-test-grep--bytes dir "latin.txt") "caf\xe9\nb\xe4r\n"))))))
+
+(ert-deftest quarry-test-grep-replace-apply-round-trip ()
+  "A file whose decoded text does not encode back to its bytes is not written."
+  (quarry-test-grep--with-tree (dir '(("dos.txt" . "")))
+    ;; The cookie says CRLF; the lines end in LF.
+    (let ((bytes "-*- coding: utf-8-dos -*-\nfoo\nx\n"))
+      (quarry-test-grep--write-bytes dir "dos.txt" bytes)
+      (should (equal (quarry-grep--replace-in-file (expand-file-name "dos.txt" dir)
+                                                   '((nil 2 "foo" "bar")))
+                     '("the file does not read back as it is (encoding or line ends)")))
+      (should (equal (quarry-test-grep--bytes dir "dos.txt") bytes)))))
+
+(ert-deftest quarry-test-grep-replace-apply-utf-16 ()
+  "A UTF-16 file is not taken for UTF-8 mixed with other bytes."
+  (quarry-test-grep--with-tree (dir '(("u16.txt" . "")))
+    ;; U+80C2 is the bytes c2 80, a UTF-8 sequence.
+    (quarry-test-grep--write-bytes dir "u16.txt" "\xff\xfe\x66\0o\0o\0\n\0\xc2\x80\n\0")
+    (should (equal (quarry-grep--replace-in-file (expand-file-name "u16.txt" dir)
+                                                 '((nil 1 "foo" "bär")))
+                   '(nil)))
+    (should (equal (quarry-test-grep--bytes dir "u16.txt")
+                   "\xff\xfe\x62\0\xe4\0r\0\n\0\xc2\x80\n\0"))))
+
+(ert-deftest quarry-test-grep-replace-apply-no-file-name-handlers ()
+  "A file whose name a handler claims is written as its bytes."
+  (skip-unless auto-compression-mode)
+  (quarry-test-grep--with-tree (dir '(("notes.gz" . "") ("plain.gz" . "")))
+    (let ((file-name-handler-alist nil))
+      (quarry-test-grep--write-bytes dir "notes.gz" "foo\nx\n")
+      (quarry-test-grep--write-bytes dir "plain.gz" "foo\nx\n"))
+    ;; Written in place, and through a new file.
+    (add-name-to-file (expand-file-name "notes.gz" dir) (expand-file-name "link.gz" dir))
+    (dolist (name '("notes.gz" "plain.gz"))
+      (should (equal (quarry-grep--replace-in-file (expand-file-name name dir)
+                                                   '((nil 1 "foo" "bar")))
+                     '(nil)))
+      (should (equal (list name (quarry-test-grep--bytes dir name))
+                     (list name "bar\nx\n"))))))
+
+(ert-deftest quarry-test-grep-replace-apply-fsync ()
+  "Writing follows `write-region-inhibit-fsync', as Emacs's own saves do."
+  (quarry-test-grep--with-tree (dir '(("a.txt" . "foo\n") ("h.txt" . "foo\n")))
+    (add-name-to-file (expand-file-name "h.txt" dir) (expand-file-name "h2.txt" dir))
+    (let ((seen nil))
+      (cl-letf* ((write (symbol-function 'write-region))
+                 ((symbol-function 'write-region)
+                  (lambda (&rest args)
+                    (push write-region-inhibit-fsync seen)
+                    (apply write args))))
+        (pcase-dolist (`(,name . ,inhibit) '(("a.txt" . t) ("h.txt" . nil)))
+          (let ((write-region-inhibit-fsync inhibit))
+            (should (equal (quarry-grep--replace-in-file (expand-file-name name dir)
+                                                         '((nil 1 "foo" "bar")))
+                           '(nil))))))
+      (should (equal seen '(nil t)))
+      (should (equal (quarry-test-grep--bytes dir "h2.txt") "bar\n")))))
+
+(ert-deftest quarry-test-grep-replace-apply-lock ()
+  "A file locked by another Emacs is asked about once, with C-g possible."
+  (quarry-test-grep--with-tree (dir '(("u.txt" . "foo\n") ("h.txt" . "foo\n")))
+    (add-name-to-file (expand-file-name "h.txt" dir) (expand-file-name "h2.txt" dir))
+    (let* ((create-lockfiles t)
+           (lock (lambda (name) (expand-file-name (concat ".#" name) dir)))
+           (foreign (lambda (name)
+                      (make-symbolic-link "someone@otherhost.99999:0" (funcall lock name) t)))
+           (replace (lambda (name)
+                      (let ((inhibit-quit t))
+                        (quarry-grep--replace-in-file (expand-file-name name dir)
+                                                      '((nil 1 "foo" "bar"))))))
+           (answer nil)
+           (asked nil))
+      (cl-letf (((symbol-function 'ask-user-about-lock)
+                 (lambda (file _user)
+                   (push (list (file-name-nondirectory file) inhibit-quit) asked)
+                   (pcase answer
+                     ('steal t)
+                     ('quit (signal 'quit nil))
+                     (_ (signal 'file-locked (list file "someone")))))))
+        ;; Through a new file and in place.
+        (dolist (name '("u.txt" "h.txt"))
+          (funcall foreign name)
+          ;; No: the file stays as it was.
+          (setq answer nil asked nil)
+          (let ((result (funcall replace name)))
+            (should (= (length result) 1))
+            (should (string-match-p "locked" (car result))))
+          (should (equal asked `((,name nil))))
+          (should (equal (quarry-test-grep--bytes dir name) "foo\n"))
+          ;; C-g: the file stays as it was and `quit' goes on.
+          (setq answer 'quit asked nil)
+          (should (eq (condition-case nil (progn (funcall replace name) 'done) (quit 'quit))
+                      'quit))
+          (should (equal asked `((,name nil))))
+          (should (equal (quarry-test-grep--bytes dir name) "foo\n"))
+          (should (equal (file-symlink-p (funcall lock name)) "someone@otherhost.99999:0"))
+          ;; Steal it: asked once, written, and the lock is gone afterwards.
+          (setq answer 'steal asked nil)
+          (should (equal (funcall replace name) '(nil)))
+          (should (equal asked `((,name nil))))
+          (should (equal (quarry-test-grep--bytes dir name) "bar\n"))
+          (should-not (file-symlink-p (funcall lock name))))
+        ;; Nothing else is left: no new file, no lock of one.
+        (should (equal (directory-files dir nil "\\`\\.[^.]") nil))))))
 
 (ert-deftest quarry-test-grep-replace-apply-file-kinds ()
   "The new file keeps the modes; links stay links; a failed rename keeps the file."

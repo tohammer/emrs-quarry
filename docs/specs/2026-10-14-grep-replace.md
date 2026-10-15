@@ -181,6 +181,19 @@ For each file block with switched-on matches, in buffer order:
    system is rejected with "buffer is visited literally" when a new text
    is not ASCII. The file name is the path joined to the search's
    directory, not to the result buffer's `default-directory`.)
+   (Changed after the second review: a visiting buffer with unsaved
+   changes is rejected with "buffer has unsaved changes"; the stale
+   check misses a buffer that visits a hard link of the file outside the
+   tree, and saving would write the user's edits. A visiting buffer
+   whose `buffer-file-coding-system` cannot encode a new text is rejected
+   with the message of the temporary buffer, before anything changes,
+   so `save-buffer` never asks for another encoding. A file read into a
+   temporary buffer must read back as it is: its decoded text, encoded
+   with the coding system it is written with, must give its bytes
+   exactly, else its lines are rejected with "the file does not read
+   back as it is (encoding or line ends)"; a `utf-8-dos` cookie on a file
+   with LF lines would have got CRLF on every line. UTF-16 is exempt
+   from the ambiguity check, whose byte pairs often look like UTF-8.)
 3. For each line, in ascending order: go to line N (counted from the
    start of the widened buffer). The line must equal the old line
    exactly; otherwise the line is rejected with "line changed since
@@ -211,6 +224,21 @@ For each file block with switched-on matches, in buffer order:
    link, or for which the new file would have another owner or group, is
    written in place, with its old bytes written back if that fails. A
    file in a directory that cannot be written is rejected.)
+   (Changed after the second review: whether a visiting buffer's file
+   was written is decided from the save, not from `buffer-modified-p`,
+   which an `after-save-hook` can set again: a buffer-local
+   `after-save-hook` entry sets a flag, and when a write function wrote
+   the file and then signalled, the file's bytes are compared with the
+   buffer. Once written, the lines count as applied and an error or
+   `quit` after it only shows a message or stops the loop. A temporary
+   buffer is written with no handler of compressed, encrypted or image
+   files, synced to the disk as `write-region-inhibit-fsync` says (as
+   any Emacs save; the author chose this on 2026-10-15 after syncing
+   every file took 10,000 files to 40–130 s on a disk), and
+   with the file locked by `lock-file` first, where a question about
+   another Emacs's lock can be answered or quit with `C-g`. A writable
+   file in a directory that cannot be written is written in place
+   instead of rejected.)
 
 Each result line gets an overlay with the result: `applied`, or
 `rejected` with the reason as `help-echo`. The faces are
@@ -247,7 +275,9 @@ until the preview is complete and the time to apply, in a release
 build in batch Emacs. The numbers go into
 `docs/architecture/grep.md`. If applying 10,000 files takes more than
 30 seconds, a backlog item records it with option 3 of ADR 0021 as the
-way out.
+way out. (Measured after the second review: with each file synced to
+the disk, 10,000 files take 40 s to over 2 minutes on an SSD, against
+about 13 s without; the backlog records it.)
 
 ## Error handling
 
@@ -266,7 +296,12 @@ way out.
 | A visiting buffer is visited literally and a new text is not ASCII (added after the review) | its lines are rejected: "buffer is visited literally" |
 | `save-buffer` of a visiting buffer fails before writing (added after the review) | the buffer's changes are undone and it is unmodified; its lines are rejected with the error message |
 | Writing a file fails (added after the review) | the temporary file is deleted and the file is untouched; its lines are rejected with the error message |
-| `C-g` while applying | stops after the current file, reports what was written (changed after the review: while a file is read or changed or a buffer saved, at once, with that file left as it was and its lines rejected with "stopped") |
+| `C-g` while applying | stops after the current file, reports what was written (changed after the review: while a file is read or changed or a buffer saved, at once, with that file left as it was and its lines rejected with "stopped"; changed after the second review: also in the question about another Emacs's lock) |
+| A visiting buffer has unsaved changes (added after the second review) | its lines are rejected: "buffer has unsaved changes" |
+| A visiting buffer's encoding cannot hold a new text (added after the second review) | its lines are rejected with the message of the temporary buffer; the buffer is not changed |
+| A file's decoded text does not encode back to its bytes (added after the second review) | its lines are rejected: "the file does not read back as it is (encoding or line ends)"; nothing is written |
+| A hook fails or quits after a visiting buffer's file was written (added after the second review) | the lines count as applied; the error is shown, a quit stops after this file |
+| Another Emacs holds the file's lock (added after the second review) | `ask-user-about-lock` asks once; an answer that refuses rejects the file's lines, `C-g` stops; nothing is written either way |
 | A module older than this feature | it ignores `:replace`; the rebuild message below |
 
 emrs's deserializer skips plist keys that a request type does not name

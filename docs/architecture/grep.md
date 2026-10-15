@@ -578,12 +578,24 @@ the same helper.
   `last-coding-system-used`. No format decoding (`format-alist`, such as
   `text/enriched`), no `after-insert-file-functions` and no handler of
   compressed or encrypted files runs, so the buffer's lines are the
-  file's lines.
-- A file decoded with a coding system whose type is not `utf-8` or
-  `undecided` but whose bytes hold a UTF-8 sequence (UTF-8 with a stray
-  byte, read as Latin-1) is rejected as a whole with "the file's encoding
-  is ambiguous (UTF-8 mixed with other bytes)": its exact lines would get
-  new text in Latin-1, and its UTF-8 lines are inexact anyway.
+  file's lines. `quarry-grep--read-file` returns (CODING UTF-8 EXACT).
+- A file decoded with a coding system whose type is not `utf-8`,
+  `utf-16` or `undecided` but whose bytes hold a UTF-8 sequence (UTF-8
+  with a stray byte, read as Latin-1) is rejected as a whole with "the
+  file's encoding is ambiguous (UTF-8 mixed with other bytes)": its exact
+  lines would get new text in Latin-1, and its UTF-8 lines are inexact
+  anyway. UTF-16 is exempt: its byte pairs often look like UTF-8
+  sequences, and it cannot be mistaken for UTF-8 with stray bytes.
+- Round trip: `quarry-grep--read-file` keeps the raw bytes and checks
+  that the decoded text, encoded with `quarry-grep--write-coding` of the
+  coding system, gives them back exactly (EXACT). If not, all the file's
+  lines are rejected with "the file does not read back as it is
+  (encoding or line ends)". That catches a coding cookie that names
+  other line ends than the file has (`utf-8-dos` on LF lines, whose
+  other lines would get CRLF) and any other decoding that loses bytes.
+  Pure ASCII read as `undecided` and written as UTF-8 round-trips. The
+  cost is one `encode-coding-string` per file, too small to show in the
+  bench.
 - `quarry-grep--replace-lines` goes to each line N, counted from the
   start of the widened buffer, and compares it with OLD. A mismatch is
   rejected with "line changed since the search". A template has no
@@ -591,24 +603,42 @@ the same helper.
   changed by `quarry-grep--replace-text`, which replaces only what
   differs between old and new line, so markers (point) in the rest of
   the line stay.
-- A visiting buffer is rejected as a whole when it is read-only, not up
-  to date with its file (a modified buffer never gets here: the stale
-  check refused it), or visited literally (unibyte, or a coding system of
-  type `raw-text`, which `no-conversion` is too) while a new text is not
-  ASCII. Otherwise the changes run in a change group
+- A visiting buffer is rejected as a whole when it is read-only, has
+  unsaved changes ("buffer has unsaved changes": `save-buffer` would
+  write them too; the stale check misses a buffer that visits a hard
+  link of the file outside the tree), not up to date with its file,
+  visited literally (unibyte, or a coding system of type `raw-text`,
+  which `no-conversion` is too) while a new text is not ASCII, or when a
+  new text has a character that `buffer-file-coding-system` cannot
+  encode (`quarry-grep--unencodable`, with the message of the temporary
+  buffer path; checked before any change, so `save-buffer` never asks
+  for another encoding; skipped for `undecided`, for which `save-buffer`
+  picks one). Otherwise the changes run in a change group
   (`prepare-change-group`, `activate-change-group`, with the undo limits
   of `with-undo-amalgamate`) and, when a line changed, `save-buffer` runs
   with `before-save-hook` and `require-final-newline` bound to nil;
   `after-save-hook`, `write-file-functions`, backups and the rest of
   `save-buffer` stay. On success the group is accepted and amalgamated:
-  one undo step. When the changes or `save-buffer` signal an error or
-  `quit` while the buffer is still modified, that is before the file was
-  written, `cancel-change-group` undoes them, `restore-buffer-modified-p`
-  restores the flag, and the signal goes on: an error rejects the file's
-  lines with its message, `quit` stops the apply (below). Once the buffer
-  is unmodified the file was written; an error after that (in
-  `after-save-hook`) is only shown as a message, a `quit` is put back
-  into `quit-flag` so the loop stops after this file.
+  one undo step. Whether the file was written is decided from the save,
+  not from `buffer-modified-p`, which a hook can set again: a
+  buffer-local `after-save-hook` entry at depth -100, added for the
+  call, sets a flag, since `save-buffer` runs that hook only after the
+  file was written and the buffer marked unmodified. A
+  `write-contents-functions` or `write-file-functions` function that
+  writes the file and then signals never gets there; for that, when the
+  flag is not set, the file's bytes are compared with the buffer encoded
+  with `buffer-file-coding-system` (`quarry-grep--holds-buffer-p`), and
+  when they are equal the file counts as written and the buffer is
+  marked unmodified with the file's modification time. The modification
+  time alone would not say what was written. When the changes or
+  `save-buffer` signal an error or `quit` before the file was written,
+  `cancel-change-group` undoes them, the buffer is unmodified again, and
+  the signal goes on: an error rejects the file's lines with its
+  message, `quit` stops the apply (below). Once the file was written the
+  group is accepted and the lines count as applied, whatever a hook did
+  to the buffer after that; an error is only shown as a message, a
+  `quit` is put back into `quit-flag` so the loop stops after this
+  file.
 - A temporary buffer gets the coding system it was read with.
   `undecided` (a file with ASCII only) is changed to UTF-8 with the same
   line ends (`quarry-grep--write-coding`), since the new text can hold
@@ -616,18 +646,37 @@ the same helper.
   file's lines (checked with `unencodable-char-position`) instead of
   writing `?` or a replacement. The buffer is encoded with
   `encode-coding-region` and written as bytes by `quarry-grep--write-file`
-  (`write-region` with `no-conversion` and no
-  `write-region-annotate-functions` or format), with `inhibit-quit` t:
+  through `quarry-grep--write-region`: `write-region` with
+  `no-conversion`, no `write-region-annotate-functions` or format, the
+  file name handlers that `insert-file-contents-literally` inhibits
+  (jka-compr, image, epa) inhibited for `write-region` as that function
+  does for `insert-file-contents` (remote directories are refused by the
+  commands anyway). `write-region-inhibit-fsync` is left as the user has
+  it, as for any Emacs save (default t, no sync). On ext4 the rename
+  over the original is protected by its `auto_da_alloc` heuristic; on
+  other file systems a power loss right after a replace can leave an
+  empty file, as after any save with that default. With `inhibit-quit` t:
   - The target is the `file-truename`, so a symbolic link stays a link.
     It must exist and be writable (`file-writable-p`), else "Permission
     denied": renaming would replace a read-only file.
+  - The target is locked with `lock-file` while `inhibit-quit` is nil,
+    so `ask-user-about-lock` can ask about another Emacs's lock: `C-g`
+    there signals `quit` with nothing written (the apply stops after
+    this file), and an answer that signals `file-locked` rejects the
+    file's lines. The writes then run with `create-lockfiles` nil, so
+    neither the new file nor the target is locked again; an in-place
+    write passes `write-region` a LOCKNAME that is never locked (the
+    name plus `.quarry-unlocked`), since `write-region` unlocks its
+    LOCKNAME afterwards and would drop the target's lock before a
+    write-back. `unlock-file` runs in an `unwind-protect`.
   - Normally `make-temp-file` creates `.quarry-XXXXXX` in the target's
     directory; it is written, gets the target's extended attributes (ACL,
     SELinux context) and modes, and `rename-file` puts it over the
-    target. Any error deletes it and leaves the target untouched. A
-    directory that cannot be written rejects the file.
-  - A target with more than one hard link, or for which the new file has
-    another owner or group, is written in place
+    target. Any error deletes it and leaves the target untouched.
+  - A target with more than one hard link, for which the new file has
+    another owner or group, or in a directory where `make-temp-file`
+    fails with a `file-error` (a writable file in a directory that
+    cannot be written), is written in place
     (`quarry-grep--write-in-place`), since a rename would split the links
     or change the owner; its old bytes are read first and written back
     if the write fails.
@@ -639,7 +688,8 @@ the same helper.
 after each file. `quarry-grep--replace-in-file` binds `inhibit-quit` nil
 while it reads and changes a file and while `save-buffer` runs, so a
 slow save hook (vc, LSP, a formatter) can be interrupted; only the
-writing of a temporary buffer keeps quitting inhibited. A `quit` from a
+writing of a temporary buffer keeps quitting inhibited, apart from the
+question about another Emacs's lock. A `quit` from a
 file reaches the loop's `condition-case`, which marks the file's lines
 rejected with "stopped" and ends the loop; nothing of that file was
 written. Either way the files written so far stay written. A message every 100 files shows the progress. Each
@@ -688,6 +738,26 @@ the code before the change measured 0.8 s, 8.3–8.4 s and 2.5 s apply in
 the same session). Apply: 1.2 s (1k-5), 11.2–12.2 s (10k-5), 2.8–3.0 s
 (1k-100k). The new file, its attributes and the rename cost about
 0.4 ms more per file; 10,000 files still stay well under 30 seconds.
+
+Remeasured on 2026-10-15 after the second review (round-trip check,
+locks, fsync), same machine, load average about 1, rising to about 4
+during the disk runs. Apply, two runs each:
+
+| Tree on | Code | 1k-5 | 10k-5 | 1k-100k |
+|---|---|---|---|---|
+| tmpfs | before | 0.7 s | 7.2–7.3 s | 2.3–2.5 s |
+| tmpfs | after | 0.9 s | 8.3–8.4 s | 2.5–2.6 s |
+| ext4 on LUKS, NVMe SSD | before | 1.2–1.4 s | 12.3–13.0 s | 2.9–3.3 s |
+| ext4 on LUKS, NVMe SSD | after, fsync switched off for the measurement | 1.3 s | 12.5–13.3 s | 3.1 s |
+| ext4 on LUKS, NVMe SSD | after | 3.4–19.7 s | 39.6–130.9 s | 8.6–22.9 s |
+
+On tmpfs, where fsync costs nothing, the round-trip check and the lock
+add 0.1 to 0.2 ms per file. On a disk they disappear in the noise, but
+fsync costs 2 to 18 ms per file, varying a lot between runs: 10,000
+files take 40 s to over 2 minutes, above the 30 seconds of the spec.
+So the replace follows `write-region-inhibit-fsync` like any save (the
+author's decision, 2026-10-15): with its default t, the cost is the row
+with fsync switched off.
 
 ### Editing with wgrep
 

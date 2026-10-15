@@ -2330,6 +2330,10 @@ replaced, else the reason why not."
           "\\|\xf4[\x80-\x8f][\x80-\xbf][\x80-\xbf]")
   "A regexp for a valid UTF-8 sequence of two or more bytes, in unibyte text.")
 
+(defconst quarry-grep--not-round-trip
+  "the file does not read back as it is (encoding or line ends)"
+  "The reason for the lines of a file whose decoding does not encode back.")
+
 (defun quarry-grep--write-coding (coding)
   "Return the coding system to write a file with that was read with CODING.
 A file that held only ASCII was read as `undecided'; it is written as
@@ -2338,57 +2342,89 @@ UTF-8, the encoding of the new text, with its line ends."
       (coding-system-change-text-conversion coding 'utf-8)
     coding))
 
+(defun quarry-grep--unencodable (text coding)
+  "Return why CODING cannot encode TEXT, a string, or nil when it can."
+  (when-let* ((pos (unencodable-char-position 0 (length text) coding nil text)))
+    (format "The new text has a character that %s cannot encode: %c"
+            coding (aref text pos))))
+
 (defun quarry-grep--read-file (file)
   "Insert FILE into the current buffer, which is empty, and decode it.
 The bytes are decoded with the coding system `insert-file-contents'
 would choose, but nothing else converts them: no format decoding, no
 `after-insert-file-functions', no handler of compressed or encrypted
-files.  So the lines are the file's lines.  Return (CODING . UTF-8):
-the coding system they were decoded with, and non-nil when the bytes
-hold a valid UTF-8 sequence of more than one byte."
+files.  So the lines are the file's lines.  Return (CODING UTF-8
+EXACT): the coding system they were decoded with, non-nil when the
+bytes hold a valid UTF-8 sequence of more than one byte, and non-nil
+when encoding the decoded text with `quarry-grep--write-coding' of
+CODING gives the bytes back exactly."
   (set-buffer-multibyte nil)
   (insert-file-contents-literally file)
-  (let ((utf-8 (let ((case-fold-search nil))
+  (let ((bytes (buffer-string))
+        (utf-8 (let ((case-fold-search nil))
                  (re-search-forward quarry-grep--utf-8-sequence nil t))))
     ;; Each byte becomes a character of its own, which the decoding reads.
     (set-buffer-multibyte 'to)
     (decode-coding-inserted-region (point-min) (point-max) file)
-    (cons last-coding-system-used (and utf-8 t))))
+    (let ((coding last-coding-system-used))
+      (list coding
+            (and utf-8 t)
+            ;; A coding cookie that names other line ends than the
+            ;; file's, or any other decoding that loses bytes, would
+            ;; change lines that were not replaced.
+            (string= (encode-coding-string (buffer-string)
+                                           (quarry-grep--write-coding coding) t)
+                     bytes)))))
 
-(defun quarry-grep--write-region (file)
+(defun quarry-grep--write-region (file &optional lockname)
   "Write the current buffer to FILE as it is, with no conversion.
-The buffer holds bytes, as eight-bit characters or ASCII."
+The buffer holds bytes, as eight-bit characters or ASCII.  As
+`insert-file-contents-literally' does for reading, no handler of
+compressed, encrypted or image files runs.  The bytes are synced to the
+disk as `write-region-inhibit-fsync' says, as for any save.  LOCKNAME is
+passed to `write-region'."
   (let ((coding-system-for-write 'no-conversion)
         (write-region-annotate-functions nil)
         (write-region-post-annotation-function nil)
-        (buffer-file-format nil))
-    (write-region nil nil file nil 'silent)))
+        (buffer-file-format nil)
+        (inhibit-file-name-handlers
+         (append '(jka-compr-handler image-file-handler epa-file-handler)
+                 (and (eq inhibit-file-name-operation 'write-region)
+                      inhibit-file-name-handlers)))
+        (inhibit-file-name-operation 'write-region))
+    (write-region nil nil file nil 'silent lockname)))
 
 (defun quarry-grep--write-in-place (file)
   "Write the current buffer over FILE in place, as `quarry-grep--write-region'.
-When that fails, write the bytes FILE had back and signal the error."
+When that fails, write the bytes FILE had back and signal the error.
+The writes do not lock FILE or remove its lock: the caller holds it."
   (let ((old (with-temp-buffer
                (set-buffer-multibyte nil)
                (insert-file-contents-literally file)
-               (buffer-string))))
+               (buffer-string)))
+        ;; `write-region' unlocks its LOCKNAME afterwards, which would
+        ;; remove the caller's lock of FILE; this name is never locked.
+        (lockname (concat file ".quarry-unlocked")))
     (condition-case err
-        (quarry-grep--write-region file)
+        (quarry-grep--write-region file lockname)
       (error
        (with-temp-buffer
          (set-buffer-multibyte nil)
          (insert old)
-         (ignore-errors (quarry-grep--write-region file)))
+         (ignore-errors (quarry-grep--write-region file lockname)))
        (signal (car err) (cdr err))))))
 
 (defun quarry-grep--write-file (file)
   "Write the current buffer, the bytes of FILE's new content, over FILE.
 They go into a new file in the directory of FILE, which gets the modes
 and extended attributes of FILE and is renamed over it; a symbolic link
-is followed and stays a link.  A file with more than one name, or one
-that the new file would give another owner or group, is written in
-place instead; when that fails, its old bytes are written back.  Signal
-an error when FILE cannot be written; it is then as it was.  \\`C-g'
-does not interrupt the writing."
+is followed and stays a link.  A file with more than one name, one that
+the new file would give another owner or group, or one in a directory
+where no new file can be made is written in place instead; when that
+fails, its old bytes are written back.  The file is locked while it is
+written (`lock-file'); a question about another's lock can be answered
+or quit.  Signal an error when FILE cannot be written; it is then as it
+was.  \\`C-g' does not interrupt the writing."
   (let* ((inhibit-quit t)
          ;; Only a link as the last part of the name matters for the
          ;; renaming; `file-truename' of every name costs.
@@ -2396,36 +2432,73 @@ does not interrupt the writing."
          (attributes (file-attributes target 'integer)))
     (unless (and attributes (file-writable-p target))
       (signal 'file-error (list "Writing" "Permission denied" target)))
-    (if (> (file-attribute-link-number attributes) 1)
-        (quarry-grep--write-in-place target)
-      (let ((temp (make-temp-file (expand-file-name ".quarry-" (file-name-directory target)))))
-        (condition-case err
-            (let ((new (file-attributes temp 'integer)))
-              (if (not (and (eql (file-attribute-user-id new) (file-attribute-user-id attributes))
-                            (eql (file-attribute-group-id new) (file-attribute-group-id attributes))))
-                  (progn
-                    (delete-file temp)
-                    (quarry-grep--write-in-place target))
-                (quarry-grep--write-region temp)
-                (set-file-extended-attributes temp (file-extended-attributes target))
-                (set-file-modes temp (file-modes target))
-                (rename-file temp target t)))
-          (error
-           (ignore-errors (delete-file temp))
-           (signal (car err) (cdr err))))))))
+    (unwind-protect
+        (progn
+          ;; `ask-user-about-lock' may ask; C-g there leaves FILE alone.
+          (let ((inhibit-quit nil))
+            (lock-file target))
+          ;; The writes below lock nothing: no lock file for the new
+          ;; file, no second question about the target.
+          (let* ((create-lockfiles nil)
+                 (temp (and (= (file-attribute-link-number attributes) 1)
+                            (condition-case nil
+                                (make-temp-file
+                                 (expand-file-name ".quarry-" (file-name-directory target)))
+                              ;; A directory that cannot be written.
+                              (file-error nil)))))
+            (if (not temp)
+                (quarry-grep--write-in-place target)
+              (condition-case err
+                  (let ((new (file-attributes temp 'integer)))
+                    (if (not (and (eql (file-attribute-user-id new)
+                                       (file-attribute-user-id attributes))
+                                  (eql (file-attribute-group-id new)
+                                       (file-attribute-group-id attributes))))
+                        (progn
+                          (delete-file temp)
+                          (quarry-grep--write-in-place target))
+                      (quarry-grep--write-region temp)
+                      (set-file-extended-attributes temp (file-extended-attributes target))
+                      (set-file-modes temp (file-modes target))
+                      (rename-file temp target t)))
+                (error
+                 (ignore-errors (delete-file temp))
+                 (signal (car err) (cdr err)))))))
+      (ignore-errors (unlock-file target)))))
+
+(defun quarry-grep--holds-buffer-p ()
+  "Return non-nil when the visited file holds the current buffer's text.
+That is the widened buffer encoded with `buffer-file-coding-system'."
+  (let ((file buffer-file-name))
+    (condition-case nil
+        (string= (encode-coding-string
+                  (save-restriction
+                    (widen)
+                    (buffer-substring-no-properties (point-min) (point-max)))
+                  buffer-file-coding-system t)
+                 (with-temp-buffer
+                   (set-buffer-multibyte nil)
+                   (insert-file-contents-literally file)
+                   (buffer-string)))
+      (error nil))))
 
 (defun quarry-grep--replace-in-buffer (lines)
   "Replace LINES in the current buffer, which visits a file, and save it.
 LINES and the result are as for `quarry-grep--replace-lines'.  The
 changes are one undo step.  The buffer is saved without
-`before-save-hook' and `require-final-newline'.  When the changes or the
-saving fail or are interrupted before the file is written, they are
-undone and the buffer is unmodified again; the error or `quit' is
-signalled.  A `quit' after the file was written, in `after-save-hook',
-is kept in `quit-flag' for the caller."
+`before-save-hook' and `require-final-newline'.  A buffer with unsaved
+changes, or one whose encoding cannot hold a new text, is not changed.
+When the changes or the saving fail or are interrupted before the file
+is written, they are undone and the buffer is unmodified again; the
+error or `quit' is signalled.  Once the file was written, the changes
+stay: an error after it, as in `after-save-hook', is shown as a
+message, and a `quit' is kept in `quit-flag' for the caller."
   (cond
    (buffer-read-only
     (make-list (length lines) "buffer is read-only"))
+   ((buffer-modified-p)
+    ;; Saving would write the user's edits too.
+    (make-list (length lines) "buffer has unsaved changes"))
    ((not (verify-visited-file-modtime))
     (make-list (length lines) "buffer is not up to date with its file"))
    ((and (or (not enable-multibyte-characters)
@@ -2434,43 +2507,60 @@ is kept in `quit-flag' for the caller."
     ;; Its bytes are characters: new text would be written as Emacs
     ;; holds it, not as the file's encoding.
     (make-list (length lines) "buffer is visited literally"))
+   ((when-let* ((coding buffer-file-coding-system)
+                ;; `save-buffer' picks an encoding for `undecided'.
+                ((not (eq (coding-system-type coding) 'undecided)))
+                (reason (cl-some (lambda (line) (quarry-grep--unencodable (nth 3 line) coding))
+                                 lines)))
+      ;; `save-buffer' would ask for another encoding.
+      (make-list (length lines) reason)))
    (t
-    (let ((group (prepare-change-group))
-          (modified (buffer-modified-p))
-          ;; As `with-undo-amalgamate': the undo list is not truncated
-          ;; in the middle, so the group can be undone.
-          (undo-outer-limit nil)
-          (undo-limit most-positive-fixnum)
-          (undo-strong-limit most-positive-fixnum)
-          (done nil))
+    (let* ((group (prepare-change-group))
+           ;; As `with-undo-amalgamate': the undo list is not truncated
+           ;; in the middle, so the group can be undone.
+           (undo-outer-limit nil)
+           (undo-limit most-positive-fixnum)
+           (undo-strong-limit most-positive-fixnum)
+           (saved nil)
+           (mark-saved (lambda () (setq saved t)))
+           (done nil))
       (unwind-protect
           (progn
             (activate-change-group group)
             (let ((results (let ((inhibit-quit nil))
                              (quarry-grep--replace-lines lines))))
               (when (memq nil results)
+                ;; Runs first in `after-save-hook': the file is written.
+                (add-hook 'after-save-hook mark-saved -100 t)
                 (condition-case err
                     (let ((inhibit-quit nil)
                           (before-save-hook nil)
                           (require-final-newline nil))
                       (save-buffer))
                   ((quit error)
-                   ;; The buffer is unmodified once its file is written.
-                   (cond ((buffer-modified-p)
-                          (signal (car err) (cdr err)))
-                         ((eq (car err) 'quit)
-                          (setq quit-flag t))
+                   (cond (saved)
+                         ;; A function of `write-contents-functions' or
+                         ;; `write-file-functions' that wrote the file
+                         ;; and then signalled: `save-buffer' did not
+                         ;; finish, but the file holds the buffer.
+                         ((quarry-grep--holds-buffer-p)
+                          (set-visited-file-modtime)
+                          (set-buffer-modified-p nil))
                          (t
-                          (message "Error after saving %s: %s"
-                                   (buffer-name) (error-message-string err)))))))
+                          (signal (car err) (cdr err))))
+                   (if (eq (car err) 'quit)
+                       (setq quit-flag t)
+                     (message "Error after saving %s: %s"
+                              (buffer-name) (error-message-string err))))))
               (setq done t)
               results))
+        (remove-hook 'after-save-hook mark-saved t)
         (if done
             (progn
               (accept-change-group group)
               (undo-amalgamate-change-group group))
           (cancel-change-group group)
-          (restore-buffer-modified-p modified)))))))
+          (restore-buffer-modified-p nil)))))))
 
 (defun quarry-grep--replace-in-file (file lines)
   "Replace LINES in FILE; return the result of each line.
@@ -2479,20 +2569,28 @@ buffer that visits FILE is changed and saved
 \(`quarry-grep--replace-in-buffer').  Otherwise FILE is read into a
 temporary buffer (`quarry-grep--read-file') and written back with the
 coding system it was read with (`quarry-grep--write-file'); a file read
-as other than UTF-8 that holds UTF-8 sequences is left alone.  When FILE
-cannot be read or written, every line has the error message as its
-reason.  \\`C-g' signals `quit' while FILE is read, changed or saved,
-with nothing written; it waits while FILE is written."
+as other than UTF-8 or UTF-16 that holds UTF-8 sequences is left alone,
+and so is one whose decoded text does not encode back to its bytes.
+When FILE cannot be read or written, every line has the error message
+as its reason.  \\`C-g' signals `quit' while FILE is read, changed or
+saved, or while a question about its lock is asked, with nothing
+written; it waits while FILE is written."
   (condition-case err
       (if-let* ((buffer (find-buffer-visiting file)))
           (with-current-buffer buffer
             (quarry-grep--replace-in-buffer lines))
         (with-temp-buffer
-          (pcase-let ((`(,coding . ,utf-8) (let ((inhibit-quit nil))
-                                             (quarry-grep--read-file file))))
-            (if (and utf-8 (not (memq (coding-system-type coding) '(utf-8 undecided))))
-                ;; New UTF-8 text would be written in the other encoding.
-                (make-list (length lines) quarry-grep--ambiguous)
+          (pcase-let ((`(,coding ,utf-8 ,exact) (let ((inhibit-quit nil))
+                                                  (quarry-grep--read-file file))))
+            (cond
+             ;; Only an encoding that is ASCII or one byte per character
+             ;; can be mistaken for UTF-8 with stray bytes.
+             ((and utf-8 (not (memq (coding-system-type coding) '(utf-8 utf-16 undecided))))
+              ;; New UTF-8 text would be written in the other encoding.
+              (make-list (length lines) quarry-grep--ambiguous))
+             ((not exact)
+              (make-list (length lines) quarry-grep--not-round-trip))
+             (t
               (let* ((coding (quarry-grep--write-coding coding))
                      (results (let ((inhibit-quit nil)
                                     (inhibit-modification-hooks t))
@@ -2503,7 +2601,7 @@ with nothing written; it waits while FILE is written."
                            coding (char-after pos)))
                   (encode-coding-region (point-min) (point-max) coding)
                   (quarry-grep--write-file file))
-                results)))))
+                results))))))
     (error (make-list (length lines) (error-message-string err)))))
 
 (defun quarry-grep--mark-result (bol reason)
