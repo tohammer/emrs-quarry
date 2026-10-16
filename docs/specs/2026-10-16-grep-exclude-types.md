@@ -1,6 +1,6 @@
 # Grep: excluding file types
 
-Status: draft
+Status: approved
 Date: 2026-10-16
 
 ## Purpose
