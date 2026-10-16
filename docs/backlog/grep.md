@@ -160,6 +160,33 @@ walk is a real share of the time.
 
 Origin: review of the live grep (2026-10-12).
 
+## Excluding file types
+
+A file type can only be included today: in the files prompt of
+`quarry-grep`, `quarry-grep-literal`, `quarry-grep-project` and the
+result buffer (`f`), and with `-t` in the live grep
+(`quarry-consult-grep`). Excluding works only through globs (`!*.rs`),
+which means knowing a type's extensions. Add type exclusion, as `rg -T`
+(`--type-not`) does, to both, so that types can be included and
+excluded alike. To settle:
+
+- **Syntax in the files prompt.** `!name` is an excluding glob today,
+  and a word spelled like a type name is taken as the type, the glob
+  being written `[m]ake`. Following that rule, `!rust` would exclude the
+  type `rust` and `![r]ust` the glob. This changes what `!name` means
+  for type names, so it needs an ADR that supersedes that part of ADR
+  0017.
+- **Live grep.** `-T TYPE` and `--type-not TYPE` after ` --`, as in
+  `rg`; check the option parser of ADR 0019. The CLI (`-t`, `-g`) should
+  get the same option.
+- **How it combines** with included types and globs: an excluded type
+  wins over an included one, as in `rg`, or the order decides as for
+  globs. Add the rows to the combination tables in the README.
+- The header line of the result buffer shows the excluded types.
+
+Origin: asked for by the author on 2026-10-16. Pick it up as the next
+grep feature, or when excluding by glob gets in the way.
+
 ## Survey: find and grep features worth making native
 
 Which of Doom's `SPC s` and `SPC f` commands, and the consult commands
