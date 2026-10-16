@@ -4528,6 +4528,10 @@ and have the face of its result."
                                                       '((nil 1 "foo" "bar"))))))
            (answer nil)
            (asked nil))
+      ;; `file-locked' is defined in userlock.el, which the autoloaded
+      ;; `ask-user-about-lock' loads; the stub below replaces it.  Not
+      ;; defined, the signal escapes `error' handlers on Emacs 30.
+      (load "userlock" nil t)
       (cl-letf (((symbol-function 'ask-user-about-lock)
                  (lambda (file _user)
                    (push (list (file-name-nondirectory file) inhibit-quit) asked)
@@ -4542,7 +4546,7 @@ and have the face of its result."
           (setq answer nil asked nil)
           (let ((result (funcall replace name)))
             (should (= (length result) 1))
-            (should (string-match-p "locked" (car result))))
+            (should (equal (car result) "File is locked by someone")))
           (should (equal asked `((,name nil))))
           (should (equal (quarry-test-grep--bytes dir name) "foo\n"))
           ;; C-g: the file stays as it was and `quit' goes on.

@@ -2603,6 +2603,9 @@ written; it waits while FILE is written."
                   (encode-coding-region (point-min) (point-max) coding)
                   (quarry-grep--write-file file))
                 results))))))
+    ;; As a `file-error', its message would be only the file and the
+    ;; lock's holder.
+    (file-locked (make-list (length lines) (format "File is locked by %s" (nth 2 err))))
     (error (make-list (length lines) (error-message-string err)))))
 
 (defun quarry-grep--mark-result (bol reason)
