@@ -1420,7 +1420,7 @@ the buffers visiting files of the tree are killed."
     (with-current-buffer (quarry-test-consult-grep--result 10)
       (should (equal (quarry-grep--search-types quarry-grep--current)
                      '("!json")))
-      (should (string-match-p "!json" (format-mode-line header-line-format)))
+      (should (string-match-p " files: !json " (substring-no-properties (quarry-grep--header))))
       (should-not quarry-test-consult-grep--errors))))
 
 (ert-deftest quarry-test-consult-grep-hand-over-newer-input ()
