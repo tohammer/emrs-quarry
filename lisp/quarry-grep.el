@@ -2278,6 +2278,29 @@ number, its text and its text with each switched-on match replaced."
                   work)))))
     (nreverse work)))
 
+(defun quarry-grep--unseen-text (work)
+  "Return a note on the files of WORK whose changes are not in view.
+That is \" (N files folded, M outside the narrowing)\" with the parts
+that apply, or \"\".  A file counts as outside the narrowing when one of
+its changed lines is."
+  (let ((folded 0)
+        (outside 0))
+    (pcase-dolist (`(,_path . ,lines) work)
+      (when (cl-some (lambda (line)
+                       (or (< (car line) (point-min)) (>= (car line) (point-max))))
+                     lines)
+        (cl-incf outside))
+      (when (save-restriction
+              (widen)
+              (quarry-grep--fold-overlay (quarry-grep--block-at (car (car lines)))))
+        (cl-incf folded)))
+    (let ((parts (delq nil (list (and (> folded 0)
+                                      (concat (quarry-grep--plural folded "file") " folded"))
+                                 (and (> outside 0)
+                                      (concat (quarry-grep--plural outside "file")
+                                              " outside the narrowing"))))))
+      (if parts (format " (%s)" (string-join parts ", ")) ""))))
+
 (defun quarry-grep--replace-text (start old new)
   "Replace OLD, the text at START, with NEW.
 Only the part between their common prefix and suffix changes, so that
@@ -2663,10 +2686,11 @@ one being written is finished first."
      (t
       (let* ((work (quarry-grep--replace-work))
              (lines (apply #'+ (mapcar (lambda (file) (length (cdr file))) work))))
-        (when (y-or-n-p (format "Replace %s on %s in %s? "
+        (when (y-or-n-p (format "Replace %s on %s in %s%s? "
                                 (quarry-grep--matches-text quarry-grep--replace-on)
                                 (quarry-grep--plural lines "line")
-                                (quarry-grep--plural (length work) "file")))
+                                (quarry-grep--plural (length work) "file")
+                                (quarry-grep--unseen-text work)))
           (quarry-grep--apply work)))))))
 
 (defun quarry-grep--apply (work)

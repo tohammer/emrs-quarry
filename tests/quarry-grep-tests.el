@@ -3974,6 +3974,23 @@ and have the face of its result."
     (pcase-dolist (`(,path . ,content) (cdr quarry-test-grep--apply-files))
       (should (equal (quarry-test-grep--bytes dir path) content)))))
 
+(ert-deftest quarry-test-grep-replace-apply-unseen ()
+  "The question names files folded or outside the narrowing; they are written."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "new_$1")
+    (goto-char (quarry-test-grep--heading-pos "c.txt"))
+    (quarry-test-grep--keys "TAB")
+    (should (equal (quarry-test-grep--apply nil)
+                   '("Replace 9 matches on 6 lines in 4 files (1 file folded)? ")))
+    ;; Only a.txt in view; b.txt, c.txt and d/e.txt are outside.
+    (narrow-to-region (quarry-test-grep--heading-pos "a.txt")
+                      (quarry-test-grep--heading-pos "b.txt"))
+    (should (equal (quarry-test-grep--apply nil)
+                   '("Replace 9 matches on 6 lines in 4 files (1 file folded, 3 files outside the narrowing)? ")))
+    (should (equal (quarry-test-grep--bytes dir "c.txt") "keep\nfoo_6 end\nfoo_7\nlast line\n"))
+    (quarry-test-grep--apply t)
+    (should (equal (quarry-test-grep--bytes dir "b.txt") "x new_5\n"))
+    (should (equal (quarry-test-grep--bytes dir "c.txt") "keep\nnew_6 end\nnew_7\nlast line\n"))))
+
 (ert-deftest quarry-test-grep-replace-apply-refused ()
   "C-c C-c is refused without a complete preview with matches switched on."
   (quarry-test-grep--with-tree (dir quarry-test-grep--apply-files)

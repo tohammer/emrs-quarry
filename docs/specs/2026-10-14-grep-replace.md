@@ -163,7 +163,10 @@ the template and applies nothing; no stops and applies nothing either
 (unlike `e`, which goes on: a modified visiting buffer would be
 changed and saved with the user's unsaved edits). Without stale files
 it asks "Replace N matches
-on L lines in F files? " (`y-or-n-p`).
+on L lines in F files? " (`y-or-n-p`). (Changed on 2026-10-17, asked
+for by the author: the question adds "(N files folded, M files outside
+the narrowing)" with the parts that apply, since those files are
+written too.)
 
 For each file block with switched-on matches, in buffer order:
 

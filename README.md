@@ -788,7 +788,9 @@ preview keep the template and update the preview.
   what is shown is written, so narrow the search or raise the option. If
   a result file changed since the search (or a modified buffer visits
   it), it asks whether to search again, and writes nothing either way.
-  Otherwise it asks `Replace N matches on L lines in F files?`.
+  Otherwise it asks `Replace N matches on L lines in F files?`, and
+  names the files among them that are folded or outside a narrowing
+  (`C-x n n`): they are written too.
 - Every line is compared with the text the search found and rejected
   when it differs, or when its buffer is read-only, has unsaved changes
   or is not up to date with its file, when the file cannot be read or
