@@ -76,6 +76,13 @@ change; see `quarry-grep-set-context'."
   "Number of matching lines after which a search stops."
   :type 'natnum)
 
+(defcustom quarry-grep-replace-max-lines 100000
+  "Largest line limit that `quarry-grep-replace-apply' offers to search with.
+A replace preview that stops at `quarry-grep-max-lines' counts its
+lines up to one more than this, and \\[quarry-grep-replace-apply] offers
+to search again with a limit that holds them all."
+  :type 'natnum)
+
 (defcustom quarry-grep-max-columns 500
   "Number of characters after which a matching line is cut.
 A line that was cut is shown shortened and cannot be edited."
@@ -192,7 +199,8 @@ A context line is a line before or after a hit, shown for its sake.")
   (before 0)                            ; lines of context before each hit
   (after 0)                             ; lines of context after each hit
   filters                               ; list of `quarry-grep--filter'
-  replace)                              ; replacement template, or nil
+  replace                               ; replacement template, or nil
+  max-lines)                            ; nil, or the limit instead of the option
 
 (defun quarry-grep--primary (search)
   "Return the primary filter of SEARCH, or nil.
@@ -238,11 +246,13 @@ See the module docs of src/grep/service.rs for the fields."
            ;; Without ignore files everything is searched except the
            ;; version control directories, so the extra lines go too.
            :ignores (and (not no-ignore) quarry-ignores)
-           :max-lines quarry-grep-max-lines
+           :max-lines (or (quarry-grep--search-max-lines search)
+                          quarry-grep-max-lines)
            :max-columns quarry-grep-max-columns
            :before (quarry-grep--search-before search)
            :after (quarry-grep--search-after search))
-     (and replace (list :replace replace)))))
+     (and replace (list :replace replace
+                        :count-up-to (1+ quarry-grep-replace-max-lines))))))
 
 ;;;; The instance
 
@@ -344,6 +354,11 @@ module that is loaded has no grep service."
 
 (defvar-local quarry-grep--summary nil
   "The summary item of the finished search, a plist, or nil.")
+
+(defvar-local quarry-grep--count-max nil
+  "The largest exact `:total' the current search can report, or nil.
+That is one less than the `:count-up-to' its request sent; a larger
+`:total' means more lines than that.  Nil for a search without one.")
 
 (defvar-local quarry-grep--error-filter nil
   "The filter the service rejected, or nil.")
@@ -652,8 +667,14 @@ replacement, the matches of a line with new texts get them."
             (skipped (or (plist-get summary :skipped) 0)))
        (concat
         (cond ((plist-get summary :truncated)
-               (format "Search stopped at %d lines, narrow the search: %s"
-                       quarry-grep--lines (quarry-grep--counts-text)))
+               (let ((total (plist-get summary :total)))
+                 (format "Search stopped at %d %slines, narrow the search: %s"
+                         quarry-grep--lines
+                         (cond ((null total) "")
+                               ((> total (quarry-grep--count-bound))
+                                (format "of more than %d " (quarry-grep--count-bound)))
+                               (t (format "of %d " total)))
+                         (quarry-grep--counts-text))))
               ((zerop quarry-grep--lines)
                (format "Search finished: no matches in %s"
                        (quarry-grep--plural (or (plist-get summary :files-searched) 0)
@@ -851,7 +872,8 @@ all empty."
 The search with the template does not become a history entry: it
 cannot run as long as that module is loaded."
   (let ((search (quarry-grep--copy-search quarry-grep--current)))
-    (setf (quarry-grep--search-replace search) nil)
+    (setf (quarry-grep--search-replace search) nil
+          (quarry-grep--search-max-lines search) nil)
     (setq quarry-grep--current (if (equal search (car quarry-grep--past))
                                    (pop quarry-grep--past)
                                  search))
@@ -941,7 +963,13 @@ stop the search from starting any more."
     (condition-case err
         (setq quarry-grep--call
               (emrs-call-stream
-               instance (quarry-grep--request search)
+               instance (let ((request (quarry-grep--request search)))
+                          ;; The bound in force, also when the option
+                          ;; changes before the summary is looked at.
+                          (setq quarry-grep--count-max
+                                (when-let* ((n (plist-get (cdr request) :count-up-to)))
+                                  (1- n)))
+                          request)
                :on-batch (lambda (items)
                            (quarry-grep--on-batch buffer serial items))
                :on-end (lambda (status err)
@@ -1445,7 +1473,9 @@ runs and the search has a replacement template, run it without one."
          (emrs-cancel quarry-grep--call))
         ((quarry-grep--replace-p)
          (quarry-grep--change
-          (lambda (search) (setf (quarry-grep--search-replace search) nil))))
+          (lambda (search)
+            (setf (quarry-grep--search-replace search) nil
+                  (quarry-grep--search-max-lines search) nil))))
         (t (user-error "No search is running"))))
 
 (defvar quarry-grep-replace-history nil
@@ -2237,6 +2267,9 @@ the package wgrep."
 
 (defun quarry-grep--apply-refusal ()
   "Return why `quarry-grep-replace-apply' cannot run now, or nil.
+A truncated preview whose summary has an exact `:total' (see
+`quarry-grep--count-max') and switched-on matches is no refusal: the
+command then asks to search again with a limit that holds all lines.
 Does not signal."
   (cond ((not (quarry-grep--replace-p))
          "The results do not preview a replacement; R starts one")
@@ -2249,14 +2282,25 @@ Does not signal."
         ((eq quarry-grep--state 'cancelled)
          "The search was cancelled, so the preview is not complete; g searches again")
         ((plist-get quarry-grep--summary :truncated)
-         "The search stopped at its line limit and only what is shown would be replaced; narrow the search or raise `quarry-grep-max-lines'")
+         ;; With an exact total, `quarry-grep-replace-apply' asks to
+         ;; search again, which is not a refusal.
+         (let ((total (plist-get quarry-grep--summary :total)))
+           (cond ((null total)
+                  "The search stopped at its line limit and only what is shown would be replaced; narrow the search or raise `quarry-grep-max-lines'")
+                 ((> total (quarry-grep--count-bound))
+                  (format "More than %d lines match; narrow the search (README, \"Large replacements\")"
+                          (quarry-grep--count-bound)))
+                 ;; The search again would switch them all on.
+                 ((zerop quarry-grep--replace-on)
+                  "No match is switched on"))))
         ((zerop quarry-grep--replace-on)
          "No match is switched on")))
 
 (defun quarry-grep--applicable-p ()
   "Return non-nil when `quarry-grep-replace-apply' can run.
 That is during a complete preview with matches switched on that was
-not applied yet.  Does not signal."
+not applied yet, or one that stopped at its line limit and counted all
+lines, so that the command can offer a larger limit.  Does not signal."
   (not (quarry-grep--apply-refusal)))
 
 (defun quarry-grep--replace-work ()
@@ -2300,6 +2344,29 @@ number, its text and its text with each switched-on match replaced."
                         (sort lines (lambda (a b) (< (nth 1 a) (nth 1 b)))))
                   work)))))
     (nreverse work)))
+
+(defun quarry-grep--unseen-text (work)
+  "Return a note on the files of WORK whose changes are not in view.
+That is \" (N files folded, M outside the narrowing)\" with the parts
+that apply, or \"\".  A file counts as outside the narrowing when one of
+its changed lines is."
+  (let ((folded 0)
+        (outside 0))
+    (pcase-dolist (`(,_path . ,lines) work)
+      (when (cl-some (lambda (line)
+                       (or (< (car line) (point-min)) (>= (car line) (point-max))))
+                     lines)
+        (cl-incf outside))
+      (when (save-restriction
+              (widen)
+              (quarry-grep--fold-overlay (quarry-grep--block-at (car (car lines)))))
+        (cl-incf folded)))
+    (let ((parts (delq nil (list (and (> folded 0)
+                                      (concat (quarry-grep--plural folded "file") " folded"))
+                                 (and (> outside 0)
+                                      (concat (quarry-grep--plural outside "file")
+                                              " outside the narrowing"))))))
+      (if parts (format " (%s)" (string-join parts ", ")) ""))))
 
 (defun quarry-grep--replace-text (start old new)
   "Replace OLD, the text at START, with NEW.
@@ -2657,8 +2724,41 @@ written; it waits while FILE is written."
   "Return \"N match\" or \"N matches\"."
   (format "%d match%s" n (if (= n 1) "" "es")))
 
+(defun quarry-grep--truncated-total ()
+  "Return the exact `:total' of a truncated preview, or nil.
+That is the number of lines the search counted in all, including those
+beyond its limit, when it is at most `quarry-grep--count-bound'."
+  (and (quarry-grep--replace-p)
+       (plist-get quarry-grep--summary :truncated)
+       (let ((total (plist-get quarry-grep--summary :total)))
+         (and total (<= total (quarry-grep--count-bound)) total))))
+
+(defun quarry-grep--count-bound ()
+  "Return the largest exact `:total' of the current search.
+That is `quarry-grep--count-max', or `quarry-grep-replace-max-lines'
+for a search that sent no bound."
+  (or quarry-grep--count-max quarry-grep-replace-max-lines))
+
+(defun quarry-grep--offer-limit (total)
+  "Ask whether to search again with a limit that holds TOTAL lines; do so on yes.
+The limit is one more than TOTAL: a search that reaches its limit
+exactly counts as stopped there.  The template stays.  Nothing is
+written."
+  (when (y-or-n-p (format "%d lines match, the limit is %d; search again with a limit that holds them all? "
+                          total
+                          (or (quarry-grep--search-max-lines quarry-grep--current)
+                              quarry-grep-max-lines)))
+    (quarry-grep--change
+     (lambda (search)
+       (setf (quarry-grep--search-max-lines search) (1+ total))))
+    (message "Searching again; press C-c C-c when the search is done")))
+
 (defun quarry-grep-replace-apply ()
   "Write the switched-on matches of the preview into the files.
+When the preview stopped at its line limit and counted all matching
+lines (up to `quarry-grep-replace-max-lines'), ask instead whether to
+search again with a limit that holds them, and write nothing.  Above
+that option, or without a count, it is refused.
 Each line is compared with the text of the search first and rejected
 when it differs.  A buffer that visits a file is changed and saved;
 other files are read, changed and written back in their encoding, with
@@ -2671,6 +2771,12 @@ one being written is finished first."
   (quarry-grep--current)
   (when-let* ((refusal (quarry-grep--apply-refusal)))
     (user-error "%s" refusal))
+  (if-let* ((total (quarry-grep--truncated-total)))
+      (quarry-grep--offer-limit total)
+    (quarry-grep--apply-checked)))
+
+(defun quarry-grep--apply-checked ()
+  "Write the switched-on matches after the stale-files check."
   (let ((stale (quarry-grep--stale-files)))
     (cond
      ((and stale
@@ -2686,10 +2792,11 @@ one being written is finished first."
      (t
       (let* ((work (quarry-grep--replace-work))
              (lines (apply #'+ (mapcar (lambda (file) (length (cdr file))) work))))
-        (when (y-or-n-p (format "Replace %s on %s in %s? "
+        (when (y-or-n-p (format "Replace %s on %s in %s%s? "
                                 (quarry-grep--matches-text quarry-grep--replace-on)
                                 (quarry-grep--plural lines "line")
-                                (quarry-grep--plural (length work) "file")))
+                                (quarry-grep--plural (length work) "file")
+                                (quarry-grep--unseen-text work)))
           (quarry-grep--apply work)))))))
 
 (defun quarry-grep--apply (work)
