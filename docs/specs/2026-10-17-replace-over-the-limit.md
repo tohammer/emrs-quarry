@@ -95,9 +95,13 @@ switched on".
 
 | `:total` | What `C-c C-c` does |
 |---|---|
-| at most `quarry-grep-replace-max-lines` | Asks `73412 lines match, over the limit of 50000; search again with a limit of 73412? ` (`y-or-n-p`). Yes sets the slot to `:total` and runs the search (`quarry-grep--change`), with the message `Searching again; press C-c C-c when the search is done`. No does nothing |
+| at most `quarry-grep-replace-max-lines` | Asks `73412 lines match, the limit is 50000; search again with a limit that holds them all? ` (`y-or-n-p`). Yes sets the slot to `:total` + 1 and runs the search (`quarry-grep--change`), with the message `Searching again; press C-c C-c when the search is done`. No does nothing |
 | above it | `user-error`: `More than 100000 lines match; narrow the search (README, "Large replacements")` |
 | missing (an older module) | The refusal from before |
+
+(Changed during task 3: the limit was `:total`, but a search that
+reaches its limit exactly counts as truncated, so the rerun was
+truncated again and asked again. Decided by the author on 2026-10-17.)
 
 The message names the limit currently in force (the slot, else the
 option) and the total from the summary. In the menu (`?`), the `C-c C-c`
@@ -176,7 +180,7 @@ PR #7 is merged.
   `max-lines` slot, `:count-up-to` with a template, the option, the
   status line, and their ERT tests. *Done when* `tests/run-ert.sh`
   passes and a request without a template is byte for byte as before.
-- [ ] 3. **The question in `C-c C-c`** (after 2). The three cases of the
+- [x] 3. **The question in `C-c C-c`** (after 2). The three cases of the
   table, the menu entry, the real search test, and the README sections
   ("Replacing matches", "Large replacements", the options table). *Done
   when* `tests/run-ert.sh` passes on Emacs 30 and 31 and the README

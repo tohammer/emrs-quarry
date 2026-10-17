@@ -2233,7 +2233,9 @@ the package wgrep."
 
 (defun quarry-grep--apply-refusal ()
   "Return why `quarry-grep-replace-apply' cannot run now, or nil.
-Does not signal."
+A truncated preview whose summary has an exact `:total' (at most
+`quarry-grep-replace-max-lines') is no refusal: the command then asks
+to search again with a limit that holds all lines.  Does not signal."
   (cond ((not (quarry-grep--replace-p))
          "The results do not preview a replacement; R starts one")
         (quarry-grep--replace-applied
@@ -2245,14 +2247,22 @@ Does not signal."
         ((eq quarry-grep--state 'cancelled)
          "The search was cancelled, so the preview is not complete; g searches again")
         ((plist-get quarry-grep--summary :truncated)
-         "The search stopped at its line limit and only what is shown would be replaced; narrow the search or raise `quarry-grep-max-lines'")
+         ;; With an exact total, `quarry-grep-replace-apply' asks to
+         ;; search again, which is not a refusal.
+         (let ((total (plist-get quarry-grep--summary :total)))
+           (cond ((null total)
+                  "The search stopped at its line limit and only what is shown would be replaced; narrow the search or raise `quarry-grep-max-lines'")
+                 ((> total quarry-grep-replace-max-lines)
+                  (format "More than %d lines match; narrow the search (README, \"Large replacements\")"
+                          quarry-grep-replace-max-lines)))))
         ((zerop quarry-grep--replace-on)
          "No match is switched on")))
 
 (defun quarry-grep--applicable-p ()
   "Return non-nil when `quarry-grep-replace-apply' can run.
 That is during a complete preview with matches switched on that was
-not applied yet.  Does not signal."
+not applied yet, or one that stopped at its line limit and counted all
+lines, so that the command can offer a larger limit.  Does not signal."
   (not (quarry-grep--apply-refusal)))
 
 (defun quarry-grep--replace-work ()
@@ -2676,8 +2686,35 @@ written; it waits while FILE is written."
   "Return \"N match\" or \"N matches\"."
   (format "%d match%s" n (if (= n 1) "" "es")))
 
+(defun quarry-grep--truncated-total ()
+  "Return the exact `:total' of a truncated preview, or nil.
+That is the number of lines the search counted in all, including those
+beyond its limit, when it is at most `quarry-grep-replace-max-lines'."
+  (and (quarry-grep--replace-p)
+       (plist-get quarry-grep--summary :truncated)
+       (let ((total (plist-get quarry-grep--summary :total)))
+         (and total (<= total quarry-grep-replace-max-lines) total))))
+
+(defun quarry-grep--offer-limit (total)
+  "Ask whether to search again with a limit that holds TOTAL lines; do so on yes.
+The limit is one more than TOTAL: a search that reaches its limit
+exactly counts as stopped there.  The template stays.  Nothing is
+written."
+  (when (y-or-n-p (format "%d lines match, the limit is %d; search again with a limit that holds them all? "
+                          total
+                          (or (quarry-grep--search-max-lines quarry-grep--current)
+                              quarry-grep-max-lines)))
+    (quarry-grep--change
+     (lambda (search)
+       (setf (quarry-grep--search-max-lines search) (1+ total))))
+    (message "Searching again; press C-c C-c when the search is done")))
+
 (defun quarry-grep-replace-apply ()
   "Write the switched-on matches of the preview into the files.
+When the preview stopped at its line limit and counted all matching
+lines (up to `quarry-grep-replace-max-lines'), ask instead whether to
+search again with a limit that holds them, and write nothing.  Above
+that option, or without a count, it is refused.
 Each line is compared with the text of the search first and rejected
 when it differs.  A buffer that visits a file is changed and saved;
 other files are read, changed and written back in their encoding, with
@@ -2690,6 +2727,12 @@ one being written is finished first."
   (quarry-grep--current)
   (when-let* ((refusal (quarry-grep--apply-refusal)))
     (user-error "%s" refusal))
+  (if-let* ((total (quarry-grep--truncated-total)))
+      (quarry-grep--offer-limit total)
+    (quarry-grep--apply-checked)))
+
+(defun quarry-grep--apply-checked ()
+  "Write the switched-on matches after the stale-files check."
   (let ((stale (quarry-grep--stale-files)))
     (cond
      ((and stale

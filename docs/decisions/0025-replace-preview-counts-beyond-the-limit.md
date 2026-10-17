@@ -31,7 +31,8 @@ Chosen by the author on 2026-10-17: the third.
   one more than `quarry-grep-replace-max-lines` (100,000), so a `:total`
   of at most that option is exact and a larger one means "more".
 - `C-c C-c` on a truncated preview with an exact `:total` asks whether to
-  search again with a limit of `:total`. That limit belongs to the search
+  search again with a limit of `:total` + 1 (a search that reaches its
+  limit exactly counts as truncated). That limit belongs to the search
   value, like the template, and does not change the option.
 
 ## Consequences

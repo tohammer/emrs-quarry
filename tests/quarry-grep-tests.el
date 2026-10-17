@@ -4083,10 +4083,101 @@ and have the face of its result."
     (let ((quarry-grep-max-lines 2))
       (quarry-test-grep--keys "g")
       (should (plist-get quarry-grep--summary :truncated))
+      ;; The module counts beyond the cap: a total is no refusal.
+      (should (plist-get quarry-grep--summary :total))
+      (should (quarry-grep--applicable-p))
+      ;; An older module sends no total.
+      (setq quarry-grep--summary
+            (plist-put (copy-sequence quarry-grep--summary) :total nil))
       (should-not (quarry-grep--applicable-p))
       (quarry-test-grep--refused "narrow the search or raise `quarry-grep-max-lines'"
         (quarry-grep-replace-apply)))
     (should (equal (quarry-test-grep--bytes dir "a.txt") "foo_1 and foo_2\nnothing\nfoo_3 foo_4\n"))))
+
+(defun quarry-test-grep--fake-total (total)
+  "Make the summary of the current preview a truncated one with TOTAL."
+  (setq quarry-grep--summary
+        (plist-put (plist-put (copy-sequence quarry-grep--summary) :truncated t)
+                   :total total)))
+
+(ert-deftest quarry-test-grep-replace-apply-offers-limit ()
+  "A truncated preview with an exact total asks for a larger limit; no writes."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
+    (let ((quarry-grep-replace-max-lines 100000)
+          (before (quarry-test-grep--bytes dir "a.txt"))
+          (sent (length quarry-test-grep--requests)))
+      (quarry-test-grep--fake-total 73412)
+      (should (quarry-grep--applicable-p))
+      (should-not (quarry-test-grep--menu-inactive '("C-c C-c")))
+      ;; No: nothing is sent or written.
+      (should (equal (quarry-test-grep--apply nil)
+                     '("73412 lines match, the limit is 50000; search again with a limit that holds them all? ")))
+      (should (= (length quarry-test-grep--requests) sent))
+      (should (equal (quarry-test-grep--bytes dir "a.txt") before))
+      (should-not quarry-grep--replace-applied)
+      ;; Yes: the search runs again with the raised limit and the template.
+      (let ((messages (quarry-test-grep--messages
+                       (lambda () (quarry-test-grep--apply t)))))
+        (should (equal messages
+                       '("Searching again; press C-c C-c when the search is done"))))
+      (should (= (length quarry-test-grep--requests) (1+ sent)))
+      (should (= (quarry-test-grep--request :max-lines) 73413))
+      (should (equal (quarry-test-grep--request :replace) "bar_$1"))
+      (quarry-test-grep--wait)
+      (should (equal (quarry-test-grep--bytes dir "a.txt") before))
+      ;; The question names the slot as the limit in force.
+      (quarry-test-grep--fake-total 80000)
+      (should (equal (quarry-test-grep--apply nil)
+                     '("80000 lines match, the limit is 73413; search again with a limit that holds them all? "))))))
+
+(ert-deftest quarry-test-grep-replace-apply-over-option ()
+  "A total above the option, or none, is refused; the menu entry is inactive."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
+    (let ((quarry-grep-replace-max-lines 100000))
+      (quarry-test-grep--fake-total 100001)
+      (should-not (quarry-grep--applicable-p))
+      (should (equal (quarry-test-grep--menu-inactive '("C-c C-c")) '("C-c C-c")))
+      (quarry-test-grep--refused
+          "More than 100000 lines match; narrow the search (README, \"Large replacements\")"
+        (quarry-grep-replace-apply))
+      (setq quarry-grep--summary (plist-put quarry-grep--summary :total nil))
+      (should-not (quarry-grep--applicable-p))
+      (should (equal (quarry-test-grep--menu-inactive '("C-c C-c")) '("C-c C-c")))
+      (quarry-test-grep--refused "narrow the search or raise `quarry-grep-max-lines'"
+        (quarry-grep-replace-apply)))
+    ;; The option's value is named.
+    (let ((quarry-grep-replace-max-lines 5))
+      (quarry-test-grep--fake-total 6)
+      (quarry-test-grep--refused "More than 5 lines match"
+        (quarry-grep-replace-apply)))
+    (should (equal (quarry-test-grep--bytes dir "a.txt") "foo_1 and foo_2\nnothing\nfoo_3 foo_4\n"))))
+
+(ert-deftest quarry-test-grep-replace-apply-over-the-limit-real ()
+  "A real search over a small limit: yes searches again, then C-c C-c writes all."
+  (quarry-test-grep--with-tree
+      (dir '(("a.txt" . "foo_1\nfoo_2\nfoo_3\n")
+             ("b.txt" . "x foo_4\n")
+             ("c.txt" . "foo_5 end\nfoo_6\n")
+             ("d/e.txt" . "foo_7\n")))
+    (let ((quarry-grep-max-lines 3)
+          (quarry-grep-replace-max-lines 100)
+          (make-backup-files nil))
+      (quarry-test-grep--search dir "foo_([0-9])")
+      (quarry-grep-replace "bar_$1")
+      (quarry-test-grep--wait)
+      (pop-to-buffer-same-window (quarry-test-grep--buffer))
+      (should (plist-get quarry-grep--summary :truncated))
+      (should (= (plist-get quarry-grep--summary :total) 7))
+      (should (equal (quarry-test-grep--apply t)
+                     '("7 lines match, the limit is 3; search again with a limit that holds them all? ")))
+      (quarry-test-grep--wait)
+      (should-not (plist-get quarry-grep--summary :truncated))
+      (should (equal (quarry-test-grep--apply t)
+                     '("Replace 7 matches on 7 lines in 4 files? ")))
+      (should (equal (quarry-test-grep--bytes dir "a.txt") "bar_1\nbar_2\nbar_3\n"))
+      (should (equal (quarry-test-grep--bytes dir "b.txt") "x bar_4\n"))
+      (should (equal (quarry-test-grep--bytes dir "c.txt") "bar_5 end\nbar_6\n"))
+      (should (equal (quarry-test-grep--bytes dir "d/e.txt") "bar_7\n")))))
 
 (ert-deftest quarry-test-grep-replace-apply-stale ()
   "A file changed since the search: search again, or stop without writing."
