@@ -172,7 +172,7 @@ PR #7 is merged.
   paragraph on the cap, with the `cargo test` cases above. *Done when*
   `cargo test`, clippy and fmt pass, and the existing cap tests pass
   unchanged.
-- [ ] 2. **Search value, request and status line** (after 1). The
+- [x] 2. **Search value, request and status line** (after 1). The
   `max-lines` slot, `:count-up-to` with a template, the option, the
   status line, and their ERT tests. *Done when* `tests/run-ert.sh`
   passes and a request without a template is byte for byte as before.

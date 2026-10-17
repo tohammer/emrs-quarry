@@ -76,6 +76,13 @@ change; see `quarry-grep-set-context'."
   "Number of matching lines after which a search stops."
   :type 'natnum)
 
+(defcustom quarry-grep-replace-max-lines 100000
+  "Largest line limit that `quarry-grep-replace-apply' offers to search with.
+A replace preview that stops at `quarry-grep-max-lines' counts its
+lines up to one more than this, and \\[quarry-grep-replace-apply] offers
+to search again with a limit that holds them all."
+  :type 'natnum)
+
 (defcustom quarry-grep-max-columns 500
   "Number of characters after which a matching line is cut.
 A line that was cut is shown shortened and cannot be edited."
@@ -192,7 +199,8 @@ A context line is a line before or after a hit, shown for its sake.")
   (before 0)                            ; lines of context before each hit
   (after 0)                             ; lines of context after each hit
   filters                               ; list of `quarry-grep--filter'
-  replace)                              ; replacement template, or nil
+  replace                               ; replacement template, or nil
+  max-lines)                            ; nil, or the limit instead of the option
 
 (defun quarry-grep--primary (search)
   "Return the primary filter of SEARCH, or nil.
@@ -238,11 +246,13 @@ See the module docs of src/grep/service.rs for the fields."
            ;; Without ignore files everything is searched except the
            ;; version control directories, so the extra lines go too.
            :ignores (and (not no-ignore) quarry-ignores)
-           :max-lines quarry-grep-max-lines
+           :max-lines (or (quarry-grep--search-max-lines search)
+                          quarry-grep-max-lines)
            :max-columns quarry-grep-max-columns
            :before (quarry-grep--search-before search)
            :after (quarry-grep--search-after search))
-     (and replace (list :replace replace)))))
+     (and replace (list :replace replace
+                        :count-up-to (1+ quarry-grep-replace-max-lines))))))
 
 ;;;; The instance
 
@@ -637,8 +647,14 @@ replacement, the matches of a line with new texts get them."
             (skipped (or (plist-get summary :skipped) 0)))
        (concat
         (cond ((plist-get summary :truncated)
-               (format "Search stopped at %d lines, narrow the search: %s"
-                       quarry-grep--lines (quarry-grep--counts-text)))
+               (let ((total (plist-get summary :total)))
+                 (format "Search stopped at %d %slines, narrow the search: %s"
+                         quarry-grep--lines
+                         (cond ((null total) "")
+                               ((> total quarry-grep-replace-max-lines)
+                                (format "of more than %d " quarry-grep-replace-max-lines))
+                               (t (format "of %d " total)))
+                         (quarry-grep--counts-text))))
               ((zerop quarry-grep--lines)
                (format "Search finished: no matches in %s"
                        (quarry-grep--plural (or (plist-get summary :files-searched) 0)
@@ -836,7 +852,8 @@ all empty."
 The search with the template does not become a history entry: it
 cannot run as long as that module is loaded."
   (let ((search (quarry-grep--copy-search quarry-grep--current)))
-    (setf (quarry-grep--search-replace search) nil)
+    (setf (quarry-grep--search-replace search) nil
+          (quarry-grep--search-max-lines search) nil)
     (setq quarry-grep--current (if (equal search (car quarry-grep--past))
                                    (pop quarry-grep--past)
                                  search))
@@ -1424,7 +1441,9 @@ runs and the search has a replacement template, run it without one."
          (emrs-cancel quarry-grep--call))
         ((quarry-grep--replace-p)
          (quarry-grep--change
-          (lambda (search) (setf (quarry-grep--search-replace search) nil))))
+          (lambda (search)
+            (setf (quarry-grep--search-replace search) nil
+                  (quarry-grep--search-max-lines search) nil))))
         (t (user-error "No search is running"))))
 
 (defvar quarry-grep-replace-history nil

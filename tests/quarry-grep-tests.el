@@ -3777,6 +3777,64 @@ DISPLAY is the text of the `display' property, or nil."
       (should-not (quarry-grep--replace-p))
       (should-not (plist-member (cdr (car (car quarry-test-grep--fake))) :replace)))))
 
+(ert-deftest quarry-test-grep-replace-count-request ()
+  "A template adds :count-up-to; the slot replaces the option as :max-lines."
+  (quarry-test-grep--with-preview (dir)
+    (should-not (plist-member (cdr (quarry-test-grep--request)) :count-up-to))
+    (should (= (quarry-test-grep--request :max-lines) quarry-grep-max-lines))
+    (let ((quarry-grep-replace-max-lines 7))
+      (quarry-grep-replace "bar_$1")
+      (quarry-test-grep--wait)
+      (should (= (quarry-test-grep--request :count-up-to) 8))
+      (should (= (quarry-test-grep--request :max-lines) quarry-grep-max-lines))
+      ;; The slot takes the place of the option, and is carried.
+      (setf (quarry-grep--search-max-lines quarry-grep--current) 3)
+      (quarry-test-grep--keys "g")
+      (should (= (quarry-test-grep--request :max-lines) 3))
+      (should (= (quarry-test-grep--request :count-up-to) 8))
+      (quarry-test-grep--keys "+ l and RET")
+      (should (= (quarry-test-grep--request :max-lines) 3))
+      (should (= (quarry-grep--search-max-lines quarry-grep--current) 3))
+      (quarry-test-grep--keys "g")
+      (should (= (quarry-grep--search-max-lines quarry-grep--current) 3))
+      ;; Each search value has its own slot.
+      (quarry-test-grep--keys "C-c < C-c <")
+      (should-not (quarry-grep--replace-p))
+      (should-not (quarry-grep--search-max-lines quarry-grep--current))
+      (quarry-test-grep--keys "C-c > C-c >")
+      (should (= (quarry-grep--search-max-lines quarry-grep--current) 3))
+      ;; C-c C-k drops the template and the slot.
+      (quarry-test-grep--keys "C-c C-k")
+      (should-not (quarry-grep--replace-p))
+      (should-not (quarry-grep--search-max-lines quarry-grep--current))
+      (should-not (plist-member (cdr (quarry-test-grep--request)) :count-up-to))
+      (should (= (quarry-test-grep--request :max-lines) quarry-grep-max-lines)))))
+
+(ert-deftest quarry-test-grep-replace-truncated-status ()
+  "The status line of a truncated search names :total when it has one."
+  (quarry-test-grep--with-preview (dir)
+    (let ((quarry-grep-replace-max-lines 100000))
+      (cl-flet ((status (&rest summary)
+                  (quarry-test-grep--with-fake-stream
+                    (quarry-grep-rerun)
+                    (set-buffer (quarry-test-grep--buffer))
+                    (funcall (nth 1 (car quarry-test-grep--fake))
+                             (list (quarry-test-grep--item "a.txt" '(1 "foo_1" 0 5))
+                                   (append (list :summary :files-searched 2 :files-matched 1
+                                                 :lines 1 :truncated t :sorted t
+                                                 :millis 5 :skipped 0)
+                                           summary)))
+                    (funcall (nth 2 (car quarry-test-grep--fake)) 'done nil)
+                    (quarry-test-grep--status))))
+        (should (equal (status :total 73412)
+                       "Search stopped at 1 of 73412 lines, narrow the search: 1 line in 1 file, 5 ms"))
+        (should (equal (status :total 100000)
+                       "Search stopped at 1 of 100000 lines, narrow the search: 1 line in 1 file, 5 ms"))
+        (should (equal (status :total 100001)
+                       "Search stopped at 1 of more than 100000 lines, narrow the search: 1 line in 1 file, 5 ms"))
+        (should (equal (status)
+                       "Search stopped at 1 lines, narrow the search: 1 line in 1 file, 5 ms"))))))
+
 (ert-deftest quarry-test-grep-replace-old-module ()
   "A module that ignores :replace: the search runs without the template."
   (quarry-test-grep--with-tree (dir)
