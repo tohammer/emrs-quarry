@@ -785,7 +785,7 @@ preview keep the template and update the preview.
 - `C-c C-c` writes the switched-on matches. It is refused while a search
   runs, after a failed or cancelled search, when no match is switched
   on, and when the result is truncated at `quarry-grep-max-lines`: only
-  what is shown is written, so narrow the search or raise the option. If
+  what is shown is written, so narrow the search or raise the option (see "Large replacements"). If
   a result file changed since the search (or a modified buffer visits
   it), it asks whether to search again, and writes nothing either way.
   Otherwise it asks `Replace N matches on L lines in F files?`, and
@@ -845,6 +845,35 @@ preview keep the template and update the preview.
 The replace needs the new module: rebuild it with `M-x
 quarry-build-module` and restart Emacs. An older module is detected when
 the search with the template gets its first results; the search then runs without the template and says to rebuild.
+
+#### Large replacements
+
+A search stops at `quarry-grep-max-lines` hits (50,000 by default;
+context lines do not count), and `C-c C-c` refuses a result that
+stopped there. Three ways through:
+
+- **Raise the limit for this search.** Each search reads the option when
+  it starts, so `M-: (setq quarry-grep-max-lines 300000)` and then `g`
+  in the result buffer search again with the template. Measured on a
+  laptop (`docs/architecture/grep.md`, "Cost of large change sets"): the
+  preview takes about 3 s per 100,000 hits, applying about 1 ms per file
+  on an SSD, so 10,000 files take about 13 s. Above about 100,000 hits
+  nothing was measured; the buffer and the Emacs thread become the
+  limit. Set the option back afterwards.
+- **Replace part by part.** A filter change keeps the template, and what
+  it leaves out is not written. Limit the search to one part (`+ p
+  src/foo/`, `+ d` on a result, or `f` with `src/foo/**`), check the
+  preview, `C-c C-c`, then change the filter to the next part. Pressing
+  `g` again does not work as batching: while more hits remain than the
+  limit, the result stays truncated and `C-c C-c` refused.
+- **Match fewer lines.** Word boundaries (`\bold_name\b`), an include
+  line filter (`+ l`) for the context the change belongs to, or leaving
+  out generated and vendored directories (`f` with `!vendor/ !gen/`, or
+  `- p`) often bring the hits under the limit and make the preview
+  easier to review.
+
+For changes of millions of lines, a command-line tool such as `fastmod`
+or `rg -l | xargs sed` is the better fit.
 
 ### Live grep
 
