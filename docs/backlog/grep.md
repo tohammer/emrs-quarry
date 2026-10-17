@@ -160,12 +160,6 @@ walk is a real share of the time.
 
 Origin: review of the live grep (2026-10-12).
 
-## Excluding file types
-
-Specified in `docs/specs/2026-10-16-grep-exclude-types.md` (ADR 0024):
-`!TYPE` in the files prompt, `-T TYPE` in the live grep. Origin: asked
-for by the author on 2026-10-16. Remove when the spec is implemented.
-
 ## Survey: find and grep features worth making native
 
 Which of Doom's `SPC s` and `SPC f` commands, and the consult commands

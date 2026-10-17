@@ -56,7 +56,8 @@ Chosen by the author on 2026-10-16:
   change what is searched, since the last occurrence decides anyway.
 - The glob `!NAME` for a type name now means something else. A file or
   directory named exactly like a type is rare; such a glob is written
-  `![N]AME`.
+  `![N]AME`, and the header line and the default of `f` write a glob
+  that way, so it reads back as a glob.
 - One list keeps the order of included and excluded types. A separate
   field for excluded types would lose it.
 - A misspelled excluded type in the files prompt is a glob that excludes

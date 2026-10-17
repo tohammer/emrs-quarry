@@ -1,7 +1,8 @@
 # 0017 — Grep globs are path globs that only restrict
 
 Date: 2026-10-12
-Status: accepted
+Status: accepted; the last consequence superseded in part by ADR 0024
+(`!NAME` for a type name excludes the type)
 
 ## Context
 

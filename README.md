@@ -436,7 +436,8 @@ A word that is a type name is a type, in any number; a word `!NAME`
 where NAME is a type name excludes the type; every other word is a glob.
 A glob that is spelled like a type name or like an excluded type is
 taken as the type; write the glob another way, `[m]ake` for `make` or
-`![r]ust` for `!rust`.
+`![r]ust` for `!rust`. The header line and the default of `f` write
+such a glob that way, for example one from the live grep's `-g`.
 
 How the restrictions combine:
 

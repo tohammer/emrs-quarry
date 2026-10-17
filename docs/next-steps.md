@@ -7,8 +7,9 @@ architecture.md or an ADR.
 
 - Rebuild the module (`M-x quarry-build-module`) and restart Emacs: path
   globs, context lines and replace need the new module. An older one
-  refuses a glob with `/`, shows no context, and ignores a replace
-  template (quarry-grep detects that and says so).
+  refuses a glob with `/`, shows no context, ignores a replace
+  template (quarry-grep detects that and says so), and refuses an
+  excluded file type (`!json`, `-T json`) as `unknown file type`.
 - Update the `emrs` package before that restart (`doom sync -u`, or pull
   a local checkout): `project-files` from the index now needs
   `emrs-call-stream-sync`, which an older `emrs.el` does not have.

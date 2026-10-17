@@ -1,6 +1,6 @@
 # Grep: excluding file types
 
-Status: approved
+Status: implemented
 Date: 2026-10-16
 
 ## Purpose
@@ -96,7 +96,9 @@ cpp`. `README` is of no type.)
   what is searched is the same, though the list's order can differ
   (`txt rust txt` gives `("rust" "txt")`).
 - `quarry-grep--files-text` is unchanged: the types in their order, then
-  the globs. So the header line and the prompt default show `rust !json
+  the globs. (Changed after the review: a glob spelled like a type or
+  an excluded type is written `[m]ake` or `![m]ake`, so that the text
+  reads back as the same restriction; `f` fetches the type list first.) So the header line and the prompt default show `rust !json
   !gen/**` with no extra work. Types and globs are separate restrictions,
   so their relative order does not matter.
 - The docstrings of `quarry-grep`, `quarry-grep-literal`,
@@ -179,10 +181,6 @@ Manual, in the author's setup after rebuilding the module:
 
 ## Tasks
 
-The implementation branch starts from `master` once the replace branch
-(PR #7) is merged: that branch changes the same README sections and
-`quarry-grep.el`.
-
 - [x] 1. **Service.** Excluded types in `:file-types` as under "Service":
   `select` and `negate` in order, the error for a bad `!` entry, the
   module docs (the `:file-types` row and the error table), the
@@ -202,7 +200,7 @@ The implementation branch starts from `master` once the replace branch
   architecture's live grep paragraph, and the ERT tests for the parser
   and the hand-over. *Done when* `tests/run-ert.sh` passes with consult
   on `QUARRY_TEST_LOAD_PATH`, and the live grep tests pass unchanged.
-- [ ] 4. **Docs wrap-up.** The backlog item "Excluding file types" is
+- [x] 4. **Docs wrap-up.** The backlog item "Excluding file types" is
   removed, next-steps says to rebuild the module for `!TYPE`, and the
   spec is set to `implemented`. *Done when* `devflow:doc-checker` reports
   nothing stale for the branch.
