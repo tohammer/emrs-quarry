@@ -19,7 +19,7 @@
 //! | `:dir` | string: absolute path of an existing directory | |
 //! | `:filters` | list of `(:target :line :exclude nil :pattern "foo" :regexp t)`: the enabled filters in the buffer's order; `:target` is `:line` or `:path`, `:exclude` and `:regexp` may be left out. At least one must be an include line filter | |
 //! | `:case` | `:smart`, `:sensitive` or `:insensitive`: the case rule of the line filters | `:smart` |
-//! | `:file-types` | list of strings: names from `(:types)`; a file must be of one of them; may be combined with `:globs`, a file must pass both | nil: all files |
+//! | `:file-types` | list of strings: names from `(:types)`, each optionally with `!` in front to exclude it; for each file the last listed type it is of decides; a file of no listed type is searched only when no type is included (`("cpp" "!c")`, `("!json")`); may be combined with `:globs`, a file must pass both (ADR 0024) | nil: all files |
 //! | `:globs` | list of strings: gitignore-style path globs relative to `:dir`, like `rg -g`: `("*.el" "src/**" "!*.min.js")`. A glob without `/` matches a name at any depth, one with a `/` at its start or inside a path below `:dir` (a `/` at the end only says "a directory": `!vendor/` is every directory `vendor`), `**` crosses directories, a leading `!` excludes, the last glob that matches decides; with a glob that has no `!`, a file must match one, so name files, not their directory (`src/**`, not `src/`). An excluding glob that matches a directory keeps the walk out of it (`!gen/`; `!gen/**` drops the files one by one). Case-sensitive. A file must also be of one of the `:file-types` if any are given. Globs only restrict: they never bring back a file that an ignore file names or that is hidden (ADR 0017) | nil: all files |
 //! | `:no-ignore` | non-nil: `.gitignore`, `.ignore` and the git exclude files are not applied | nil |
 //! | `:hidden` | search hidden files; say `:hidden nil` to leave out every file and directory whose name starts with a dot, whatever the file types or globs (a glob cannot bring a hidden file back) | t |
@@ -47,7 +47,7 @@
 //! | `:dir` is not a directory | `grep directory is not a directory: D` | |
 //! | A filter has an empty or invalid pattern | ``invalid filter `PATTERN`: ENGINE MESSAGE`` (may span lines) | `(:filter INDEX)`, the 0-based position in `:filters` |
 //! | No include line filter | `a search needs an include line filter` | `(:filter nil)` |
-//! | A `:file-types` entry is not a name from `(:types)` (the first one is named) | `unknown file type: NAME` | |
+//! | A `:file-types` entry is not a name from `(:types)`, after any `!` (the first one is named, as given, `!` included) | `unknown file type: NAME` | |
 //! | A glob names nothing: empty or blank, `!`, `/` | `invalid glob "GLOB": it is empty` | |
 //! | A glob is invalid | `invalid glob "GLOB": MESSAGE` | |
 //! | An `:ignores` line is invalid | `invalid ignore pattern "LINE": MESSAGE` | |
@@ -203,8 +203,9 @@ fn type_list() -> Vec<TypeDef> {
     types
 }
 
-/// The file types of a search, if any are asked for (`:file-types`; the walker applies them). A file must be of
-/// one of them: selecting several types gives their union.
+/// The file types of a search, if any are asked for (`:file-types`; the walker applies them). A name is selected,
+/// or negated with a `!` in front, in the given order; the last one the file is of decides, and a file of none is
+/// searched only when no name is selected (ADR 0024).
 fn file_types(names: &[String]) -> Result<Option<Types>, String> {
     if names.is_empty() {
         return Ok(None);
@@ -212,11 +213,19 @@ fn file_types(names: &[String]) -> Result<Option<Types>, String> {
     let mut builder = TypesBuilder::new();
     builder.add_defaults();
     for name in names {
+        let (bare, excluded) = match name.strip_prefix('!') {
+            Some(bare) => (bare, true),
+            None => (name.as_str(), false),
+        };
         // Not left to `build`: it would take `all` for a name.
-        if !builder.definitions().iter().any(|def| def.name() == name) {
+        if !builder.definitions().iter().any(|def| def.name() == bare) {
             return Err(format!("unknown file type: {name}"));
         }
-        builder.select(name);
+        if excluded {
+            builder.negate(bare);
+        } else {
+            builder.select(bare);
+        }
     }
     builder.build().map(Some).map_err(|e| e.to_string())
 }
@@ -611,6 +620,48 @@ mod tests {
         assert_eq!(run(q).paths(), ["a.rs"]);
     }
 
+    /// The files that a search of `t` with these `:file-types` and `:globs` finds.
+    fn exclude_search(t: &TempDir, hidden: bool, file_types: &[&str], globs: &[&str]) -> Vec<String> {
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        q.hidden = hidden;
+        q.file_types = file_types.iter().map(|n| n.to_string()).collect();
+        q.globs = globs.iter().map(|g| g.to_string()).collect();
+        run(q).paths().iter().map(|p| p.to_string()).collect()
+    }
+
+    fn exclude_tree() -> TempDir {
+        let files = ["a.rs", "a.json", "a.h", "a.cpp", "a.c", "README", ".x.json"];
+        tree(&files.map(|f| (f, "needle\n")))
+    }
+
+    #[test]
+    fn excluded_file_types_decide_in_the_given_order() {
+        let t = exclude_tree();
+        let found = |types: &[&str]| exclude_search(&t, false, types, &[]);
+        // `*.h` is a glob of both `c` and `cpp`.
+        assert_eq!(found(&["!json"]), ["README", "a.c", "a.cpp", "a.h", "a.rs"]);
+        assert_eq!(found(&["rust", "!json"]), ["a.rs"]);
+        assert_eq!(found(&["cpp", "!c"]), ["a.cpp"]);
+        assert_eq!(found(&["!c", "cpp"]), ["a.cpp", "a.h"]);
+        assert_eq!(found(&["c", "!cpp"]), ["a.c"]);
+    }
+
+    #[test]
+    fn excluded_file_types_combine_with_globs() {
+        let t = exclude_tree();
+        assert_eq!(exclude_search(&t, false, &["!json"], &["*.rs"]), ["a.rs"]);
+        assert_eq!(exclude_search(&t, false, &["!json"], &["*.json", "*.h"]), ["a.h"]);
+        assert_eq!(exclude_search(&t, false, &["!json"], &["!*.rs"]), ["README", "a.c", "a.cpp", "a.h"]);
+    }
+
+    #[test]
+    fn excluded_file_types_keep_hidden_files_out() {
+        let t = tree(&[(".x.json", "needle\n"), (".y.txt", "needle\n"), ("a.rs", "needle\n")]);
+        assert_eq!(exclude_search(&t, false, &["!json"], &[]), ["a.rs"]);
+        assert_eq!(exclude_search(&t, true, &["!json"], &[]), [".y.txt", "a.rs"]);
+        assert_eq!(exclude_search(&t, true, &[], &[]), [".x.json", ".y.txt", "a.rs"]);
+    }
+
     #[test]
     fn globs_restrict_the_files() {
         let t =
@@ -804,6 +855,17 @@ mod tests {
         let mut empty = query();
         empty.file_types = vec!["rust".into(), String::new()];
         assert_eq!(refused(empty).message(), "unknown file type: ");
+
+        for (names, named) in [
+            (&["!nosuch"][..], "!nosuch"),
+            (&["!"], "!"),
+            (&["!all"], "!all"),
+            (&["rust", "!nosuch", "alsobad"], "!nosuch"),
+        ] {
+            let mut q = query();
+            q.file_types = names.iter().map(|n| n.to_string()).collect();
+            assert_eq!(refused(q).message(), format!("unknown file type: {named}"));
+        }
 
         let mut bad_glob = query();
         bad_glob.globs = vec!["*.rs".into(), "a[".into()];

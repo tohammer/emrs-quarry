@@ -182,7 +182,7 @@ The implementation branch starts from `master` once the replace branch
 (PR #7) is merged: that branch changes the same README sections and
 `quarry-grep.el`.
 
-- [ ] 1. **Service.** Excluded types in `:file-types` as under "Service":
+- [x] 1. **Service.** Excluded types in `:file-types` as under "Service":
   `select` and `negate` in order, the error for a bad `!` entry, the
   module docs (the `:file-types` row and the error table), the
   architecture paragraph, and the tests listed for `cargo test`. *Done

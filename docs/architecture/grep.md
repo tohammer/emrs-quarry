@@ -72,8 +72,9 @@ directory's path keeps the walk out of that directory, since it occurs in
 the path of every file below. A regexp exclude path filter does not prune:
 what matches a directory's path need not match the files below it
 (`^/src/[^/]*$`), so it is tested on each file. The file types become one
-`ignore::types::Types` selection of the walker, with every named type
-selected: a file must be of one of them.
+`ignore::types::Types` selection of the walker, each named type selected or,
+with a `!` in front, negated, in the given order: the last type the file is of
+decides (ADR 0024).
 
 Globs are path globs in gitignore syntax, compiled into an
 `ignore::overrides::Override` rooted at the directory (ADR 0017). The
