@@ -170,7 +170,33 @@ character in consult 3.")
                  '("rust" "c" "txt")))
   (should (equal (quarry-grep--search-types
                   (quarry-test-consult-grep--opt "-t rust -t c -t rust"))
-                 '("rust" "c"))))
+                 ;; A repeated type is kept at its last place (ADR 0024).
+                 '("c" "rust"))))
+
+(ert-deftest quarry-test-consult-grep-option-type-not ()
+  (dolist (opts '("-T json" "-Tjson" "--type-not=json" "--type-not json"))
+    (should (equal (quarry-grep--search-types (quarry-test-consult-grep--opt opts))
+                   '("!json"))))
+  (should (equal (quarry-grep--search-types
+                  (quarry-test-consult-grep--opt "-t cpp -T c"))
+                 '("cpp" "!c")))
+  ;; The last copy of an entry wins.
+  (should (equal (quarry-grep--search-types
+                  (quarry-test-consult-grep--opt "-t c -T c -t c"))
+                 '("!c" "c")))
+  (should (equal (quarry-grep--search-types
+                  (quarry-test-consult-grep--opt "-T c -T c"))
+                 '("!c")))
+  (should (equal (quarry-grep--search-types
+                  (quarry-test-consult-grep--opt "-t rust -t rust"))
+                 '("rust")))
+  ;; No special case: the service rejects it.
+  (should (equal (quarry-grep--search-types
+                  (quarry-test-consult-grep--opt "-T !json"))
+                 '("!!json")))
+  ;; Being typed is no error.
+  (dolist (opts '("-T" "--type-not" "--type-not=" "-T="))
+    (should-not (quarry-grep--search-types (quarry-test-consult-grep--opt opts)))))
 
 (ert-deftest quarry-test-consult-grep-option-glob ()
   (dolist (opts '("-g *.el" "--glob *.el" "-g*.el" "--glob=*.el"))
@@ -1380,6 +1406,22 @@ the buffers visiting files of the tree are killed."
                  "^The filter part \"again\" was not carried over$" messages))
         (should (equal quarry-consult-grep-history
                        '("#needle !el -- -g *.txt#again")))))))
+
+(ert-deftest quarry-test-consult-grep-hand-over-type-not ()
+  "The hand-over carries an excluded type into the result buffer."
+  (skip-unless (quarry-consult-grep--available-p))
+  (quarry-test-consult-grep--with-tree dir
+    (setq quarry-test-consult-grep--expected
+          '("c.txt:3:the needle again" "src/a.txt:2:needle here"))
+    (should (eq (quarry-test-consult-grep--with-keys
+                 (lambda () (quarry-consult-grep dir))
+                 "needle SPC -- SPC -T SPC json C-c h")
+                'done))
+    (with-current-buffer (quarry-test-consult-grep--result 10)
+      (should (equal (quarry-grep--search-types quarry-grep--current)
+                     '("!json")))
+      (should (string-match-p " files: !json " (substring-no-properties (quarry-grep--header))))
+      (should-not quarry-test-consult-grep--errors))))
 
 (ert-deftest quarry-test-consult-grep-hand-over-newer-input ()
   "The hand-over takes the input as it is, not what was last searched."

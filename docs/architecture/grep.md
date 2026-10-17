@@ -72,8 +72,9 @@ directory's path keeps the walk out of that directory, since it occurs in
 the path of every file below. A regexp exclude path filter does not prune:
 what matches a directory's path need not match the files below it
 (`^/src/[^/]*$`), so it is tested on each file. The file types become one
-`ignore::types::Types` selection of the walker, with every named type
-selected: a file must be of one of them.
+`ignore::types::Types` selection of the walker, each named type selected or,
+with a `!` in front, negated, in the given order: the last type the file is of
+decides (ADR 0024).
 
 Globs are path globs in gitignore syntax, compiled into an
 `ignore::overrides::Override` rooted at the directory (ADR 0017). The
@@ -890,8 +891,9 @@ words after it options from the table `quarry-consult-grep--options`;
 a new option is one entry. What is being typed is no error: a lone
 `!`, an option without its value, a last word that is the start of an
 option's spelling, a backslash that ends the input unpaired. Options
-are read only when there is an include term. `-t` and `-g`, each any number of times, fill `types`
-and `globs` directly, so the parser needs no type list and an unknown
+are read only when there is an include term. `-t`, `-T` and `-g`, each any number of times, fill `types`
+and `globs` directly; `-T` adds `!TYPE` to `types`, and a repeated
+`types` entry moves to the end (the last copy wins). So the parser needs no type list and an unknown
 type is the service's error. `quarry-consult-grep-quote` is the
 inverse for one literal string; it writes the separator of the consult
 split style as `\xNN`, since `\#` would still end the search part.
