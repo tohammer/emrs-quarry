@@ -788,9 +788,9 @@ preview keep the template and update the preview.
   the matching lines up to `quarry-grep-replace-max-lines`; `C-c C-c`
   then offers to search again with a limit that holds them all and
   writes nothing, or, above the option, says to narrow the search (see
-  "Large replacements"). If
-  a result file changed since the search (or a modified buffer visits
-  it), it asks whether to search again, and writes nothing either way.
+  "Large replacements"). If a result file changed since the search (or
+  a modified buffer visits it), it asks whether to search again, and
+  writes nothing either way.
   Otherwise it asks `Replace N matches on L lines in F files?`, and
   names the files among them that are folded or outside a narrowing
   (`C-x n n`): they are written too.
@@ -853,8 +853,9 @@ the search with the template gets its first results; the search then runs withou
 
 A search stops at `quarry-grep-max-lines` hits (50,000 by default;
 context lines do not count), and `C-c C-c` does not write a result that
-stopped there. The status line of a truncated preview shows the total:
-"Search stopped at 50000 of 73412 lines". Three ways through:
+stopped there. The status line of a truncated preview shows the total,
+"Search stopped at 50000 of 73412 lines", or "of more than 100000
+lines" above `quarry-grep-replace-max-lines`. Three ways through:
 
 - **Raise the limit for this search.** `C-c C-c` asks `73412 lines
   match, the limit is 50000; search again with a limit that holds them

@@ -355,6 +355,11 @@ module that is loaded has no grep service."
 (defvar-local quarry-grep--summary nil
   "The summary item of the finished search, a plist, or nil.")
 
+(defvar-local quarry-grep--count-max nil
+  "The largest exact `:total' the current search can report, or nil.
+That is one less than the `:count-up-to' its request sent; a larger
+`:total' means more lines than that.  Nil for a search without one.")
+
 (defvar-local quarry-grep--error-filter nil
   "The filter the service rejected, or nil.")
 
@@ -651,8 +656,8 @@ replacement, the matches of a line with new texts get them."
                  (format "Search stopped at %d %slines, narrow the search: %s"
                          quarry-grep--lines
                          (cond ((null total) "")
-                               ((> total quarry-grep-replace-max-lines)
-                                (format "of more than %d " quarry-grep-replace-max-lines))
+                               ((> total (quarry-grep--count-bound))
+                                (format "of more than %d " (quarry-grep--count-bound)))
                                (t (format "of %d " total)))
                          (quarry-grep--counts-text))))
               ((zerop quarry-grep--lines)
@@ -943,7 +948,13 @@ stop the search from starting any more."
     (condition-case err
         (setq quarry-grep--call
               (emrs-call-stream
-               instance (quarry-grep--request search)
+               instance (let ((request (quarry-grep--request search)))
+                          ;; The bound in force, also when the option
+                          ;; changes before the summary is looked at.
+                          (setq quarry-grep--count-max
+                                (when-let* ((n (plist-get (cdr request) :count-up-to)))
+                                  (1- n)))
+                          request)
                :on-batch (lambda (items)
                            (quarry-grep--on-batch buffer serial items))
                :on-end (lambda (status err)
@@ -2233,9 +2244,10 @@ the package wgrep."
 
 (defun quarry-grep--apply-refusal ()
   "Return why `quarry-grep-replace-apply' cannot run now, or nil.
-A truncated preview whose summary has an exact `:total' (at most
-`quarry-grep-replace-max-lines') is no refusal: the command then asks
-to search again with a limit that holds all lines.  Does not signal."
+A truncated preview whose summary has an exact `:total' (see
+`quarry-grep--count-max') and switched-on matches is no refusal: the
+command then asks to search again with a limit that holds all lines.
+Does not signal."
   (cond ((not (quarry-grep--replace-p))
          "The results do not preview a replacement; R starts one")
         (quarry-grep--replace-applied
@@ -2252,9 +2264,12 @@ to search again with a limit that holds all lines.  Does not signal."
          (let ((total (plist-get quarry-grep--summary :total)))
            (cond ((null total)
                   "The search stopped at its line limit and only what is shown would be replaced; narrow the search or raise `quarry-grep-max-lines'")
-                 ((> total quarry-grep-replace-max-lines)
+                 ((> total (quarry-grep--count-bound))
                   (format "More than %d lines match; narrow the search (README, \"Large replacements\")"
-                          quarry-grep-replace-max-lines)))))
+                          (quarry-grep--count-bound)))
+                 ;; The search again would switch them all on.
+                 ((zerop quarry-grep--replace-on)
+                  "No match is switched on"))))
         ((zerop quarry-grep--replace-on)
          "No match is switched on")))
 
@@ -2689,11 +2704,17 @@ written; it waits while FILE is written."
 (defun quarry-grep--truncated-total ()
   "Return the exact `:total' of a truncated preview, or nil.
 That is the number of lines the search counted in all, including those
-beyond its limit, when it is at most `quarry-grep-replace-max-lines'."
+beyond its limit, when it is at most `quarry-grep--count-bound'."
   (and (quarry-grep--replace-p)
        (plist-get quarry-grep--summary :truncated)
        (let ((total (plist-get quarry-grep--summary :total)))
-         (and total (<= total quarry-grep-replace-max-lines) total))))
+         (and total (<= total (quarry-grep--count-bound)) total))))
+
+(defun quarry-grep--count-bound ()
+  "Return the largest exact `:total' of the current search.
+That is `quarry-grep--count-max', or `quarry-grep-replace-max-lines'
+for a search that sent no bound."
+  (or quarry-grep--count-max quarry-grep-replace-max-lines))
 
 (defun quarry-grep--offer-limit (total)
   "Ask whether to search again with a limit that holds TOTAL lines; do so on yes.

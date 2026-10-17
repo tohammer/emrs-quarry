@@ -4145,12 +4145,48 @@ and have the face of its result."
       (should (equal (quarry-test-grep--menu-inactive '("C-c C-c")) '("C-c C-c")))
       (quarry-test-grep--refused "narrow the search or raise `quarry-grep-max-lines'"
         (quarry-grep-replace-apply)))
-    ;; The option's value is named.
+    ;; The bound the search sent counts, not the option as it is now.
+    (let ((quarry-grep-replace-max-lines 200000))
+      (quarry-test-grep--fake-total 100001)
+      (quarry-test-grep--refused "More than 100000 lines match" (quarry-grep-replace-apply))
+      (should (string-search "of more than 100000 lines" (quarry-grep--status-text))))
     (let ((quarry-grep-replace-max-lines 5))
+      (quarry-test-grep--fake-total 5)
+      (should (quarry-grep--applicable-p))
+      ;; Searched again, the option's value is the bound and is named.
+      (quarry-test-grep--keys "g")
+      (should (= (quarry-test-grep--request :count-up-to) 6))
       (quarry-test-grep--fake-total 6)
       (quarry-test-grep--refused "More than 5 lines match"
         (quarry-grep-replace-apply)))
     (should (equal (quarry-test-grep--bytes dir "a.txt") "foo_1 and foo_2\nnothing\nfoo_3 foo_4\n"))))
+
+(ert-deftest quarry-test-grep-replace-apply-offer-edges ()
+  "The offer at the bound and at the limit in force; none without matches on."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
+    (let ((quarry-grep-replace-max-lines 100000))
+      ;; A total equal to the bound is exact.
+      (quarry-test-grep--fake-total 100000)
+      (should (equal (quarry-test-grep--apply t)
+                     '("100000 lines match, the limit is 50000; search again with a limit that holds them all? ")))
+      (should (= (quarry-test-grep--request :max-lines) 100001))
+      (quarry-test-grep--wait)
+      ;; One more than the bound means more.
+      (quarry-test-grep--fake-total 100001)
+      (quarry-test-grep--refused "More than 100000" (quarry-grep-replace-apply))
+      ;; A total equal to the limit in force: a tree that fills it exactly.
+      (setf (quarry-grep--search-max-lines quarry-grep--current) nil)
+      (quarry-test-grep--fake-total 50000)
+      (should (equal (quarry-test-grep--apply nil)
+                     '("50000 lines match, the limit is 50000; search again with a limit that holds them all? ")))
+      ;; All matches off: no offer, since the search again would switch them on.
+      (goto-char (point-min))
+      (dolist (path '("a.txt" "b.txt" "c.txt" "d/e.txt"))
+        (goto-char (quarry-test-grep--heading-pos path))
+        (quarry-test-grep--keys "x"))
+      (should (zerop quarry-grep--replace-on))
+      (should-not (quarry-grep--applicable-p))
+      (quarry-test-grep--refused "No match is switched on" (quarry-grep-replace-apply)))))
 
 (ert-deftest quarry-test-grep-replace-apply-over-the-limit-real ()
   "A real search over a small limit: yes searches again, then C-c C-c writes all."

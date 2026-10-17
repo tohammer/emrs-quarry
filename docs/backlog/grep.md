@@ -299,3 +299,15 @@ The replace spec (2026-10-14) left these out on purpose. Origin: spec
   happens; the way out is writing all new files first and syncing them
   together (`syncfs`) before the renames, or writing in the service
   (option 3 of ADR 0021).
+
+## Replace over the limit: deferred from the review
+
+- **`C-c C-k` waits for the file that filled the cap.** During the
+  counting phase (ADR 0025) the file whose kept lines filled the cap is
+  read on to its end or to the bound, and a cancel is noticed only at
+  the next walk entry, so a large log with few matches after the cap
+  delays `C-c C-k` until it is read. Before the cap every file behaves
+  so already (module docs of `src/grep/search.rs`). Origin: review of
+  the spec 2026-10-17-replace-over-the-limit. Revisit if a cancel is
+  slow in use; asking `out.is_cancelled()` in `count_kept` would close
+  it.

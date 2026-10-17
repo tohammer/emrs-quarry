@@ -1826,6 +1826,78 @@ mod tests {
         assert_eq!((with.summary.truncated, with.summary.total), (true, Some(1)));
     }
 
+    #[test]
+    fn a_file_that_the_bound_stops_in_counts_as_text() {
+        // The bound is reached within the first 64 KiB, and a NUL byte comes long after: a file that is read on
+        // after the bound would be binary and add nothing beyond the cap.
+        let t = TempDir::new().unwrap();
+        let mut content: Vec<u8> = (1..=1000).flat_map(|n| format!("needle {n}\n").into_bytes()).collect();
+        content.extend(std::iter::repeat_n(&b"filler line\n"[..], 30_000).flatten());
+        content.extend_from_slice(b"nul\0\n");
+        write(t.path(), "f", &content);
+        let found = counted(t.path(), 5, Some(20));
+        assert_eq!((found.summary.lines, found.summary.truncated, found.summary.total), (5, true, Some(20)));
+        let numbers: Vec<u64> = found.lines("f").iter().map(|l| l.n).collect();
+        assert_eq!(numbers, [1, 2, 3, 4, 5]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kept_lines_without_room_count_beyond_the_cap() {
+        // A file collects kept lines while the cap has room; other threads fill the cap before the file ends.
+        // The file is a FIFO, so the test decides when that happens: the write of the filler returns only after
+        // the searcher has read, and so handled, the lines in front of it.
+        let t = TempDir::new().unwrap();
+        let fifo = t.path().join("f");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let out = CancelAfterFirstItem::default();
+        let shared = Shared {
+            dir: t.path(),
+            out: &out,
+            max_lines: 5,
+            count_beyond: 15,
+            max_columns: 500,
+            replace: None,
+            before: 0,
+            after: 0,
+            deadline: None,
+            lines: AtomicUsize::new(0),
+            beyond: AtomicUsize::new(0),
+            files_searched: AtomicUsize::new(0),
+            files_matched: AtomicUsize::new(0),
+            skipped: AtomicUsize::new(0),
+            stop: AtomicBool::new(false),
+            truncated: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            streaming: AtomicBool::new(false),
+            pending: Mutex::new(Some(Vec::new())),
+        };
+        let mut worker = Worker {
+            shared: &shared,
+            filters: Filters::compile(&[line("needle")], Case::Smart).unwrap(),
+            searcher: SearcherBuilder::new()
+                .binary_detection(BinaryDetection::quit(0))
+                .line_terminator(LineTerminator::crlf())
+                .line_number(true)
+                .build(),
+        };
+        std::thread::scope(|scope| {
+            scope.spawn(|| worker.search(&fifo, "f".to_string()));
+            let mut writer = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+            let mut content = b"needle 1\nneedle 2\nneedle 3\n".to_vec();
+            content.extend(std::iter::repeat_n(&b"filler line\n"[..], 20_000).flatten());
+            std::io::Write::write_all(&mut writer, &content).unwrap();
+            // One line of room is left for the file's three kept lines.
+            shared.lines.store(4, Ordering::Relaxed);
+        });
+        assert_eq!(shared.lines.load(Ordering::Relaxed), 5);
+        assert_eq!(shared.beyond.load(Ordering::Relaxed), 2, "the two kept lines that did not fit");
+        let pending = shared.pending();
+        let items = pending.as_ref().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].lines.len(), 1);
+    }
+
     /// An [`Output`] that cancels the search once it has been sent a file item.
     #[derive(Default)]
     struct CancelAfterFirstItem {
