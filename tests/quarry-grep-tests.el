@@ -3777,6 +3777,64 @@ DISPLAY is the text of the `display' property, or nil."
       (should-not (quarry-grep--replace-p))
       (should-not (plist-member (cdr (car (car quarry-test-grep--fake))) :replace)))))
 
+(ert-deftest quarry-test-grep-replace-count-request ()
+  "A template adds :count-up-to; the slot replaces the option as :max-lines."
+  (quarry-test-grep--with-preview (dir)
+    (should-not (plist-member (cdr (quarry-test-grep--request)) :count-up-to))
+    (should (= (quarry-test-grep--request :max-lines) quarry-grep-max-lines))
+    (let ((quarry-grep-replace-max-lines 7))
+      (quarry-grep-replace "bar_$1")
+      (quarry-test-grep--wait)
+      (should (= (quarry-test-grep--request :count-up-to) 8))
+      (should (= (quarry-test-grep--request :max-lines) quarry-grep-max-lines))
+      ;; The slot takes the place of the option, and is carried.
+      (setf (quarry-grep--search-max-lines quarry-grep--current) 3)
+      (quarry-test-grep--keys "g")
+      (should (= (quarry-test-grep--request :max-lines) 3))
+      (should (= (quarry-test-grep--request :count-up-to) 8))
+      (quarry-test-grep--keys "+ l and RET")
+      (should (= (quarry-test-grep--request :max-lines) 3))
+      (should (= (quarry-grep--search-max-lines quarry-grep--current) 3))
+      (quarry-test-grep--keys "g")
+      (should (= (quarry-grep--search-max-lines quarry-grep--current) 3))
+      ;; Each search value has its own slot.
+      (quarry-test-grep--keys "C-c < C-c <")
+      (should-not (quarry-grep--replace-p))
+      (should-not (quarry-grep--search-max-lines quarry-grep--current))
+      (quarry-test-grep--keys "C-c > C-c >")
+      (should (= (quarry-grep--search-max-lines quarry-grep--current) 3))
+      ;; C-c C-k drops the template and the slot.
+      (quarry-test-grep--keys "C-c C-k")
+      (should-not (quarry-grep--replace-p))
+      (should-not (quarry-grep--search-max-lines quarry-grep--current))
+      (should-not (plist-member (cdr (quarry-test-grep--request)) :count-up-to))
+      (should (= (quarry-test-grep--request :max-lines) quarry-grep-max-lines)))))
+
+(ert-deftest quarry-test-grep-replace-truncated-status ()
+  "The status line of a truncated search names :total when it has one."
+  (quarry-test-grep--with-preview (dir)
+    (let ((quarry-grep-replace-max-lines 100000))
+      (cl-flet ((status (&rest summary)
+                  (quarry-test-grep--with-fake-stream
+                    (quarry-grep-rerun)
+                    (set-buffer (quarry-test-grep--buffer))
+                    (funcall (nth 1 (car quarry-test-grep--fake))
+                             (list (quarry-test-grep--item "a.txt" '(1 "foo_1" 0 5))
+                                   (append (list :summary :files-searched 2 :files-matched 1
+                                                 :lines 1 :truncated t :sorted t
+                                                 :millis 5 :skipped 0)
+                                           summary)))
+                    (funcall (nth 2 (car quarry-test-grep--fake)) 'done nil)
+                    (quarry-test-grep--status))))
+        (should (equal (status :total 73412)
+                       "Search stopped at 1 of 73412 lines, narrow the search: 1 line in 1 file, 5 ms"))
+        (should (equal (status :total 100000)
+                       "Search stopped at 1 of 100000 lines, narrow the search: 1 line in 1 file, 5 ms"))
+        (should (equal (status :total 100001)
+                       "Search stopped at 1 of more than 100000 lines, narrow the search: 1 line in 1 file, 5 ms"))
+        (should (equal (status)
+                       "Search stopped at 1 lines, narrow the search: 1 line in 1 file, 5 ms"))))))
+
 (ert-deftest quarry-test-grep-replace-old-module ()
   "A module that ignores :replace: the search runs without the template."
   (quarry-test-grep--with-tree (dir)
@@ -3957,6 +4015,40 @@ and have the face of its result."
                      '(("a.txt" 1 "new_1x and foo_2") ("b.txt" 1 "x foo_5"))))
       (should (quarry-grep--applicable-p)))))
 
+(ert-deftest quarry-test-grep-replace-apply-after-narrowing ()
+  "Files and lines that a change after R leaves out are not written."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "new_$1")
+    ;; A path filter, the file at point, a glob and a line filter.
+    (quarry-test-grep--keys "- p b.txt RET")
+    (goto-char (quarry-test-grep--heading-pos "c.txt"))
+    (quarry-test-grep--keys "- f")
+    (quarry-test-grep--keys "f !d/ RET")
+    (quarry-test-grep--keys "- l foo_3 RET")
+    (should (equal (quarry-test-grep--request :replace) "new_$1"))
+    (should (equal (quarry-test-grep--results) '(("a.txt" 1 "foo_1 and foo_2"))))
+    (should (equal (quarry-test-grep--apply t)
+                   '("Replace 2 matches on 1 line in 1 file? ")))
+    (should (equal (quarry-test-grep--bytes dir "a.txt") "new_1 and new_2\nnothing\nfoo_3 foo_4\n"))
+    (pcase-dolist (`(,path . ,content) (cdr quarry-test-grep--apply-files))
+      (should (equal (quarry-test-grep--bytes dir path) content)))))
+
+(ert-deftest quarry-test-grep-replace-apply-unseen ()
+  "The question names files folded or outside the narrowing; they are written."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "new_$1")
+    (goto-char (quarry-test-grep--heading-pos "c.txt"))
+    (quarry-test-grep--keys "TAB")
+    (should (equal (quarry-test-grep--apply nil)
+                   '("Replace 9 matches on 6 lines in 4 files (1 file folded)? ")))
+    ;; Only a.txt in view; b.txt, c.txt and d/e.txt are outside.
+    (narrow-to-region (quarry-test-grep--heading-pos "a.txt")
+                      (quarry-test-grep--heading-pos "b.txt"))
+    (should (equal (quarry-test-grep--apply nil)
+                   '("Replace 9 matches on 6 lines in 4 files (1 file folded, 3 files outside the narrowing)? ")))
+    (should (equal (quarry-test-grep--bytes dir "c.txt") "keep\nfoo_6 end\nfoo_7\nlast line\n"))
+    (quarry-test-grep--apply t)
+    (should (equal (quarry-test-grep--bytes dir "b.txt") "x new_5\n"))
+    (should (equal (quarry-test-grep--bytes dir "c.txt") "keep\nnew_6 end\nnew_7\nlast line\n"))))
+
 (ert-deftest quarry-test-grep-replace-apply-refused ()
   "C-c C-c is refused without a complete preview with matches switched on."
   (quarry-test-grep--with-tree (dir quarry-test-grep--apply-files)
@@ -3991,10 +4083,137 @@ and have the face of its result."
     (let ((quarry-grep-max-lines 2))
       (quarry-test-grep--keys "g")
       (should (plist-get quarry-grep--summary :truncated))
+      ;; The module counts beyond the cap: a total is no refusal.
+      (should (plist-get quarry-grep--summary :total))
+      (should (quarry-grep--applicable-p))
+      ;; An older module sends no total.
+      (setq quarry-grep--summary
+            (plist-put (copy-sequence quarry-grep--summary) :total nil))
       (should-not (quarry-grep--applicable-p))
       (quarry-test-grep--refused "narrow the search or raise `quarry-grep-max-lines'"
         (quarry-grep-replace-apply)))
     (should (equal (quarry-test-grep--bytes dir "a.txt") "foo_1 and foo_2\nnothing\nfoo_3 foo_4\n"))))
+
+(defun quarry-test-grep--fake-total (total)
+  "Make the summary of the current preview a truncated one with TOTAL."
+  (setq quarry-grep--summary
+        (plist-put (plist-put (copy-sequence quarry-grep--summary) :truncated t)
+                   :total total)))
+
+(ert-deftest quarry-test-grep-replace-apply-offers-limit ()
+  "A truncated preview with an exact total asks for a larger limit; no writes."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
+    (let ((quarry-grep-replace-max-lines 100000)
+          (before (quarry-test-grep--bytes dir "a.txt"))
+          (sent (length quarry-test-grep--requests)))
+      (quarry-test-grep--fake-total 73412)
+      (should (quarry-grep--applicable-p))
+      (should-not (quarry-test-grep--menu-inactive '("C-c C-c")))
+      ;; No: nothing is sent or written.
+      (should (equal (quarry-test-grep--apply nil)
+                     '("73412 lines match, the limit is 50000; search again with a limit that holds them all? ")))
+      (should (= (length quarry-test-grep--requests) sent))
+      (should (equal (quarry-test-grep--bytes dir "a.txt") before))
+      (should-not quarry-grep--replace-applied)
+      ;; Yes: the search runs again with the raised limit and the template.
+      (let ((messages (quarry-test-grep--messages
+                       (lambda () (quarry-test-grep--apply t)))))
+        (should (equal messages
+                       '("Searching again; press C-c C-c when the search is done"))))
+      (should (= (length quarry-test-grep--requests) (1+ sent)))
+      (should (= (quarry-test-grep--request :max-lines) 73413))
+      (should (equal (quarry-test-grep--request :replace) "bar_$1"))
+      (quarry-test-grep--wait)
+      (should (equal (quarry-test-grep--bytes dir "a.txt") before))
+      ;; The question names the slot as the limit in force.
+      (quarry-test-grep--fake-total 80000)
+      (should (equal (quarry-test-grep--apply nil)
+                     '("80000 lines match, the limit is 73413; search again with a limit that holds them all? "))))))
+
+(ert-deftest quarry-test-grep-replace-apply-over-option ()
+  "A total above the option, or none, is refused; the menu entry is inactive."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
+    (let ((quarry-grep-replace-max-lines 100000))
+      (quarry-test-grep--fake-total 100001)
+      (should-not (quarry-grep--applicable-p))
+      (should (equal (quarry-test-grep--menu-inactive '("C-c C-c")) '("C-c C-c")))
+      (quarry-test-grep--refused
+          "More than 100000 lines match; narrow the search (README, \"Large replacements\")"
+        (quarry-grep-replace-apply))
+      (setq quarry-grep--summary (plist-put quarry-grep--summary :total nil))
+      (should-not (quarry-grep--applicable-p))
+      (should (equal (quarry-test-grep--menu-inactive '("C-c C-c")) '("C-c C-c")))
+      (quarry-test-grep--refused "narrow the search or raise `quarry-grep-max-lines'"
+        (quarry-grep-replace-apply)))
+    ;; The bound the search sent counts, not the option as it is now.
+    (let ((quarry-grep-replace-max-lines 200000))
+      (quarry-test-grep--fake-total 100001)
+      (quarry-test-grep--refused "More than 100000 lines match" (quarry-grep-replace-apply))
+      (should (string-search "of more than 100000 lines" (quarry-grep--status-text))))
+    (let ((quarry-grep-replace-max-lines 5))
+      (quarry-test-grep--fake-total 5)
+      (should (quarry-grep--applicable-p))
+      ;; Searched again, the option's value is the bound and is named.
+      (quarry-test-grep--keys "g")
+      (should (= (quarry-test-grep--request :count-up-to) 6))
+      (quarry-test-grep--fake-total 6)
+      (quarry-test-grep--refused "More than 5 lines match"
+        (quarry-grep-replace-apply)))
+    (should (equal (quarry-test-grep--bytes dir "a.txt") "foo_1 and foo_2\nnothing\nfoo_3 foo_4\n"))))
+
+(ert-deftest quarry-test-grep-replace-apply-offer-edges ()
+  "The offer at the bound and at the limit in force; none without matches on."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "bar_$1")
+    (let ((quarry-grep-replace-max-lines 100000))
+      ;; A total equal to the bound is exact.
+      (quarry-test-grep--fake-total 100000)
+      (should (equal (quarry-test-grep--apply t)
+                     '("100000 lines match, the limit is 50000; search again with a limit that holds them all? ")))
+      (should (= (quarry-test-grep--request :max-lines) 100001))
+      (quarry-test-grep--wait)
+      ;; One more than the bound means more.
+      (quarry-test-grep--fake-total 100001)
+      (quarry-test-grep--refused "More than 100000" (quarry-grep-replace-apply))
+      ;; A total equal to the limit in force: a tree that fills it exactly.
+      (setf (quarry-grep--search-max-lines quarry-grep--current) nil)
+      (quarry-test-grep--fake-total 50000)
+      (should (equal (quarry-test-grep--apply nil)
+                     '("50000 lines match, the limit is 50000; search again with a limit that holds them all? ")))
+      ;; All matches off: no offer, since the search again would switch them on.
+      (goto-char (point-min))
+      (dolist (path '("a.txt" "b.txt" "c.txt" "d/e.txt"))
+        (goto-char (quarry-test-grep--heading-pos path))
+        (quarry-test-grep--keys "x"))
+      (should (zerop quarry-grep--replace-on))
+      (should-not (quarry-grep--applicable-p))
+      (quarry-test-grep--refused "No match is switched on" (quarry-grep-replace-apply)))))
+
+(ert-deftest quarry-test-grep-replace-apply-over-the-limit-real ()
+  "A real search over a small limit: yes searches again, then C-c C-c writes all."
+  (quarry-test-grep--with-tree
+      (dir '(("a.txt" . "foo_1\nfoo_2\nfoo_3\n")
+             ("b.txt" . "x foo_4\n")
+             ("c.txt" . "foo_5 end\nfoo_6\n")
+             ("d/e.txt" . "foo_7\n")))
+    (let ((quarry-grep-max-lines 3)
+          (quarry-grep-replace-max-lines 100)
+          (make-backup-files nil))
+      (quarry-test-grep--search dir "foo_([0-9])")
+      (quarry-grep-replace "bar_$1")
+      (quarry-test-grep--wait)
+      (pop-to-buffer-same-window (quarry-test-grep--buffer))
+      (should (plist-get quarry-grep--summary :truncated))
+      (should (= (plist-get quarry-grep--summary :total) 7))
+      (should (equal (quarry-test-grep--apply t)
+                     '("7 lines match, the limit is 3; search again with a limit that holds them all? ")))
+      (quarry-test-grep--wait)
+      (should-not (plist-get quarry-grep--summary :truncated))
+      (should (equal (quarry-test-grep--apply t)
+                     '("Replace 7 matches on 7 lines in 4 files? ")))
+      (should (equal (quarry-test-grep--bytes dir "a.txt") "bar_1\nbar_2\nbar_3\n"))
+      (should (equal (quarry-test-grep--bytes dir "b.txt") "x bar_4\n"))
+      (should (equal (quarry-test-grep--bytes dir "c.txt") "bar_5 end\nbar_6\n"))
+      (should (equal (quarry-test-grep--bytes dir "d/e.txt") "bar_7\n")))))
 
 (ert-deftest quarry-test-grep-replace-apply-stale ()
   "A file changed since the search: search again, or stop without writing."

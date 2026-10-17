@@ -7,8 +7,9 @@ architecture.md or an ADR.
 
 - Rebuild the module (`M-x quarry-build-module`) and restart Emacs: path
   globs, context lines and replace need the new module. An older one
-  refuses a glob with `/`, shows no context, and ignores a replace
-  template (quarry-grep detects that and says so).
+  refuses a glob with `/`, shows no context, ignores a replace
+  template (quarry-grep detects that and says so), and sends no count
+  for a preview over the limit (`C-c C-c` then gives the old refusal).
 - Update the `emrs` package before that restart (`doom sync -u`, or pull
   a local checkout): `project-files` from the index now needs
   `emrs-call-stream-sync`, which an older `emrs.el` does not have.
@@ -24,6 +25,10 @@ architecture.md or an ADR.
   frame and in a terminal; `x` through a long preview; a real `C-g`
   during a large apply; a replace in files that are open in Emacs, then
   undo in those buffers.
+- Manual check of replace over the limit (spec
+  2026-10-17-replace-over-the-limit, "Testing"): a preview of 60,000 to
+  90,000 hits in a large tree, the wait for the count, yes, and the
+  times of the rerun and of the apply.
 - Next feature: pick from the survey (grep backlog, "Survey: find and
   grep features worth making native") or from "Further features weighed
   before the spec". Decide after a while of daily use; the survey's

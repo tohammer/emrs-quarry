@@ -24,7 +24,8 @@
 //! | `:no-ignore` | non-nil: `.gitignore`, `.ignore` and the git exclude files are not applied | nil |
 //! | `:hidden` | search hidden files; say `:hidden nil` to leave out every file and directory whose name starts with a dot, whatever the file types or globs (a glob cannot bring a hidden file back) | t |
 //! | `:ignores` | list of strings: extra gitignore lines relative to `:dir` | nil |
-//! | `:max-lines` | integer: the search stops when this many kept lines are collected | 50000 |
+//! | `:max-lines` | integer: the search stops when this many kept lines are collected (with `:count-up-to`, see that key) | 50000 |
+//! | `:count-up-to` | integer: when `:max-lines` is reached, the search sends nothing more but goes on counting kept lines until there are this many in all or the walk ends, for `:total` (ADR 0025). A value at or below `:max-lines` counts nothing beyond it | nil: no counting, no `:total` |
 //! | `:max-columns` | integer: longer lines are cut after this many characters | 500 |
 //! | `:before` | integer ≥ 0: lines sent before each kept line as context lines, at most 1000 | 0 |
 //! | `:after` | integer ≥ 0: lines sent after each kept line as context lines, at most 1000 | 0 |
@@ -96,8 +97,13 @@
 //! - `:files-searched`: files opened and read (binary files included, they give no lines). `:files-matched`:
 //!   the number of file items. `:lines`: the kept lines in them, never more than `:max-lines`; context lines
 //!   are not counted, here or for `:max-lines`.
-//! - `:truncated`: `:lines` reached `:max-lines` and the search stopped there. The kept line that filled the cap
+//! - `:truncated`: `:lines` reached `:max-lines`. Without `:count-up-to` the search stopped there; with it,
+//!   nothing more was sent and the walk went on counting (see `:total`). The kept line that filled the cap
 //!   has its context lines before it; those after it may be missing.
+//! - `:total`: only with `:count-up-to` and `:truncated` t, after `:skipped`: the kept lines of the whole tree,
+//!   delivered or not, counted as for `:max-lines` but at most `:count-up-to` (`:total 73412`). `:total` below
+//!   `:count-up-to` is exact; equal to it means at least that many. A file found binary counts nothing beyond
+//!   `:max-lines`. With `:count-up-to` at or below `:max-lines` it is `:count-up-to`.
 //! - `:sorted`: every file item came in order of its path (byte order). That is so when the search ended within
 //!   `:sort-budget-ms`. Otherwise the items found until then are sent sorted and the rest as they are found.
 //! - `:millis`: from the arrival of the request to the summary. `:skipped`: files that could not be opened or
@@ -141,6 +147,8 @@ fn default_sort_budget_ms() -> u64 {
     150
 }
 
+// One request is made per call and moved into `handle` at once; a box would only cost an allocation.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Deserialize)]
 pub enum Request {
     /// `(:types)`; replies with a list of [`TypeDef`].
@@ -173,6 +181,8 @@ pub enum Request {
         sort_budget_ms: u64,
         #[serde(default)]
         replace: Option<String>,
+        #[serde(default)]
+        count_up_to: Option<usize>,
     },
 }
 
@@ -316,6 +326,7 @@ impl Service for GrepService {
                 after,
                 sort_budget_ms,
                 replace,
+                count_up_to,
             } => {
                 let dir = match search_dir(&dir) {
                     Ok(dir) => dir,
@@ -348,6 +359,7 @@ impl Service for GrepService {
                     sort_budget: Duration::from_millis(sort_budget_ms),
                     started,
                     replace,
+                    count_up_to,
                 };
                 let search = match Search::new(config) {
                     Ok(search) => search,
@@ -430,6 +442,7 @@ pub(crate) mod testing {
         pub after: usize,
         pub sort_budget_ms: u64,
         pub replace: Option<String>,
+        pub count_up_to: Option<usize>,
     }
 
     impl Query {
@@ -449,6 +462,7 @@ pub(crate) mod testing {
                 after: 0,
                 sort_budget_ms: 60_000,
                 replace: None,
+                count_up_to: None,
             }
         }
 
@@ -468,6 +482,7 @@ pub(crate) mod testing {
                 after: self.after,
                 sort_budget_ms: self.sort_budget_ms,
                 replace: self.replace,
+                count_up_to: self.count_up_to,
             }
         }
     }
@@ -485,9 +500,16 @@ pub(crate) mod testing {
             assert_eq!(result.status, StreamEnd::Done, "{:?}", result.error.map(|e| e.to_string()));
             let mut items = result.items;
             let summary = match items.pop() {
-                Some(Item::Summary { files_searched, files_matched, lines, truncated, sorted, millis, skipped }) => {
-                    Summary { files_searched, files_matched, lines, truncated, sorted, millis, skipped }
-                }
+                Some(Item::Summary {
+                    files_searched,
+                    files_matched,
+                    lines,
+                    truncated,
+                    sorted,
+                    millis,
+                    skipped,
+                    total,
+                }) => Summary { files_searched, files_matched, lines, truncated, sorted, millis, skipped, total },
                 other => panic!("the last item is not a summary: {other:?}"),
             };
             let files = items
@@ -1090,9 +1112,10 @@ mod tests {
 
     /// The field names a value serializes, in order: the keywords of its Lisp plist. The `Host` hands the
     /// items over as Rust values and emrs keeps its Lisp conversion private, so the tests see what serde gives
-    /// it through this serializer, which accepts a struct only and does not look at the field values.
+    /// it through this serializer, which accepts a struct or a struct variant only and does not look at the field
+    /// values.
     fn field_names<T: serde::Serialize>(value: &T) -> Vec<&'static str> {
-        use serde::ser::{Impossible, SerializeStruct, Serializer};
+        use serde::ser::{Impossible, SerializeStruct, SerializeStructVariant, Serializer};
         use std::fmt::Error as Refused;
 
         struct Names;
@@ -1121,6 +1144,21 @@ mod tests {
             }
         }
 
+        impl SerializeStructVariant for Fields {
+            type Ok = Vec<&'static str>;
+            type Error = Refused;
+            fn serialize_field<V: ?Sized + serde::Serialize>(
+                &mut self,
+                key: &'static str,
+                value: &V,
+            ) -> Result<(), Refused> {
+                SerializeStruct::serialize_field(self, key, value)
+            }
+            fn end(self) -> Result<Vec<&'static str>, Refused> {
+                Ok(self.0)
+            }
+        }
+
         impl Serializer for Names {
             type Ok = Vec<&'static str>;
             type Error = Refused;
@@ -1130,7 +1168,7 @@ mod tests {
             type SerializeTupleVariant = Never;
             type SerializeMap = Never;
             type SerializeStruct = Fields;
-            type SerializeStructVariant = Never;
+            type SerializeStructVariant = Fields;
             refuse! {
                 serialize_bool(bool); serialize_i8(i8); serialize_i16(i16); serialize_i32(i32); serialize_i64(i64);
                 serialize_u8(u8); serialize_u16(u16); serialize_u32(u32); serialize_u64(u64); serialize_f32(f32);
@@ -1187,12 +1225,12 @@ mod tests {
                 _: u32,
                 _: &'static str,
                 _: usize,
-            ) -> Result<Never, Refused> {
-                Err(Refused)
+            ) -> Result<Fields, Refused> {
+                Ok(Fields(Vec::new()))
             }
         }
 
-        value.serialize(Names).expect("a struct")
+        value.serialize(Names).expect("a struct or a struct variant")
     }
 
     #[test]
@@ -1217,5 +1255,25 @@ mod tests {
         assert_eq!(fields(&lines[1]), with);
         assert!(lines[1].spans.is_empty());
         assert_eq!(lines[1].replacements, Some(Vec::new()));
+    }
+
+    #[test]
+    fn the_total_is_in_the_lisp_form_only_with_a_count_and_truncation() {
+        let t = tree(&[("a", "needle\nneedle\nneedle\n"), ("b", "needle\n")]);
+        let summary = |max_lines: usize, count_up_to: Option<usize>| {
+            let mut q = Query::new(t.path(), vec![line("needle")]);
+            (q.max_lines, q.count_up_to) = (max_lines, count_up_to);
+            let found = run(q);
+            let item: Item = found.summary.clone().into();
+            (field_names(&item), found.summary.total)
+        };
+        let without = ["files_searched", "files_matched", "lines", "truncated", "sorted", "millis", "skipped"];
+        let mut with = without.to_vec();
+        with.push("total");
+        // Truncated without a count, a count without truncation, and neither.
+        assert_eq!(summary(2, None), (without.to_vec(), None));
+        assert_eq!(summary(10, Some(100)), (without.to_vec(), None));
+        assert_eq!(summary(10, None), (without.to_vec(), None));
+        assert_eq!(summary(2, Some(100)), (with, Some(4)));
     }
 }

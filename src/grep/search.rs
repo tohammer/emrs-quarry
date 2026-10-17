@@ -48,6 +48,23 @@
 //! at its next entry and stops reading its current file at the next line the searcher reports. `truncated`
 //! therefore also is true when the tree holds exactly `max_lines` kept lines.
 //!
+//! **Counting beyond the cap** (ADR 0025). With `count_up_to` above `max_lines`, filling the cap does not set
+//! the stop flag: the walk goes on, sends nothing more, and counts the kept lines it finds in a second shared
+//! counter, *beyond*, which holds the kept lines that were not delivered. A file whose kept lines and the
+//! counter reach `max_lines`, or that is opened after the cap was filled, is read on in counting mode instead of
+//! being left: its further kept lines are only counted, privately, without their text, positions, replacements
+//! or context lines. When the file is done, `reserve` grants it what still fits as before, and the kept lines it
+//! collected but was not granted and those it counted go to *beyond* together. So every kept line of a file
+//! that was read to its end is either delivered or in *beyond*, whatever the threads' timing, and `total` is
+//! `max_lines` plus *beyond*, at most `count_up_to`. The thread whose addition brings the total to
+//! `count_up_to` sets the stop flag; a file in counting mode also stops when its own count and *beyond* reach
+//! it, so a single large file is not read further than the bound. Only the bound stops the counting early, so a
+//! `total` below `count_up_to` holds the whole tree. A file found binary adds nothing to *beyond*, also when it
+//! filled the cap before its NUL byte (its delivered lines stay, as without counting); one that the bound stops
+//! in counts as text. With `count_up_to` at or below `max_lines`, nothing is counted beyond the cap and the
+//! search stops there as without it; `total` is then `count_up_to`. The file items collected for sorting are
+//! sent when the budget runs out during the count, as during the walk.
+//!
 //! **Order.** Finished file items go into a buffer behind a mutex until `sort_budget` has passed since the
 //! search started. The first thread that notices the deadline (at a walk entry or when it has an item) sorts
 //! the buffer by path and sends it; from then on every thread sends its items itself, in the order they are
@@ -103,6 +120,9 @@ pub struct Config {
     pub started: Instant,
     /// The replacement template: with it, each kept line that is exact gets the new text of its primary matches.
     pub replace: Option<String>,
+    /// When the cap is reached, the search goes on counting kept lines up to this many in all (module docs,
+    /// "Counting beyond the cap"); `None`: it stops at the cap.
+    pub count_up_to: Option<usize>,
 }
 
 /// One line of a file. A kept line: `(:n 12 :text "let x = 1;" :spans ((4 5)) :secondary nil :inexact nil)`,
@@ -151,6 +171,7 @@ pub struct Summary {
     pub sorted: bool,
     pub millis: u64,
     pub skipped: usize,
+    pub total: Option<usize>,
 }
 
 /// A stream item. The Lisp shapes are in the module docs of `src/grep/service.rs`.
@@ -186,6 +207,10 @@ pub enum Item {
         /// Files that could not be opened or read, walk errors (such as unreadable directories) and files
         /// whose path is not valid UTF-8.
         skipped: usize,
+        /// Only with `count_up_to` and `truncated`: the kept lines of the tree, at most `count_up_to`. Left out
+        /// of the Lisp form when `None`, so that without counting the summary is as it was before.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        total: Option<usize>,
     },
 }
 
@@ -198,8 +223,8 @@ impl From<FileItem> for Item {
 
 impl From<Summary> for Item {
     fn from(summary: Summary) -> Item {
-        let Summary { files_searched, files_matched, lines, truncated, sorted, millis, skipped } = summary;
-        Item::Summary { files_searched, files_matched, lines, truncated, sorted, millis, skipped }
+        let Summary { files_searched, files_matched, lines, truncated, sorted, millis, skipped, total } = summary;
+        Item::Summary { files_searched, files_matched, lines, truncated, sorted, millis, skipped, total }
     }
 }
 
@@ -253,12 +278,14 @@ impl Search {
             dir: &config.dir,
             out,
             max_lines: config.max_lines,
+            count_beyond: config.count_up_to.map_or(0, |bound| bound.saturating_sub(config.max_lines)),
             max_columns: config.max_columns,
             replace: config.replace.as_deref().map(str::as_bytes),
             before: config.before as u64,
             after: config.after as u64,
             deadline: config.started.checked_add(config.sort_budget),
             lines: AtomicUsize::new(0),
+            beyond: AtomicUsize::new(0),
             files_searched: AtomicUsize::new(0),
             files_matched: AtomicUsize::new(0),
             skipped: AtomicUsize::new(0),
@@ -296,14 +323,18 @@ impl Search {
             hook::record(&config.dir, hook::Ended::Cancelled(shared.files_searched.load(Ordering::Relaxed)));
             return false;
         }
+        let lines = shared.lines.load(Ordering::Relaxed);
+        let truncated = shared.truncated.load(Ordering::Relaxed);
+        let beyond = shared.beyond.load(Ordering::Relaxed);
         let summary = Summary {
             files_searched: shared.files_searched.load(Ordering::Relaxed),
             files_matched: shared.files_matched.load(Ordering::Relaxed),
-            lines: shared.lines.load(Ordering::Relaxed),
-            truncated: shared.truncated.load(Ordering::Relaxed),
+            lines,
+            truncated,
             sorted,
             millis: config.started.elapsed().as_millis() as u64,
             skipped: shared.skipped.load(Ordering::Relaxed),
+            total: config.count_up_to.filter(|_| truncated).map(|bound| lines.saturating_add(beyond).min(bound)),
         };
         #[cfg(test)]
         hook::record(&config.dir, hook::Ended::Finished(summary.clone()));
@@ -316,6 +347,8 @@ struct Shared<'a> {
     dir: &'a Path,
     out: &'a dyn Output,
     max_lines: usize,
+    /// How many kept lines to count beyond the cap: `count_up_to` less `max_lines`; 0 for no counting.
+    count_beyond: usize,
     max_columns: usize,
     /// The replacement template.
     replace: Option<&'a [u8]>,
@@ -327,11 +360,15 @@ struct Shared<'a> {
     deadline: Option<Instant>,
     /// Kept lines of the finished files; never more than `max_lines`.
     lines: AtomicUsize,
+    /// While counting beyond the cap: the kept lines of the finished files that were not delivered. May pass
+    /// `count_beyond` when threads add at the same time.
+    beyond: AtomicUsize,
     files_searched: AtomicUsize,
     /// File items sent.
     files_matched: AtomicUsize,
     skipped: AtomicUsize,
-    /// The walk is to end: the cap was reached, the search was cancelled, or a thread panicked.
+    /// The walk is to end: the cap was reached without counting, the count reached its bound, the search was
+    /// cancelled, or a thread panicked.
     stop: AtomicBool,
     truncated: AtomicBool,
     cancelled: AtomicBool,
@@ -357,8 +394,18 @@ impl Shared<'_> {
         self.lines.load(Ordering::Relaxed).saturating_add(collected) < self.max_lines
     }
 
+    /// Whether the search counts kept lines beyond the cap.
+    fn counts(&self) -> bool {
+        self.count_beyond > 0
+    }
+
+    /// Whether `more` kept lines beyond those of the finished files would reach the bound of the count.
+    fn bound_reached(&self, more: usize) -> bool {
+        self.beyond.load(Ordering::Relaxed).saturating_add(more) >= self.count_beyond
+    }
+
     /// Counts up to `wanted` kept lines of a finished file under the cap and returns how many of them fit. Ends the
-    /// search when the cap is reached.
+    /// search when the cap is reached, unless it counts beyond it.
     fn reserve(&self, wanted: usize) -> usize {
         let max = self.max_lines;
         // `try_update`, the new name, is not in the minimum supported Rust.
@@ -370,9 +417,23 @@ impl Shared<'_> {
         let granted = wanted.min(max.saturating_sub(before));
         if before + granted >= max {
             self.truncated.store(true, Ordering::Relaxed);
-            self.stop.store(true, Ordering::Relaxed);
+            if !self.counts() {
+                self.stop.store(true, Ordering::Relaxed);
+            }
         }
         granted
+    }
+
+    /// Adds `count` kept lines of a finished file that are not delivered to the count beyond the cap. Ends the
+    /// search when the count reaches its bound. Nothing without counting.
+    fn add_beyond(&self, count: usize) {
+        if !self.counts() || count == 0 {
+            return;
+        }
+        let before = self.beyond.fetch_add(count, Ordering::Relaxed);
+        if before.saturating_add(count) >= self.count_beyond {
+            self.stop.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Sends one file item; the caller holds the lock of `pending`.
@@ -483,19 +544,26 @@ impl Worker<'_> {
             held: VecDeque::new(),
             binary: false,
             full: false,
+            // The cap is filled already: nothing of this file can be delivered.
+            counting: shared.counts() && !shared.has_room(0),
+            counted: 0,
+            binary_late: false,
         };
         if self.searcher.search_file(self.filters.primary(), &file, &mut sink).is_err() {
             shared.skipped.fetch_add(1, Ordering::Relaxed);
             return;
         }
         shared.files_searched.fetch_add(1, Ordering::Relaxed);
-        let LineSink { mut lines, kept, binary, full, .. } = sink;
+        let LineSink { mut lines, kept, binary, full, counted, binary_late, .. } = sink;
         if binary || (kept == 0 && !full) {
             return;
         }
         let granted = shared.reserve(kept);
         if granted < kept {
             truncate_kept(&mut lines, granted);
+        }
+        if !binary_late {
+            shared.add_beyond(kept - granted + counted);
         }
         if lines.is_empty() {
             return;
@@ -531,9 +599,28 @@ struct LineSink<'a> {
     binary: bool,
     /// A kept line was left out because of the cap.
     full: bool,
+    /// The file is read on beyond the cap: kept lines are only counted, in `counted`, and nothing else is taken.
+    counting: bool,
+    /// Kept lines found in counting mode.
+    counted: usize,
+    /// The searcher met a NUL byte in counting mode: the lines collected before stay, nothing is counted.
+    binary_late: bool,
 }
 
 impl LineSink<'_> {
+    /// The searcher met a NUL byte. Once the file is read in counting mode, the lines collected before stay a text
+    /// file's: without counting the search would not have read so far.
+    fn mark_binary(&mut self) {
+        if self.counting { self.binary_late = true } else { self.binary = true }
+    }
+
+    /// Counts a kept line in counting mode; whether to read on.
+    fn count_kept(&mut self) -> bool {
+        self.full = true;
+        self.counted += 1;
+        !self.shared.bound_reached(self.counted)
+    }
+
     /// Takes line `n`, which is not kept, without its terminator: a context line when a kept line is at most
     /// `after` lines back, otherwise held back for a kept line to come.
     fn candidate(&mut self, n: u64, bytes: &[u8]) {
@@ -561,10 +648,19 @@ impl Sink for LineSink<'_> {
         let n = found.line_number().unwrap_or(0);
         if !self.filters.keep_line(bytes) {
             // An ordinary line from here on; the searcher still reports the lines around it.
-            self.candidate(n, bytes);
+            if !self.counting {
+                self.candidate(n, bytes);
+            }
             return Ok(true);
         }
+        if self.counting {
+            return Ok(self.count_kept());
+        }
         if !shared.has_room(self.kept) {
+            if shared.counts() {
+                self.counting = true;
+                return Ok(self.count_kept());
+            }
             self.full = true;
             return Ok(false);
         }
@@ -584,24 +680,34 @@ impl Sink for LineSink<'_> {
         let text = whole[..shown].to_string();
         self.lines.push(Line { n, text, spans, secondary, inexact, context: false, replacements });
         self.kept += 1;
-        Ok(shared.has_room(self.kept))
+        if shared.has_room(self.kept) {
+            return Ok(true);
+        }
+        // Without counting, the rest of the file is not read.
+        self.counting = shared.counts();
+        Ok(self.counting)
     }
 
     fn context(&mut self, _: &Searcher, context: &SinkContext<'_>) -> Result<bool, std::io::Error> {
         if self.shared.stop.load(Ordering::Relaxed) {
             return Ok(false);
         }
+        if self.counting {
+            return Ok(true);
+        }
         self.candidate(context.line_number().unwrap_or(0), strip_terminator(context.bytes()));
         Ok(true)
     }
 
     fn binary_data(&mut self, _: &Searcher, _: u64) -> Result<bool, std::io::Error> {
-        self.binary = true;
+        self.mark_binary();
         Ok(false)
     }
 
     fn finish(&mut self, _: &Searcher, finish: &SinkFinish) -> Result<(), std::io::Error> {
-        self.binary |= finish.binary_byte_offset().is_some();
+        if finish.binary_byte_offset().is_some() {
+            self.mark_binary();
+        }
         Ok(())
     }
 }
@@ -787,7 +893,8 @@ mod tests {
                 truncated: false,
                 sorted: true,
                 millis: 0,
-                skipped: 0
+                skipped: 0,
+                total: None
             }
         );
 
@@ -1406,6 +1513,7 @@ mod tests {
                 sort_budget,
                 started: self.started,
                 replace: None,
+                count_up_to: None,
             };
             Search::new(config).unwrap().run(self)
         }
@@ -1583,6 +1691,269 @@ mod tests {
         let found = run(q);
         assert_eq!(found.texts("a"), [(4, "needle y"), (6, "needle y")]);
         assert!(found.summary.truncated);
+    }
+
+    /// Searches `dir` for `needle` with a cap and a bound for the count beyond it.
+    fn counted(dir: &Path, max_lines: usize, count_up_to: Option<usize>) -> Found {
+        let mut q = Query::new(dir, vec![line("needle")]);
+        (q.max_lines, q.count_up_to) = (max_lines, count_up_to);
+        run(q)
+    }
+
+    #[test]
+    fn the_count_beyond_the_cap_gives_the_total() {
+        // 30 kept lines in 10 files.
+        let t = many(10, 3);
+        for sort_budget_ms in [0, 60_000] {
+            let mut q = Query::new(t.path(), vec![line("needle")]);
+            (q.max_lines, q.count_up_to, q.sort_budget_ms) = (10, Some(100), sort_budget_ms);
+            let found = run(q);
+            let s = &found.summary;
+            assert_eq!((s.lines, s.truncated, s.total), (10, true, Some(30)), "budget {sort_budget_ms}: {s:?}");
+            assert_eq!(found.total_lines(), 10, "nothing more is sent: {s:?}");
+            assert_eq!(s.files_searched, 10, "the whole tree is walked: {s:?}");
+            for file in &found.files {
+                let numbers: Vec<u64> = file.lines.iter().map(|l| l.n).collect();
+                assert_eq!(numbers, (1..=numbers.len() as u64).collect::<Vec<_>>(), "{s:?}");
+            }
+        }
+        // Exactly as many as the bound: still exact.
+        assert_eq!(counted(t.path(), 10, Some(30)).summary.total, Some(30));
+    }
+
+    #[test]
+    fn the_bound_stops_the_count() {
+        let t = many(2000, 1);
+        let all = counted(t.path(), 10, Some(100_000));
+        assert_eq!((all.summary.total, all.summary.files_searched), (Some(2000), 2000));
+        let bounded = counted(t.path(), 10, Some(20));
+        let s = &bounded.summary;
+        assert_eq!((s.lines, s.truncated, s.total), (10, true, Some(20)), "{s:?}");
+        assert_eq!(bounded.total_lines(), 10);
+        assert!(s.files_searched < 2000, "the walk stops: {s:?}");
+        // Also inside one file.
+        let t = many(1, 1000);
+        let found = counted(t.path(), 10, Some(20));
+        assert_eq!((found.summary.lines, found.summary.total), (10, Some(20)));
+    }
+
+    #[test]
+    fn the_rest_of_the_file_that_fills_the_cap_is_counted_and_dropped_lines_are_not() {
+        let t = many(1, 100);
+        let found = counted(t.path(), 7, Some(1000));
+        assert_eq!(found.lines("d00/f0000").iter().map(|l| l.n).collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!((found.summary.lines, found.summary.truncated, found.summary.total), (7, true, Some(100)));
+
+        let t = tree(&[
+            ("a", "needle x\nneedle x\nneedle x\nneedle y\nneedle x\nneedle y\nneedle y\n"),
+            ("b", "needle x\nneedle y\nnothing y\nneedle y\n"),
+        ]);
+        let mut q = Query::new(t.path(), vec![line("needle"), not_line("x")]);
+        (q.max_lines, q.count_up_to) = (2, Some(100));
+        let found = run(q);
+        assert_eq!(found.total_kept(), 2);
+        assert_eq!((found.summary.lines, found.summary.truncated, found.summary.total), (2, true, Some(5)));
+    }
+
+    #[test]
+    fn context_lines_do_not_count_for_the_total() {
+        let t = tree(&[("a", &numbered(14, &[2, 5, 8, 11])), ("b", &numbered(30, &[10, 20]))]);
+        for (before, after) in [(0, 0), (1, 1), (3, 0), (0, 3), (50, 50)] {
+            let mut q = Query::new(t.path(), vec![line("needle")]);
+            (q.before, q.after, q.max_lines, q.count_up_to) = (before, after, 2, Some(100));
+            let found = run(q);
+            let what = format!("{before}/{after}: {:?}", found.summary);
+            assert_eq!(found.total_kept(), 2, "{what}");
+            assert_eq!(found.summary.total, Some(6), "{what}");
+        }
+        // What is sent is what is sent without counting.
+        let t = tree(&[("a", &numbered(14, &[2, 5, 8, 11]))]);
+        let search = |count_up_to: Option<usize>| {
+            let mut q = Query::new(t.path(), vec![line("needle")]);
+            (q.before, q.after, q.max_lines, q.count_up_to) = (1, 1, 2, count_up_to);
+            run(q)
+        };
+        let (with, without) = (search(Some(100)), search(None));
+        assert_eq!(with.marks("a"), "1- 2: 3- 4- 5:");
+        assert_eq!(with.files, without.files);
+        assert_eq!((with.summary.total, without.summary.total), (Some(4), None));
+    }
+
+    #[test]
+    fn without_count_or_truncation_there_is_no_total() {
+        let t = many(10, 3);
+        let found = counted(t.path(), 10, None);
+        assert_eq!((found.summary.truncated, found.summary.total), (true, None));
+        let found = counted(t.path(), 100, Some(1000));
+        assert_eq!((found.summary.lines, found.summary.truncated, found.summary.total), (30, false, None));
+        let found = counted(t.path(), 30, Some(1000));
+        assert_eq!((found.summary.truncated, found.summary.total), (true, Some(30)), "the cap reached exactly");
+    }
+
+    #[test]
+    fn a_bound_at_or_below_the_cap_counts_nothing_beyond_it() {
+        let t = many(400, 1);
+        for count_up_to in [0, 5, 10] {
+            let found = counted(t.path(), 10, Some(count_up_to));
+            let s = &found.summary;
+            assert_eq!((s.lines, s.truncated, s.total), (10, true, Some(count_up_to)), "{s:?}");
+            assert!(s.files_searched < 400, "the search stops at the cap: {s:?}");
+        }
+        let found = counted(t.path(), 0, Some(50));
+        assert_eq!((found.summary.lines, found.summary.total), (0, Some(50)));
+        assert!(found.files.is_empty());
+    }
+
+    #[test]
+    fn binary_files_count_nothing_beyond_the_cap() {
+        let t = TempDir::new().unwrap();
+        write(t.path(), "text.txt", "needle\nneedle\n");
+        write(t.path(), "early.bin", b"\0\x01\x02 needle\nneedle\n");
+        write(t.path(), "late.bin", b"needle\nneedle\nmore\0 needle\n");
+        let found = counted(t.path(), 1, Some(100));
+        assert_eq!((found.summary.lines, found.summary.total), (1, Some(2)));
+
+        // A file that fills the cap before its NUL byte is read gives the same lines as without counting.
+        let t = TempDir::new().unwrap();
+        let mut late = b"needle 1\nneedle 2\n".to_vec();
+        late.extend(std::iter::repeat_n(&b"filler line\n"[..], 30_000).flatten());
+        late.extend_from_slice(b"needle 3\nnul\0\n");
+        write(t.path(), "late.bin", &late);
+        let without = counted(t.path(), 1, None);
+        let with = counted(t.path(), 1, Some(100));
+        assert_eq!(without.texts("late.bin"), [(1, "needle 1")]);
+        assert_eq!(with.texts("late.bin"), without.texts("late.bin"));
+        assert_eq!((with.summary.truncated, with.summary.total), (true, Some(1)));
+    }
+
+    #[test]
+    fn a_file_that_the_bound_stops_in_counts_as_text() {
+        // The bound is reached within the first 64 KiB, and a NUL byte comes long after: a file that is read on
+        // after the bound would be binary and add nothing beyond the cap.
+        let t = TempDir::new().unwrap();
+        let mut content: Vec<u8> = (1..=1000).flat_map(|n| format!("needle {n}\n").into_bytes()).collect();
+        content.extend(std::iter::repeat_n(&b"filler line\n"[..], 30_000).flatten());
+        content.extend_from_slice(b"nul\0\n");
+        write(t.path(), "f", &content);
+        let found = counted(t.path(), 5, Some(20));
+        assert_eq!((found.summary.lines, found.summary.truncated, found.summary.total), (5, true, Some(20)));
+        let numbers: Vec<u64> = found.lines("f").iter().map(|l| l.n).collect();
+        assert_eq!(numbers, [1, 2, 3, 4, 5]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn kept_lines_without_room_count_beyond_the_cap() {
+        // A file collects kept lines while the cap has room; other threads fill the cap before the file ends.
+        // The file is a FIFO, so the test decides when that happens: the write of the filler returns only after
+        // the searcher has read, and so handled, the lines in front of it.
+        let t = TempDir::new().unwrap();
+        let fifo = t.path().join("f");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let out = CancelAfterFirstItem::default();
+        let shared = Shared {
+            dir: t.path(),
+            out: &out,
+            max_lines: 5,
+            count_beyond: 15,
+            max_columns: 500,
+            replace: None,
+            before: 0,
+            after: 0,
+            deadline: None,
+            lines: AtomicUsize::new(0),
+            beyond: AtomicUsize::new(0),
+            files_searched: AtomicUsize::new(0),
+            files_matched: AtomicUsize::new(0),
+            skipped: AtomicUsize::new(0),
+            stop: AtomicBool::new(false),
+            truncated: AtomicBool::new(false),
+            cancelled: AtomicBool::new(false),
+            streaming: AtomicBool::new(false),
+            pending: Mutex::new(Some(Vec::new())),
+        };
+        let mut worker = Worker {
+            shared: &shared,
+            filters: Filters::compile(&[line("needle")], Case::Smart).unwrap(),
+            searcher: SearcherBuilder::new()
+                .binary_detection(BinaryDetection::quit(0))
+                .line_terminator(LineTerminator::crlf())
+                .line_number(true)
+                .build(),
+        };
+        std::thread::scope(|scope| {
+            scope.spawn(|| worker.search(&fifo, "f".to_string()));
+            let mut writer = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+            let mut content = b"needle 1\nneedle 2\nneedle 3\n".to_vec();
+            content.extend(std::iter::repeat_n(&b"filler line\n"[..], 20_000).flatten());
+            std::io::Write::write_all(&mut writer, &content).unwrap();
+            // One line of room is left for the file's three kept lines.
+            shared.lines.store(4, Ordering::Relaxed);
+        });
+        assert_eq!(shared.lines.load(Ordering::Relaxed), 5);
+        assert_eq!(shared.beyond.load(Ordering::Relaxed), 2, "the two kept lines that did not fit");
+        let pending = shared.pending();
+        let items = pending.as_ref().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].lines.len(), 1);
+    }
+
+    /// An [`Output`] that cancels the search once it has been sent a file item.
+    #[derive(Default)]
+    struct CancelAfterFirstItem {
+        sent: Mutex<Vec<Item>>,
+        cancelled: AtomicBool,
+        /// Walk entries visited after the cancellation.
+        entries_after: AtomicUsize,
+    }
+
+    impl Output for CancelAfterFirstItem {
+        fn send(&self, item: Item) -> bool {
+            self.sent.lock().unwrap().push(item);
+            self.cancelled.store(true, Ordering::SeqCst);
+            true
+        }
+
+        fn is_cancelled(&self) -> bool {
+            let cancelled = self.cancelled.load(Ordering::SeqCst);
+            if cancelled {
+                self.entries_after.fetch_add(1, Ordering::SeqCst);
+            }
+            cancelled
+        }
+    }
+
+    #[test]
+    fn a_search_cancelled_while_it_counts_sends_no_summary() {
+        let t = many(2000, 1);
+        let out = CancelAfterFirstItem::default();
+        let config = Config {
+            dir: t.path().to_path_buf(),
+            filters: Filters::compile(&[line("needle")], Case::Smart).unwrap(),
+            types: None,
+            globs: None,
+            use_ignore_files: true,
+            include_hidden: true,
+            ignores: Vec::new(),
+            // The first item fills the cap, so the search counts when it is cancelled.
+            max_lines: 1,
+            max_columns: 500,
+            before: 0,
+            after: 0,
+            sort_budget: Duration::ZERO,
+            started: Instant::now(),
+            replace: None,
+            count_up_to: Some(100_000),
+        };
+        assert!(!Search::new(config).unwrap().run(&out));
+        let sent = out.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert!(matches!(sent[0], Item::File { .. }));
+        let ended = hook::wait(t.path(), 1, Duration::from_secs(10));
+        let [hook::Ended::Cancelled(searched)] = ended[..] else { panic!("{ended:?}") };
+        assert!(searched < 2000, "the walk stops: {searched}");
+        // Each thread quits at its next entry.
+        assert!(out.entries_after.load(Ordering::SeqCst) <= threads(), "{:?}", out.entries_after);
     }
 
     #[test]

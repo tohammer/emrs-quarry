@@ -783,12 +783,17 @@ preview keep the template and update the preview.
 - `C-c C-k` leaves the preview when no search runs. `e` is refused
   during a preview; leave it first.
 - `C-c C-c` writes the switched-on matches. It is refused while a search
-  runs, after a failed or cancelled search, when no match is switched
-  on, and when the result is truncated at `quarry-grep-max-lines`: only
-  what is shown is written, so narrow the search or raise the option. If
-  a result file changed since the search (or a modified buffer visits
-  it), it asks whether to search again, and writes nothing either way.
-  Otherwise it asks `Replace N matches on L lines in F files?`.
+  runs, after a failed or cancelled search, and when no match is
+  switched on. A preview that stops at `quarry-grep-max-lines` counts
+  the matching lines up to `quarry-grep-replace-max-lines`; `C-c C-c`
+  then offers to search again with a limit that holds them all and
+  writes nothing, or, above the option, says to narrow the search (see
+  "Large replacements"). If a result file changed since the search (or
+  a modified buffer visits it), it asks whether to search again, and
+  writes nothing either way.
+  Otherwise it asks `Replace N matches on L lines in F files?`, and
+  names the files among them that are folded or outside a narrowing
+  (`C-x n n`): they are written too.
 - Every line is compared with the text the search found and rejected
   when it differs, or when its buffer is read-only, has unsaved changes
   or is not up to date with its file, when the file cannot be read or
@@ -843,6 +848,41 @@ preview keep the template and update the preview.
 The replace needs the new module: rebuild it with `M-x
 quarry-build-module` and restart Emacs. An older module is detected when
 the search with the template gets its first results; the search then runs without the template and says to rebuild.
+
+#### Large replacements
+
+A search stops at `quarry-grep-max-lines` hits (50,000 by default;
+context lines do not count), and `C-c C-c` does not write a result that
+stopped there. The status line of a truncated preview shows the total,
+"Search stopped at 50000 of 73412 lines", or "of more than 100000
+lines" above `quarry-grep-replace-max-lines`. Three ways through:
+
+- **Raise the limit for this search.** `C-c C-c` asks `73412 lines
+  match, the limit is 50000; search again with a limit that holds them
+  all?` for up to `quarry-grep-replace-max-lines` lines (100,000 by
+  default, as it was when the search started). Yes searches again with
+  such a limit and the template. Above that, each search reads the
+  option when it starts, so `M-: (setq quarry-grep-max-lines 300000)`
+  and then `g` in the result buffer search again with the template. Measured on a
+  laptop (`docs/architecture/grep.md`, "Cost of large change sets"): the
+  preview takes about 3 s per 100,000 hits, applying about 1 ms per file
+  on an SSD, so 10,000 files take about 13 s. Above about 100,000 hits
+  nothing was measured; the buffer and the Emacs thread become the
+  limit. Set the option back afterwards.
+- **Replace part by part.** A filter change keeps the template, and what
+  it leaves out is not written. Limit the search to one part (`+ p
+  src/foo/`, `+ d` on a result, or `f` with `src/foo/**`), check the
+  preview, `C-c C-c`, then change the filter to the next part. Pressing
+  `g` again does not work as batching: while more hits remain than the
+  limit, the result stays truncated and `C-c C-c` writes nothing.
+- **Match fewer lines.** Word boundaries (`\bold_name\b`), an include
+  line filter (`+ l`) for the context the change belongs to, or leaving
+  out generated and vendored directories (`f` with `!vendor/ !gen/`, or
+  `- p`) often bring the hits under the limit and make the preview
+  easier to review.
+
+For changes of millions of lines, a command-line tool such as `fastmod`
+or `rg -l | xargs sed` is the better fit.
 
 ### Live grep
 
@@ -1059,7 +1099,8 @@ options of the live grep are listed under "Options".
 | `quarry-grep-case` | `smart` | Case rule a new search starts with: `smart`, `sensitive` or `insensitive`. |
 | `quarry-grep-context-before` | `0` | Lines shown before each hit that a new search starts with, at most 1000. |
 | `quarry-grep-context-after` | `0` | Lines shown after each hit that a new search starts with, at most 1000. |
-| `quarry-grep-max-lines` | `50000` | The search stops when this many hits are found, and the last line says so. |
+| `quarry-grep-max-lines` | `50000` | The search stops when this many hits are found, and the last line says so. A replace preview counts on past it (see "Large replacements"). |
+| `quarry-grep-replace-max-lines` | `100000` | The largest number of matching lines for which `C-c C-c` of a replace preview offers a search with a limit that holds them all. |
 | `quarry-grep-max-columns` | `500` | Longer lines are shown cut after this many characters. |
 | `quarry-grep-buffer-name` | `*quarry-grep*` | Name of the result buffer. |
 | `quarry-grep-highlight-include-filters` | `t` | Highlight the matches of the `+ line` filters other than the primary one. |
