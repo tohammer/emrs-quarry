@@ -3957,6 +3957,23 @@ and have the face of its result."
                      '(("a.txt" 1 "new_1x and foo_2") ("b.txt" 1 "x foo_5"))))
       (should (quarry-grep--applicable-p)))))
 
+(ert-deftest quarry-test-grep-replace-apply-after-narrowing ()
+  "Files and lines that a change after R leaves out are not written."
+  (quarry-test-grep--with-replace (dir quarry-test-grep--apply-files "foo_([0-9])" "new_$1")
+    ;; A path filter, the file at point, a glob and a line filter.
+    (quarry-test-grep--keys "- p b.txt RET")
+    (goto-char (quarry-test-grep--heading-pos "c.txt"))
+    (quarry-test-grep--keys "- f")
+    (quarry-test-grep--keys "f !d/ RET")
+    (quarry-test-grep--keys "- l foo_3 RET")
+    (should (equal (quarry-test-grep--request :replace) "new_$1"))
+    (should (equal (quarry-test-grep--results) '(("a.txt" 1 "foo_1 and foo_2"))))
+    (should (equal (quarry-test-grep--apply t)
+                   '("Replace 2 matches on 1 line in 1 file? ")))
+    (should (equal (quarry-test-grep--bytes dir "a.txt") "new_1 and new_2\nnothing\nfoo_3 foo_4\n"))
+    (pcase-dolist (`(,path . ,content) (cdr quarry-test-grep--apply-files))
+      (should (equal (quarry-test-grep--bytes dir path) content)))))
+
 (ert-deftest quarry-test-grep-replace-apply-refused ()
   "C-c C-c is refused without a complete preview with matches switched on."
   (quarry-test-grep--with-tree (dir quarry-test-grep--apply-files)
