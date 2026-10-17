@@ -167,7 +167,7 @@ count; yes; the time of the rerun and of the apply.
 The branch is based on `grep-replace` and is rebased on `master` after
 PR #7 is merged.
 
-- [ ] 1. **Service: count beyond the cap.** `:count-up-to`, the counting
+- [x] 1. **Service: count beyond the cap.** `:count-up-to`, the counting
   phase, `:total` in the summary, the module docs and the architecture
   paragraph on the cap, with the `cargo test` cases above. *Done when*
   `cargo test`, clippy and fmt pass, and the existing cap tests pass

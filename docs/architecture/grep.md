@@ -155,6 +155,20 @@ walk at its next entry. The kept lines delivered therefore never exceed
 line at which a thread stops reading its file has its context lines
 before and not those after.
 
+With `:count-up-to` (sent for replace previews, ADR 0025), filling the
+cap does not set the stop flag. The search sends nothing more and goes on
+counting kept lines in a second counter, which holds the kept lines that
+were not delivered: a file that runs out of room, or is opened after the
+cap was filled, is read on in counting mode, which only matches and asks
+`keep_line`, without text, positions, replacements or context lines. When
+such a file is done, what `reserve` does not grant it and what it counted
+go to the second counter together, so every kept line of a file read to
+its end is either delivered or counted, whatever the timing of the
+threads. The summary's `:total` is `max-lines` plus that counter, at most
+`:count-up-to`; the thread that brings it to the bound sets the stop flag.
+A total below the bound is therefore the whole tree's. Cancellation works
+in the counting phase as in the walk before it.
+
 ## Cancellation
 
 Each walker thread asks the stream's token at every walk entry; the token
