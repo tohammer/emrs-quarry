@@ -24,7 +24,7 @@
 //! | `:no-ignore` | non-nil: `.gitignore`, `.ignore` and the git exclude files are not applied | nil |
 //! | `:hidden` | search hidden files; say `:hidden nil` to leave out every file and directory whose name starts with a dot, whatever the file types or globs (a glob cannot bring a hidden file back) | t |
 //! | `:ignores` | list of strings: extra gitignore lines relative to `:dir` | nil |
-//! | `:max-lines` | integer: the search stops when this many kept lines are collected | 50000 |
+//! | `:max-lines` | integer: the search stops when this many kept lines are collected (with `:count-up-to`, see that key) | 50000 |
 //! | `:count-up-to` | integer: when `:max-lines` is reached, the search sends nothing more but goes on counting kept lines until there are this many in all or the walk ends, for `:total` (ADR 0025). A value at or below `:max-lines` counts nothing beyond it | nil: no counting, no `:total` |
 //! | `:max-columns` | integer: longer lines are cut after this many characters | 500 |
 //! | `:before` | integer ≥ 0: lines sent before each kept line as context lines, at most 1000 | 0 |
@@ -97,7 +97,8 @@
 //! - `:files-searched`: files opened and read (binary files included, they give no lines). `:files-matched`:
 //!   the number of file items. `:lines`: the kept lines in them, never more than `:max-lines`; context lines
 //!   are not counted, here or for `:max-lines`.
-//! - `:truncated`: `:lines` reached `:max-lines` and the search stopped there. The kept line that filled the cap
+//! - `:truncated`: `:lines` reached `:max-lines`. Without `:count-up-to` the search stopped there; with it,
+//!   nothing more was sent and the walk went on counting (see `:total`). The kept line that filled the cap
 //!   has its context lines before it; those after it may be missing.
 //! - `:total`: only with `:count-up-to` and `:truncated` t, after `:skipped`: the kept lines of the whole tree,
 //!   delivered or not, counted as for `:max-lines` but at most `:count-up-to` (`:total 73412`). `:total` below

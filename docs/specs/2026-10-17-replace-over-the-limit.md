@@ -1,6 +1,6 @@
 # Grep: replace previews over the line limit
 
-Status: approved
+Status: implemented
 Date: 2026-10-17
 
 ## Purpose
@@ -95,18 +95,26 @@ switched on".
 
 | `:total` | What `C-c C-c` does |
 |---|---|
-| at most `quarry-grep-replace-max-lines` | Asks `73412 lines match, the limit is 50000; search again with a limit that holds them all? ` (`y-or-n-p`). Yes sets the slot to `:total` + 1 and runs the search (`quarry-grep--change`), with the message `Searching again; press C-c C-c when the search is done`. No does nothing |
-| above it | `user-error`: `More than 100000 lines match; narrow the search (README, "Large replacements")` |
+| at most the bound, a match switched on | Asks `73412 lines match, the limit is 50000; search again with a limit that holds them all? ` (`y-or-n-p`). Yes sets the slot to `:total` + 1 and runs the search (`quarry-grep--change`), with the message `Searching again; press C-c C-c when the search is done`. No does nothing |
+| at most the bound, no match switched on | `user-error`: `No match is switched on` |
+| above the bound | `user-error`: `More than 100000 lines match; narrow the search (README, "Large replacements")` |
 | missing (an older module) | The refusal from before |
+
+The bound is `quarry-grep-replace-max-lines` as it was when the search
+started (one less than the `:count-up-to` it sent).
 
 (Changed during task 3: the limit was `:total`, but a search that
 reaches its limit exactly counts as truncated, so the rerun was
-truncated again and asked again. Decided by the author on 2026-10-17.)
+truncated again and asked again. Decided by the author on 2026-10-17.
+Changed after the review: the bound is the one the search sent, not the
+option as it is when `C-c C-c` is pressed; and with no match switched
+on there is no question, since the search again would switch them all
+on.)
 
 The message names the limit currently in force (the slot, else the
 option) and the total from the summary. In the menu (`?`), the `C-c C-c`
-entry is active for a truncated preview with an exact total, since it
-asks the question there, and inactive in the other two cases.
+entry is active for a truncated preview with an exact total and a match
+switched on, since it asks the question there, and inactive otherwise.
 
 ### New option
 
@@ -168,9 +176,6 @@ count; yes; the time of the rerun and of the apply.
 
 ## Tasks
 
-The branch is based on `grep-replace` and is rebased on `master` after
-PR #7 is merged.
-
 - [x] 1. **Service: count beyond the cap.** `:count-up-to`, the counting
   phase, `:total` in the summary, the module docs and the architecture
   paragraph on the cap, with the `cargo test` cases above. *Done when*
@@ -185,6 +190,6 @@ PR #7 is merged.
   ("Replacing matches", "Large replacements", the options table). *Done
   when* `tests/run-ert.sh` passes on Emacs 30 and 31 and the README
   describes the question.
-- [ ] 4. **Docs wrap-up.** Next-steps says to rebuild the module, the
+- [x] 4. **Docs wrap-up.** Next-steps says to rebuild the module, the
   spec is set to `implemented`. *Done when* `devflow:doc-checker`
   reports nothing stale.

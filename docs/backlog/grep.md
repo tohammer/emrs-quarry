@@ -311,3 +311,9 @@ The replace spec (2026-10-14) left these out on purpose. Origin: spec
   the spec 2026-10-17-replace-over-the-limit. Revisit if a cancel is
   slow in use; asking `out.is_cancelled()` in `count_kept` would close
   it.
+- **Left out of the spec:** raising the limit of a plain search from the
+  status line (the same count would serve); raising above
+  `quarry-grep-replace-max-lines` from the question (the README says to
+  set `quarry-grep-max-lines`); counting for searches without a template
+  and in the live grep (ADR 0025). Origin: spec
+  2026-10-17-replace-over-the-limit, "Scope". Revisit if one is missed.

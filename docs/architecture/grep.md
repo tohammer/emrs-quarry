@@ -143,7 +143,7 @@ instead of filling memory.
 
 ## Cap
 
-The cap counts kept lines; context lines are not counted anywhere
+Without `:count-up-to`, the search stops at the cap. The cap counts kept lines; context lines are not counted anywhere
 (ADR 0014). A counter shared by the threads holds the kept lines of the
 finished files. A thread stops reading its file when its own kept lines
 and the counter together reach `max-lines`; when the file is done it adds

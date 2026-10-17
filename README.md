@@ -860,10 +860,10 @@ lines" above `quarry-grep-replace-max-lines`. Three ways through:
 - **Raise the limit for this search.** `C-c C-c` asks `73412 lines
   match, the limit is 50000; search again with a limit that holds them
   all?` for up to `quarry-grep-replace-max-lines` lines (100,000 by
-  default). Yes searches again with such a limit and the template. Above that, each
-  search reads the option when it starts, so `M-: (setq
-  quarry-grep-max-lines 300000)` and then `g` in the result buffer
-  search again with the template. Measured on a
+  default, as it was when the search started). Yes searches again with
+  such a limit and the template. Above that, each search reads the
+  option when it starts, so `M-: (setq quarry-grep-max-lines 300000)`
+  and then `g` in the result buffer search again with the template. Measured on a
   laptop (`docs/architecture/grep.md`, "Cost of large change sets"): the
   preview takes about 3 s per 100,000 hits, applying about 1 ms per file
   on an SSD, so 10,000 files take about 13 s. Above about 100,000 hits
@@ -1099,8 +1099,8 @@ options of the live grep are listed under "Options".
 | `quarry-grep-case` | `smart` | Case rule a new search starts with: `smart`, `sensitive` or `insensitive`. |
 | `quarry-grep-context-before` | `0` | Lines shown before each hit that a new search starts with, at most 1000. |
 | `quarry-grep-context-after` | `0` | Lines shown after each hit that a new search starts with, at most 1000. |
-| `quarry-grep-max-lines` | `50000` | The search stops when this many hits are found, and the last line says so. |
-| `quarry-grep-replace-max-lines` | `100000` | The largest line limit that `C-c C-c` of a replace preview offers to search with. |
+| `quarry-grep-max-lines` | `50000` | The search stops when this many hits are found, and the last line says so. A replace preview counts on past it (see "Large replacements"). |
+| `quarry-grep-replace-max-lines` | `100000` | The largest number of matching lines for which `C-c C-c` of a replace preview offers a search with a limit that holds them all. |
 | `quarry-grep-max-columns` | `500` | Longer lines are shown cut after this many characters. |
 | `quarry-grep-buffer-name` | `*quarry-grep*` | Name of the result buffer. |
 | `quarry-grep-highlight-include-filters` | `t` | Highlight the matches of the `+ line` filters other than the primary one. |
