@@ -431,10 +431,25 @@ The value is a plist of the counts: `:lines' and `:files' replaced,
   "Return the file restriction of a search as the user would type it.
 TYPES is the list of file type names, GLOBS the list of globs.  That is
 \"everything\" for none, else the types followed by the globs, separated
-by spaces."
+by spaces.  A glob that the prompt would read as a type (`make',
+`!make') gets its first letter in brackets (`[m]ake', `![m]ake'), so
+the text reads back as the same restriction; that needs the type list,
+which is used only when it was fetched already."
   (if (or types globs)
-      (mapconcat #'identity (append types globs) " ")
+      (mapconcat #'identity
+                 (append types (mapcar #'quarry-grep--glob-text globs))
+                 " ")
     "everything"))
+
+(defun quarry-grep--glob-text (glob)
+  "Return GLOB as the files prompt must read it to take it as a glob."
+  (let* ((excluded (string-prefix-p "!" glob))
+         (bare (if excluded (substring glob 1) glob)))
+    (if (and (not (string-empty-p bare))
+             (cl-find bare quarry-grep--types
+                      :key (lambda (type) (plist-get type :name)) :test #'equal))
+        (concat (if excluded "!" "") "[" (substring bare 0 1) "]" (substring bare 1))
+      glob)))
 
 (defun quarry-grep--search-files-text (search)
   "Return the file restriction of SEARCH as `quarry-grep--files-text' shows it."
@@ -1525,6 +1540,8 @@ The prompt says REGEXP or literal.  An empty pattern is a `user-error'."
 (defun quarry-grep-change-files ()
   "Search other files: file types and globs, or everything."
   (interactive nil quarry-grep-mode)
+  ;; First: the default text needs it to write globs that look like types.
+  (quarry-grep--type-list)
   (let ((files (quarry-grep--read-files
                 (quarry-grep--search-files-text (quarry-grep--current)))))
     (quarry-grep--change

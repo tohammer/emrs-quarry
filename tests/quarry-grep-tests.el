@@ -464,6 +464,19 @@ Each is (PROMPT . INITIAL-CONTENTS)."
     (should (equal (quarry-grep--files-text '("rust" "!json") '("!gen/**"))
                    "rust !json !gen/**"))))
 
+(ert-deftest quarry-test-grep-files-text-round-trip ()
+  "Globs spelled like types are written so that the prompt reads them as globs."
+  (quarry-test-grep--with-tree (dir)
+    (quarry-grep--type-list)
+    (let ((text (quarry-grep--files-text '("rust" "!json") '("make" "!make" "*.el" "!" "nosuch"))))
+      (should (equal text "rust !json [m]ake ![m]ake *.el ! nosuch"))
+      (should (equal (quarry-grep--parse-files text)
+                     '(("rust" "!json") "[m]ake" "![m]ake" "*.el" "!" "nosuch"))))
+    ;; Without the type list nothing is changed and nothing is asked.
+    (let ((quarry-grep--types nil))
+      (should (equal (quarry-grep--files-text nil '("make")) "make"))
+      (should-not quarry-grep--types))))
+
 (ert-deftest quarry-test-grep-excluded-type ()
   "A search with `!json' finds no JSON hits but the others."
   (quarry-test-grep--with-tree
