@@ -36,7 +36,12 @@ theme, GUI frame), and on Emacs 30.1 with its own transient 0.7.2, where
 only the tests of the menu were run against that transient's source
 loaded into Emacs 31.1. Origin: grep spec,
 Testing section, and its review (2026-10-10); context lines and keys
-menu specs, Testing sections. Do these once quarry-grep is in daily use; turn what
+menu specs, Testing sections. From the replace spec (2026-10-14): the
+faces of the preview and of the results in the author's theme, in a GUI
+frame and in a terminal (where strike-through may not show), `x`
+through a long preview, a real `C-g` during a large apply (the tests
+only set `quit-flag`), and a replace in files open in Emacs with undo
+in those buffers afterwards. Do these once quarry-grep is in daily use; turn what
 fails into backlog items or fixes.
 
 ## wgrep on other line ends and encodings, and on huge results
@@ -209,9 +214,6 @@ it.
 
 Candidates, each one line; none is designed.
 
-- **Regexp replace with preview across files.** The strongest
-  candidate: the engine has the capture groups, and it complements
-  wgrep for mechanical changes.
 - **Saved and named searches**, and a list of search buffers, as rg.el
   has. Today there is one result buffer; `clone-buffer` keeps a result.
 - **Export to a plain `grep-mode` buffer**, as a bridge to embark and
@@ -232,3 +234,68 @@ project of its own; the search is fast enough below AOSP size), and
 
 Origin: evaluation before the grep spec (2026-10-10). Pick from here
 when the items above it in this file are done or a need shows up.
+
+## Replace: left out
+
+The replace spec (2026-10-14) left these out on purpose. Origin: spec
+2026-10-14-grep-replace, "Scope", "Out", and ADR 0021.
+
+- **Writing in the service** (option 3 of ADR 0021). Revisit if the
+  measured cost of large change sets (`docs/architecture/grep.md`, "Cost
+  of large change sets") is too high, for instance when applying 10,000
+  files takes over 30 seconds. With a sync of every file that was the
+  case on 2026-10-15; see "No sync before the rename by default" below.
+- **Replace in the live grep** (`quarry-consult-grep`). The hand-over
+  (`C-c C-o`) to the result buffer is the way today. Revisit when going
+  through the result buffer first gets in the way.
+- **Filling the replaced text into wgrep's edit mode.** `e` stays as it
+  is and is refused during a preview. Revisit if one wants to edit a
+  replacement by hand line by line.
+- **Empty matches** (`^`, `\b`, `x*` matching nothing). The service drops
+  them, so they get no replacement; match something and use `$1`.
+  Revisit if inserting at line starts or word boundaries comes up often.
+- **Case-preserving replacement**, as `query-replace` does it. Revisit
+  on the first rename of a name that occurs in several cases.
+- **Undo for files that were not visited.** git is the undo. Revisit if
+  a change set is lost to a mistake; a backup of the changed files
+  before writing would be the way.
+
+## Replace: deferred from the review
+
+- **A file decoded as `raw-text` takes non-ASCII new text.** A file that
+  no buffer visits and that Emacs decodes as `raw-text` (no UTF-8
+  sequence in it, so the ambiguity check of ADR 0022 does not fire)
+  gets new non-ASCII text as Emacs holds it. Open buffers visited
+  literally are rejected already. Origin: fix of the review of the
+  replace branch (2026-10-15). Revisit if binary-ish text files are
+  replaced in; the fix is the same rejection as for literal buffers.
+- **Leftover `.quarry-XXXXXX` files.** A crash between creating the new
+  file and the rename leaves the temporary file. Origin: second review
+  of the replace branch (2026-10-15). Revisit on the first leftover
+  file.
+- **Untested: the owner fallback and extended attributes.** Writing in
+  place when the new file would get another owner or group needs a
+  second user to test; extended attributes were only copied for files
+  without ACLs. Origin: as above. Revisit on a shared or SELinux
+  system.
+- **`user.*` extended attributes are lost on the rename path.**
+  `file-extended-attributes` returns only the ACL and the SELinux
+  context, so the new file that is renamed over a file does not get its
+  `user.*` attributes (such as `user.xdg.origin.url`). Origin: second
+  review of the replace branch (2026-10-15). Revisit if a file loses
+  attributes that matter; writing such files in place would keep them.
+- **ASCII with stray high bytes takes new text as Latin-1.** A file
+  that is ASCII apart from bytes that form no UTF-8 sequence is decoded
+  as Latin-1 (the ambiguity check needs a UTF-8 sequence), so new
+  non-ASCII text is written in Latin-1, as Emacs would write it after
+  visiting the file. Origin: as above. Revisit if such a file gets
+  Latin-1 text where UTF-8 was meant.
+- **No sync before the rename by default.** The replace follows
+  `write-region-inhibit-fsync` (default t), as Emacs's own saves do;
+  syncing every file took 10,000 files 40 s to over 2 minutes on an NVMe
+  SSD under LUKS instead of about 13 s. Off ext4, a power loss right
+  after a replace can leave empty files. Origin: second review of the
+  replace branch (2026-10-15), decided by the author. Revisit if that
+  happens; the way out is writing all new files first and syncing them
+  together (`syncfs`) before the renames, or writing in the service
+  (option 3 of ADR 0021).

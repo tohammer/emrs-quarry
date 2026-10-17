@@ -18,7 +18,8 @@ quarry is built on [emrs](https://github.com/tohammer/emrs), which runs the
 Rust side as a message-passing service outside the Emacs thread.
 
 Status: version 1. It was built and used on Linux only, with Emacs 31.1
-and, for the benchmark, Emacs 31.0.50. CI runs the ERT suite on Linux and
+and, for the file finder's benchmark, Emacs 31.0.50 (the replace
+benchmark ran on 31.1). CI runs the ERT suite on Linux and
 macOS with Emacs 30.1 and 31.1, and `cargo test` on Linux; beyond that,
 Emacs 30 and macOS have not been used by hand, and the watcher code for
 macOS is known only from those tests (`docs/backlog.md`). Windows is
@@ -32,7 +33,9 @@ terminal Emacs; the live grep by the ERT suite in batch and in the
 author's Doom setup. It has not been run in a GUI frame, its faces were not
 looked at in any theme, and it shares the Emacs 30 gap. Editing results
 with wgrep is untested on files with `\r\n` line ends and on files in
-encodings other than UTF-8.
+encodings other than UTF-8. Replace (`R`, `C-c C-c`) is tested by the
+ERT suite and the benchmark only: it has not been used by hand, and its
+faces have not been looked at in a GUI frame or a terminal.
 
 ## Requirements
 
@@ -532,11 +535,13 @@ rest follows in the order it is found.
 | `- P`, `+ P`, `- L`, `+ L` | The same, with the pattern as a regexp |
 | `- f` | Exclude the file at point, and only that file |
 | `- d`, `+ d` | Exclude, or search only, the directory of the file at point |
-| `k`, `x`, `!`, `%` | On a filter line: remove it; switch it off or on; flip it between including and excluding; switch it between literal and regexp |
+| `k`, `x`, `!`, `%` | On a filter line: remove it; switch it off or on; flip it between including and excluding; switch it between literal and regexp. During a replace preview `x` also switches matches off and on |
 | `K` | Remove all filters except the primary one |
 | `C-c <`, `C-c >` | Go back or forward in the buffer's search history |
-| `C-c C-k` | Cancel the running search |
+| `C-c C-k` | Cancel the running search; during a replace preview, leave the preview |
 | `e` | Edit the results with wgrep (see "Editing results") |
+| `R` | Preview a replacement of the primary filter's matches (see "Replacing matches") |
+| `C-c C-c` | Write the previewed replacement into the files |
 | `?` | Show a menu of all these keys with the current value of each switch (see below) |
 | `h`, `C-h m` | Show the help of the mode |
 | `q` | Quit the window |
@@ -734,10 +739,110 @@ in it.
   wgrep then refuses each change whose line in the file is no longer the
   text the search found.
 - Folded files are unfolded on entering. `e` is refused while a search
-  runs and when there are no results.
+  runs, when there are no results, and during a replace preview or
+  after a replacement was applied (see "Replacing matches").
 - After a commit the result lines show the edited text and the status
   line says that the results were edited; `g` searches again, which
   shows what is on disk.
+
+### Replacing matches
+
+`R` replaces what the primary filter matched, across all files of the
+result, after you have seen every change. It is for mechanical changes
+such as a rename or a moved module path. It asks for a template, with
+the current one as initial input, and searches again with it. The buffer
+text does not change; each match shows the old text struck through
+(`quarry-grep-replace-old`) followed by the new text
+(`quarry-grep-replace-new`). The header shows `→ TEMPLATE`, which `R`
+edits when clicked, and `N of M matches on`. Lines that cannot
+be replaced (shortened, or not valid UTF-8) are shown as before and
+counted in the status line.
+
+The template is the syntax of `rg -r`:
+
+| Template | Is |
+|---|---|
+| `$0` | the whole match |
+| `$1`, `${1}` | capture group 1 |
+| `$name`, `${name}` | the group named `name` (`(?P<name>...)`) |
+| `$$` | a dollar sign |
+
+A name runs as far as ASCII letters, digits and `_` go, so `$1a` is the group
+named `1a`, which does not exist. Write `${1}a` for group 1 followed by
+`a`. A group that does not exist or did not take part gives empty text.
+A literal filter has only `$0`. A template cannot contain a newline.
+The search with a template is an entry in the search history of its own:
+`C-c <` goes back to the search without it. Filter commands during a
+preview keep the template and update the preview.
+
+- `x` switches matches off and on, and only the switched-on matches are
+  written. On a match it switches that match; on a result line outside a
+  match, all matches of the line; on a file heading, all matches of the
+  file (off when any is on, else on). Then point moves to the next line
+  with a match.
+- `C-c C-k` leaves the preview when no search runs. `e` is refused
+  during a preview; leave it first.
+- `C-c C-c` writes the switched-on matches. It is refused while a search
+  runs, after a failed or cancelled search, when no match is switched
+  on, and when the result is truncated at `quarry-grep-max-lines`: only
+  what is shown is written, so narrow the search or raise the option. If
+  a result file changed since the search (or a modified buffer visits
+  it), it asks whether to search again, and writes nothing either way.
+  Otherwise it asks `Replace N matches on L lines in F files?`.
+- Every line is compared with the text the search found and rejected
+  when it differs, or when its buffer is read-only, has unsaved changes
+  or is not up to date with its file, when the file cannot be read or
+  written, or when the new text has a character that the file's
+  encoding (or the encoding of the buffer that visits it) cannot hold. A
+  file that Emacs reads as Latin-1 or another 8-bit encoding but that
+  holds UTF-8 text (UTF-8 with a stray byte) is not changed: its lines
+  are rejected as of ambiguous encoding. Nor is a file whose text, read
+  as Emacs would read it, does not give its bytes back when written in
+  the same encoding, such as one whose coding cookie says CRLF line ends
+  while its lines end in LF. A buffer visited literally
+  (`find-file-literally`, or with the coding system `no-conversion` or
+  `raw-text`) takes only ASCII new text; with other new text its lines
+  are rejected. The other lines and files go on. Afterwards each result line is marked as applied or
+  rejected (the reason is in its `help-echo`; faces
+  `quarry-grep-replace-applied` and `quarry-grep-replace-rejected`), and
+  the echo area says `Replaced N lines in F files; R rejected`. `g`
+  searches again and shows what still matches; until then `x`, `C-c C-c`
+  and `e` are refused. `C-g` stops: a file that is being written is
+  finished first, a buffer that is being saved gets its old text back,
+  and the files written stay written.
+- A file that an Emacs buffer visits is changed in that buffer and
+  saved with `save-buffer`, without `before-save-hook` (so no formatter
+  or `delete-trailing-whitespace` on save) and without
+  `require-final-newline`; `after-save-hook` runs and a backup file may
+  be made. It is one undo step in that buffer. When the saving fails or
+  is stopped before the file is written, the buffer gets its old text
+  back, unmodified, and the file's lines are rejected. When a hook fails
+  or is stopped after the file was written, the lines count as replaced
+  and the buffer keeps them.
+- Other files are read as their bytes, decoded as Emacs would decode
+  them but with no format conversion (such as `text/enriched`), changed,
+  and written back in their own encoding, line ends and byte order mark,
+  with no undo: use git. No handler of compressed or encrypted files
+  (`.gz`, `.gpg`) runs on reading or writing. The new content goes to a
+  temporary file in the same directory, which gets the file's
+  permissions and is renamed over the file, so a failed write leaves
+  the file as it was. Like any Emacs save, it is synced to the disk
+  only when `write-region-inhibit-fsync` is nil (the default is t). A symbolic link is followed
+  and stays a link; the file it points to is replaced. A file with more
+  than one hard link, one owned by another user or group than the new
+  file would be, or one in a directory you cannot write is written in
+  place instead, so that the links and the owner stay; if that write
+  fails, the old content is written back. The file is locked while it
+  is written, as Emacs locks a file you edit: when another Emacs holds
+  its lock, you are asked, and `C-g` there stops with the file as it
+  was.
+- Empty matches (`^`, `\b`, `x*` matching nothing) are not replaced.
+  To insert text at the start of lines, match something: `^(.)` with
+  `PREFIX$1`.
+
+The replace needs the new module: rebuild it with `M-x
+quarry-build-module` and restart Emacs. An older module is detected when
+the search with the template gets its first results; the search then runs without the template and says to rebuild.
 
 ### Live grep
 
@@ -968,7 +1073,9 @@ Faces: `quarry-grep-match`, `quarry-grep-match-secondary`,
 `quarry-grep-filter-include`,
 `quarry-grep-filter-exclude`, `quarry-grep-filter-kind`,
 `quarry-grep-filter-pattern`, `quarry-grep-filter-disabled`,
-`quarry-grep-status`, `quarry-grep-error` and `quarry-grep-header-value`.
+`quarry-grep-status`, `quarry-grep-error`, `quarry-grep-header-value`,
+`quarry-grep-replace-old`, `quarry-grep-replace-new`,
+`quarry-grep-replace-applied` and `quarry-grep-replace-rejected`.
 
 ### Limits
 
@@ -1098,6 +1205,16 @@ about 800 MB and 1.2 million inodes for 1m, more with the git repository for
 the baseline, and go to `target/bench-trees` or `$QUARRY_BENCH_DIR`. The
 script exits non-zero if quarry's p99 exceeds 50 ms (100k) or 150 ms (1m).
 
+`bench/run-bench.sh replace` measures grep's replace instead: it builds
+the release module, generates trees of 1,000 and 10,000 files with 5
+matched lines each and one of 1,000 files with 100 matched lines each
+(100,000 matches), and
+times the preview and the writing, twice each. Every file is compared
+with the expected content afterwards; the script exits non-zero when
+one differs. The trees go to a temporary directory under
+`$QUARRY_BENCH_TMP`, `$TMPDIR` or `/tmp` and are removed. The numbers
+are in `docs/architecture/grep.md`, "Cost of large change sets".
+
 ## Development
 
 Work in a checkout, for example `~/src/emacs-quarry`. With Doom, keep the
@@ -1152,6 +1269,7 @@ cargo test              # Rust unit and service tests
 tests/run-ert.sh        # builds the module and runs the ERT suite in Emacs
 ERT_SELECTOR=cache tests/run-ert.sh   # only tests whose name matches the regexp
 bench/run-bench.sh      # benchmark, run by hand
+bench/run-bench.sh replace   # grep replace benchmark; checks every file
 QUARRY_TEST_LOAD_PATH=~/.emacs.d/straight/build/consult:~/.emacs.d/straight/build/compat tests/run-ert.sh
 ```
 

@@ -24,7 +24,8 @@
 //! lossily when it is not valid, and cut after `max_columns` characters; either sets `inexact`. The matches are
 //! found on the whole line ([`Filters::line_spans`]) and reported as positions in the text that is sent: a
 //! match that crosses the cut ends at the cut, one beyond it is not reported. A line that passes both is a
-//! *kept line*.
+//! *kept line*. With a replacement template, a kept line that is not `inexact` also gets the new text of each
+//! primary match ([`Filters::replacements`]).
 //!
 //! **Context.** With `before` or `after` above 0, a line that is not kept and lies at most `before` lines before
 //! or at most `after` lines after a kept line of its file is a *context line* (ADR 0014). It is sent in place
@@ -100,9 +101,12 @@ pub struct Config {
     pub sort_budget: Duration,
     /// When the request arrived; `millis` in the summary counts from here.
     pub started: Instant,
+    /// The replacement template: with it, each kept line that is exact gets the new text of its primary matches.
+    pub replace: Option<String>,
 }
 
-/// One line of a file. A kept line: `(:n 12 :text "let x = 1;" :spans ((4 5)) :secondary nil :inexact nil)`.
+/// One line of a file. A kept line: `(:n 12 :text "let x = 1;" :spans ((4 5)) :secondary nil :inexact nil)`,
+/// with a replacement template and `inexact` nil also `:replacements ("y")`.
 /// A context line: `(:n 11 :text "{" :spans nil :secondary nil :inexact nil :context t)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Line {
@@ -121,6 +125,11 @@ pub struct Line {
     /// Lisp form when false, so a kept line has no `:context`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub context: bool,
+    /// Only with a replacement template, on a kept line that is not `inexact`: the new text of each entry of
+    /// `spans`, in the same order ([`Filters::replacements`]). Left out of the Lisp form when `None`, so that
+    /// without a template the items are as they were before; an empty list is `:replacements nil`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replacements: Option<Vec<String>>,
 }
 
 /// A file with kept lines; sent as [`Item::File`].
@@ -245,6 +254,7 @@ impl Search {
             out,
             max_lines: config.max_lines,
             max_columns: config.max_columns,
+            replace: config.replace.as_deref().map(str::as_bytes),
             before: config.before as u64,
             after: config.after as u64,
             deadline: config.started.checked_add(config.sort_budget),
@@ -307,6 +317,8 @@ struct Shared<'a> {
     out: &'a dyn Output,
     max_lines: usize,
     max_columns: usize,
+    /// The replacement template.
+    replace: Option<&'a [u8]>,
     /// The context distances, as line numbers are counted.
     before: u64,
     after: u64,
@@ -566,8 +578,11 @@ impl Sink for LineSink<'_> {
         for Span { start, end, secondary: other } in self.filters.line_spans(&whole, shown) {
             if other { &mut secondary } else { &mut spans }.push((start, end));
         }
+        // An inexact line's new text is not known for certain: it was cut or held invalid UTF-8.
+        let replacements =
+            shared.replace.filter(|_| !inexact).map(|template| self.filters.replacements(&whole, template));
         let text = whole[..shown].to_string();
-        self.lines.push(Line { n, text, spans, secondary, inexact, context: false });
+        self.lines.push(Line { n, text, spans, secondary, inexact, context: false, replacements });
         self.kept += 1;
         Ok(shared.has_room(self.kept))
     }
@@ -603,7 +618,8 @@ fn strip_terminator(line: &[u8]) -> &[u8] {
 /// The context line `n` from its bytes without the terminator.
 fn context_line(n: u64, bytes: &[u8], max_columns: usize) -> Line {
     let (whole, shown, inexact) = line_text(bytes, max_columns);
-    Line { n, text: whole[..shown].to_string(), spans: Vec::new(), secondary: Vec::new(), inexact, context: true }
+    let text = whole[..shown].to_string();
+    Line { n, text, spans: Vec::new(), secondary: Vec::new(), inexact, context: true, replacements: None }
 }
 
 /// Cuts `lines` after its `count`th kept line, so that exactly `count` kept lines remain, each with its context
@@ -1140,6 +1156,107 @@ mod tests {
         }
     }
 
+    /// Searches `dir` with `filters` and the replacement `template`.
+    fn replace(dir: &Path, filters: Vec<FilterSpec>, template: &str) -> Found {
+        let mut q = Query::new(dir, filters);
+        q.replace = Some(template.to_string());
+        run(q)
+    }
+
+    /// The replacements of the lines of `path`, `None` for a line without them.
+    fn replacements<'a>(found: &'a Found, path: &str) -> Vec<Option<Vec<&'a str>>> {
+        let lines = found.lines(path);
+        lines.iter().map(|l| l.replacements.as_ref().map(|r| r.iter().map(String::as_str).collect())).collect()
+    }
+
+    #[test]
+    fn without_a_template_lines_have_no_replacements() {
+        let t = tree(&[("a", "one\nneedle needle\nthree\n")]);
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        (q.before, q.after) = (1, 1);
+        let found = run(q);
+        assert_eq!(found.marks("a"), "1- 2: 3-");
+        assert!(found.lines("a").iter().all(|l| l.replacements.is_none()));
+    }
+
+    #[test]
+    fn a_template_gives_each_match_of_a_kept_line_its_new_text() {
+        let t = tree(&[("a", "let foo_1 = foo_22;\nfoo_3\nnothing\n")]);
+        let filters = || vec![line_re(r"foo_(?P<num>\d+)")];
+        let found = replace(t.path(), filters(), "bar_$1");
+        assert_eq!(replacements(&found, "a"), [Some(vec!["bar_1", "bar_22"]), Some(vec!["bar_3"])]);
+        let found = replace(t.path(), filters(), "${1}x|$num|${num}|$0|$$|$9|$1x");
+        assert_eq!(
+            replacements(&found, "a"),
+            [Some(vec!["1x|1|1|foo_1|$||", "22x|22|22|foo_22|$||"]), Some(vec!["3x|3|3|foo_3|$||"])]
+        );
+        // A literal filter has the whole match only.
+        let found = replace(t.path(), vec![line("foo_")], "<$0$1>");
+        assert_eq!(replacements(&found, "a"), [Some(vec!["<foo_>", "<foo_>"]), Some(vec!["<foo_>"])]);
+        // Touching matches.
+        let t = tree(&[("b", "ababab\n")]);
+        assert_eq!(replacements(&replace(t.path(), vec![line("ab")], "X"), "b"), [Some(vec!["X", "X", "X"])]);
+    }
+
+    #[test]
+    fn replacements_with_multibyte_text_and_crlf_lines() {
+        let t = tree(&[("a", "grüße — näh ≠ nöh\r\nπ=nüh\r\nlast nah")]);
+        let found = replace(t.path(), vec![line_re("n(.)h")], "[$1]");
+        let lines = found.lines("a");
+        assert_eq!(lines[0].spans, [(8, 11), (14, 17)]);
+        assert_eq!(replacements(&found, "a"), [Some(vec!["[ä]", "[ö]"]), Some(vec!["[ü]"]), Some(vec!["[a]"])]);
+        assert!(lines.iter().all(|l| !l.inexact && !l.text.contains('\r')));
+        // The interpolation sees the line without its terminator, as the matching does.
+        let found = replace(t.path(), vec![line_re(r"(\w+)$")], "<$1>");
+        assert_eq!(replacements(&found, "a"), [Some(vec!["<nöh>"]), Some(vec!["<nüh>"]), Some(vec!["<nah>"])]);
+    }
+
+    #[test]
+    fn inexact_and_context_lines_have_no_replacements() {
+        let t = TempDir::new().unwrap();
+        write(t.path(), "a", b"ctx\nneedle short\ncaf\xff needle\nneedle and a long tail\nctx\n");
+        let mut q = Query::new(t.path(), vec![line("needle")]);
+        (q.before, q.after, q.max_columns) = (1, 1, 15);
+        q.replace = Some("pin".to_string());
+        let found = run(q);
+        assert_eq!(found.marks("a"), "1- 2: 3: 4: 5-");
+        let inexact: Vec<bool> = found.lines("a").iter().map(|l| l.inexact).collect();
+        assert_eq!(inexact, [false, false, true, true, false]);
+        assert_eq!(replacements(&found, "a"), [None, Some(vec!["pin"]), None, None, None]);
+        // The cut line and the one with invalid UTF-8 still have their spans.
+        assert_eq!(found.lines("a")[2].spans, [(5, 11)]);
+        assert_eq!(found.lines("a")[3].spans, [(0, 6)]);
+    }
+
+    #[test]
+    fn replacements_and_spans_match_on_every_kept_exact_line() {
+        let t = tree(&[
+            ("a", "foo bar foo\nbar foofoo\nfoo\nbar baz\nüfoobarfoo bar\n"),
+            ("b", "baab\naa b a\nb\n"),
+            ("c", "ä→foo ö foo\nfoo foo foo bar\n"),
+        ]);
+        let check = |filters: Vec<FilterSpec>| {
+            let found = replace(t.path(), filters, "$0!");
+            assert!(found.summary.lines > 0);
+            for file in &found.files {
+                for l in file.lines.iter().filter(|l| !l.context && !l.inexact) {
+                    let new = l.replacements.as_ref().expect("replacements on an exact kept line");
+                    assert_eq!(new.len(), l.spans.len(), "{}:{} {:?}", file.path, l.n, l.text);
+                    let chars: Vec<char> = l.text.chars().collect();
+                    for (&(start, end), new) in l.spans.iter().zip(new) {
+                        let old: String = chars[start as usize..end as usize].iter().collect();
+                        assert_eq!(&format!("{old}!"), new, "{}:{}", file.path, l.n);
+                    }
+                }
+            }
+        };
+        check(vec![line("foo")]);
+        check(vec![line("foo"), line("bar")]);
+        check(vec![line_re("o+"), line("f"), not_line("baz")]);
+        check(vec![line_re("a*")]);
+        check(vec![line_re(r"\bfoo|bar\b"), line_re("[äü]")]);
+    }
+
     #[test]
     fn a_carriage_return_inside_a_line_stays_in_the_text() {
         let t = tree(&[("a", "one\rneedle two\nthree needle\rfour\n\rneedle\n")]);
@@ -1288,6 +1405,7 @@ mod tests {
                 after: 0,
                 sort_budget,
                 started: self.started,
+                replace: None,
             };
             Search::new(config).unwrap().run(self)
         }
@@ -1703,6 +1821,7 @@ mod tests {
             secondary: Vec::new(),
             inexact: false,
             context,
+            replacements: None,
         };
         // "1- 2: 3- 4- 5: 6: 7- 9- 10:"
         let all: Vec<Line> = [(1, true), (2, false), (3, true), (4, true), (5, false), (6, false), (7, true)]
@@ -1795,6 +1914,7 @@ mod tests {
             secondary: Vec::new(),
             inexact: false,
             context: false,
+            replacements: None,
         };
         assert_eq!(found.paths(), ["a", "b"]);
         assert_eq!(found.lines("a"), [kept(3, "needle keep"), kept(5, "needle two")]);

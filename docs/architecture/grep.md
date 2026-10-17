@@ -3,7 +3,8 @@
 The interactive grep: first the Rust service (threads, messages, what is
 searched, order, cap and cancellation), then the Elisp side
 (`lisp/quarry-grep.el`). Part of [the architecture](../architecture.md).
-Results are edited through wgrep (ADR 0013), described at the end.
+Results are edited through wgrep (ADR 0013) or replaced by a preview and
+Elisp (ADRs 0021, 0022, 0023), described at the end.
 
 ## Threads
 
@@ -34,6 +35,24 @@ items) and spawns the search.
 
 The stream carries one file item per file with kept lines, and one summary
 item at the end.
+
+With `:replace` (a template string) the line items of exact kept lines
+also carry `:replacements`, one string per entry of `:spans`. The
+service only computes them; it never writes a file (ADR 0021). They are
+made in `Filters::replacements` (`filter.rs`), called by the sink for
+each kept line whose `:inexact` is nil: the template is interpolated
+with `grep-matcher`'s capture interpolation (the syntax of `rg -r`) for
+each match of the primary filter on the whole line that is not empty as
+a character range, found by the iteration that also gives `:spans`, so
+both lists have the same length and order. (A byte-level pattern such as
+`(?-u:\xA4)` can match inside a character; `line_spans` drops that span
+after mapping bytes to characters, and `replacements` drops it too. A
+group that ends inside a character gives U+FFFD in the new text.) A match's groups come from a search that starts at the
+match. Inexact lines and context lines have no `:replacements`, and
+without `:replace` no line has them. A request is not checked for the
+template: every string is valid. An older module skips the unknown key
+(emrs's deserializer ignores keys a request type does not name) and
+searches without replacements.
 
 ## What is searched
 
@@ -188,7 +207,8 @@ trailing slash), `types` (a list of file type names, nil for all files) and `glo
 list of path globs), `case` (`smart`, `sensitive`, `insensitive`), `no-ignore`,
 `hidden`, `before` and `after` (the lines of context, 0 by default), and
 `filters`, an ordered list of `quarry-grep--filter` records
-(`target` `line` or `path`, `exclude`, `pattern`, `regexp`, `enabled`).
+(`target` `line` or `path`, `exclude`, `pattern`, `regexp`, `enabled`),
+and `replace`, a replacement template or nil (see "Replace").
 The pattern a command asks for is the first filter. A search of the four
 commands takes `before` and `after` from `quarry-grep-context-before` and
 `quarry-grep-context-after`; `C`, `B` and `A` change them through
@@ -217,7 +237,8 @@ sent is kept in `quarry-grep--sent`, because the `(:filter INDEX)` of a
 filter error counts in that list, not in the search's. `:ignores` is
 `quarry-ignores`, and nil when ignore files are off. `:max-lines` and
 `:max-columns` come from the options at the time of the request,
-`:before` and `:after` from the search. The
+`:before` and `:after` from the search, `:replace` from its `replace`
+slot (nil: not sent). The
 primary filter (`quarry-grep--primary`) is the first enabled include line
 filter, as in the service.
 
@@ -293,7 +314,10 @@ that (`quarry-grep--on-batch`, `quarry-grep--finish`,
 `quarry-grep--edit-restore`); the user's narrowing is theirs and stays. A
 new search and `e` widen for good.
 
-Commands read these properties and never the text (ADR 0012). The
+Commands read these properties and never parse the text (ADR 0012).
+The one use of the text is in applying a replacement, which compares
+each result line's text with the file's line and builds the new line
+from it (see "Replace", ADR 0023). The
 properties of a line cover its newline, so a line is identified at its
 first character.
 
@@ -301,7 +325,7 @@ first character.
 |---|---|---|
 | `quarry-grep-filter` | a filter line | its `quarry-grep--filter` record, the same object as in the current search |
 | `quarry-grep-part` | parts of a filter line | `sign`, `kind`, `pattern`, `off` |
-| `quarry-grep-file` | a file block: heading and result lines | the path relative to `default-directory` |
+| `quarry-grep-file` | a file block: heading and result lines | the path relative to the search's directory (`quarry-grep--result-file` makes the file name) |
 | `quarry-grep-heading` | a file heading | t |
 | `quarry-grep-mtime` | a file heading | the file's modification time at the search, milliseconds since the epoch, or nil |
 | `quarry-grep-line` | a result line: a hit or a context line | its line number in the file |
@@ -312,6 +336,9 @@ first character.
 | `quarry-grep-prefix` | the line number and the space after it | t; what follows on the line is exactly the item's `:text` |
 | `quarry-grep-separator` | the empty line that ends a file block | t |
 | `quarry-grep-status` | the status line | t |
+| `quarry-grep-replacement` | the span of a primary match with a new text, during a preview | the new text of this match |
+| `quarry-grep-replace-off` | the same span | t when the match is switched off |
+| `display` | the same span, when the match is on | the old text in `quarry-grep-replace-old` followed by the new text in `quarry-grep-replace-new` |
 
 Faces are put on with the `face` property; the mode has no font-lock
 keywords. Filter lines, headings and result lines have `mouse-face` and
@@ -425,8 +452,9 @@ redisplay scrolls to it.
 ### Visiting
 
 `quarry-grep--visit` takes the file from `quarry-grep-file` (appended to
-`default-directory` with `concat`, so a name like `~x` stays below the
-directory), finds the line by counting from the start of the widened
+the search's directory with `concat` by `quarry-grep--result-file`, so a
+name like `~x` stays below the directory, and a changed
+`default-directory` of the result buffer does not matter), finds the line by counting from the start of the widened
 buffer, adds `quarry-grep-column`, and widens only when the place is
 outside the narrowing. From the result window the file is shown in
 another window; from elsewhere (`next-error` in a source buffer) in the
@@ -465,7 +493,8 @@ loaded on the first `?`.
   point.
 - An entry that does not apply is inactive (`:inapt-if-not`). The
   predicates live in `quarry-grep.el` and end in `-p`
-  (`quarry-grep--filter-at-point-p`, `quarry-grep--editable-p`, ...);
+  (`quarry-grep--filter-at-point-p`, `quarry-grep--editable-p`,
+  `quarry-grep--toggle-at-point-p`, ...);
   they do not signal, and the commands use the same functions for their
   `user-error` checks, so the menu and the commands cannot disagree.
   `quarry-grep--wgrep-available-p` asks with `featurep` and
@@ -483,6 +512,258 @@ loaded on the first `?`.
   differs between 0.7.2 and 0.13; the test handles both and is the place
   to fix after a transient change.
 - Only what transient 0.7.2 has (Emacs 30.1) is used.
+
+### Replace
+
+`R` (`quarry-grep-replace`) sets the `replace` slot of a copy of the
+search through `quarry-grep--change` and runs it. A template with a
+newline is a `user-error`; so is a search without a primary filter. The
+template is part of the value, so it is in the history (`C-c <` goes to
+the search without it) and filter commands keep it. `C-c C-k` with no
+search running and a template sets the slot to nil and runs the search.
+`quarry-grep--replace-p` says whether the slot is set. `R`, like every
+command that changes the search, is refused while the results are
+edited with wgrep.
+
+**Rendering.** The buffer text is what it is without a template. For
+each primary span of a line item with `:replacements`,
+`quarry-grep--put-replacement` puts `quarry-grep-replacement` (the new
+text) and `display` over the span (`quarry-grep--replace-display`); a switched-off
+match has `quarry-grep-replace-off` t and no `display`. Three buffer
+local counters feed the header and the status line:
+`quarry-grep--replace-total` and `quarry-grep--replace-on` (matches that
+have a new text, and those switched on) and `quarry-grep--replace-inexact`
+(lines without `:replacements`, or whose `:replacements` are not as many
+as their `:spans`, which show as without a template; the service always
+pairs them, see `Filters::replacements`, so the second is a guard). A
+file whose lines are all inexact is shown.
+
+**`x`.** `quarry-grep-toggle-filter` on a filter line works as before.
+During a preview that was not applied it goes to
+`quarry-grep--toggle-replacements`, which takes its target from
+`quarry-grep--replacement-target`: the matches (found through
+`quarry-grep-replacement`) of the line, or of the whole block when point
+is on a heading. On a match it switches that one, otherwise all of them
+(off when any is on, else on). Only `quarry-grep-replace-off` and
+`display` change, with `inhibit-read-only`, and the counters. Then point
+moves to the next visible line with a match.
+
+**Old module.** `quarry-grep--on-batch` checks the first items of a
+search that has a template (`quarry-grep--replace-unknown-p`): a kept
+line without `:inexact` that has no `:replacements` key (checked with
+`plist-member`; the key is present and nil for a line whose matches were
+all empty) means the module ignored `:replace`. The search is cancelled
+and run again without the template, which is not kept in the history,
+and a message says to rebuild the module.
+
+**Applying.** `quarry-grep--apply-refusal` returns why `C-c C-c` cannot
+run (no preview, applied, running, failed, cancelled, truncated, nothing
+switched on) and nil otherwise; `quarry-grep--applicable-p` is its
+negation and the menu's predicate. Then the stale check of `e` runs;
+stale files lead to the question to search again, and nothing is written
+either way (a modified visiting buffer would be saved with its edits).
+`quarry-grep--replace-work` reads the buffer, widened, into a list of
+(PATH . LINES) per file block, each line (BOL N OLD NEW): OLD is the text
+after the prefix, NEW the same with each switched-on span replaced by its
+`quarry-grep-replacement`, in ascending line order.
+
+`quarry-grep--replace-in-file` handles one file, named by
+`quarry-grep--result-file`: the path joined to the search's directory
+(`quarry-grep--search-dir`), not to `default-directory`, which the user
+may change in the result buffer; the stale check, visiting and wgrep use
+the same helper.
+
+- The target is the buffer that visits the file
+  (`quarry-grep--replace-in-buffer`), or else a temporary buffer filled by
+  `quarry-grep--read-file`: `insert-file-contents-literally` into a
+  unibyte buffer, a search for a valid UTF-8 sequence of two or more
+  bytes (`quarry-grep--utf-8-sequence`), `set-buffer-multibyte` `to`, and
+  `decode-coding-inserted-region`, which picks the coding system as
+  `insert-file-contents` would (`coding-system-for-read`, coding cookies,
+  `auto-coding-alist`, detection) and leaves it in
+  `last-coding-system-used`. No format decoding (`format-alist`, such as
+  `text/enriched`), no `after-insert-file-functions` and no handler of
+  compressed or encrypted files runs, so the buffer's lines are the
+  file's lines. `quarry-grep--read-file` returns (CODING UTF-8 EXACT).
+- A file decoded with a coding system whose type is not `utf-8`,
+  `utf-16` or `undecided` but whose bytes hold a UTF-8 sequence (UTF-8
+  with a stray byte, read as Latin-1) is rejected as a whole with "the
+  file's encoding is ambiguous (UTF-8 mixed with other bytes)": its exact
+  lines would get new text in Latin-1, and its UTF-8 lines are inexact
+  anyway. UTF-16 is exempt: its byte pairs often look like UTF-8
+  sequences, and it cannot be mistaken for UTF-8 with stray bytes.
+- Round trip: `quarry-grep--read-file` keeps the raw bytes and checks
+  that the decoded text, encoded with `quarry-grep--write-coding` of the
+  coding system, gives them back exactly (EXACT). If not, all the file's
+  lines are rejected with "the file does not read back as it is
+  (encoding or line ends)". That catches a coding cookie that names
+  other line ends than the file has (`utf-8-dos` on LF lines, whose
+  other lines would get CRLF) and any other decoding that loses bytes.
+  Pure ASCII read as `undecided` and written as UTF-8 round-trips. The
+  cost is one `encode-coding-string` per file, too small to show in the
+  bench.
+- `quarry-grep--replace-lines` goes to each line N, counted from the
+  start of the widened buffer, and compares it with OLD. A mismatch is
+  rejected with "line changed since the search". A template has no
+  newline, so replacing a line never changes the line count. A line is
+  changed by `quarry-grep--replace-text`, which replaces only what
+  differs between old and new line, so markers (point) in the rest of
+  the line stay.
+- A visiting buffer is rejected as a whole when it is read-only, has
+  unsaved changes ("buffer has unsaved changes": `save-buffer` would
+  write them too; the stale check misses a buffer that visits a hard
+  link of the file outside the tree), not up to date with its file,
+  visited literally (unibyte, or a coding system of type `raw-text`,
+  which `no-conversion` is too) while a new text is not ASCII, or when a
+  new text has a character that `buffer-file-coding-system` cannot
+  encode (`quarry-grep--unencodable`, with the message of the temporary
+  buffer path; checked before any change, so `save-buffer` never asks
+  for another encoding; skipped for `undecided`, for which `save-buffer`
+  picks one). Otherwise the changes run in a change group
+  (`prepare-change-group`, `activate-change-group`, with the undo limits
+  of `with-undo-amalgamate`) and, when a line changed, `save-buffer` runs
+  with `before-save-hook` and `require-final-newline` bound to nil;
+  `after-save-hook`, `write-file-functions`, backups and the rest of
+  `save-buffer` stay. On success the group is accepted and amalgamated:
+  one undo step. Whether the file was written is decided from the save,
+  not from `buffer-modified-p`, which a hook can set again: a
+  buffer-local `after-save-hook` entry at depth -100, added for the
+  call, sets a flag, since `save-buffer` runs that hook only after the
+  file was written and the buffer marked unmodified. A
+  `write-contents-functions` or `write-file-functions` function that
+  writes the file and then signals never gets there; for that, when the
+  flag is not set, the file's bytes are compared with the buffer encoded
+  with `buffer-file-coding-system` (`quarry-grep--holds-buffer-p`), and
+  when they are equal the file counts as written and the buffer is
+  marked unmodified with the file's modification time. The modification
+  time alone would not say what was written. When the changes or
+  `save-buffer` signal an error or `quit` before the file was written,
+  `cancel-change-group` undoes them, the buffer is unmodified again, and
+  the signal goes on: an error rejects the file's lines with its
+  message, `quit` stops the apply (below). Once the file was written the
+  group is accepted and the lines count as applied, whatever a hook did
+  to the buffer after that; an error is only shown as a message, a
+  `quit` is put back into `quit-flag` so the loop stops after this
+  file.
+- A temporary buffer gets the coding system it was read with.
+  `undecided` (a file with ASCII only) is changed to UTF-8 with the same
+  line ends (`quarry-grep--write-coding`), since the new text can hold
+  other characters. A character that the coding cannot encode rejects the
+  file's lines (checked with `unencodable-char-position`) instead of
+  writing `?` or a replacement. The buffer is encoded with
+  `encode-coding-region` and written as bytes by `quarry-grep--write-file`
+  through `quarry-grep--write-region`: `write-region` with
+  `no-conversion`, no `write-region-annotate-functions` or format, the
+  file name handlers that `insert-file-contents-literally` inhibits
+  (jka-compr, image, epa) inhibited for `write-region` as that function
+  does for `insert-file-contents` (remote directories are refused by the
+  commands anyway). `write-region-inhibit-fsync` is left as the user has
+  it, as for any Emacs save (default t, no sync). On ext4 the rename
+  over the original is protected by its `auto_da_alloc` heuristic; on
+  other file systems a power loss right after a replace can leave an
+  empty file, as after any save with that default. With `inhibit-quit` t:
+  - The target is the `file-truename`, so a symbolic link stays a link.
+    It must exist and be writable (`file-writable-p`), else "Permission
+    denied": renaming would replace a read-only file.
+  - The target is locked with `lock-file` while `inhibit-quit` is nil,
+    so `ask-user-about-lock` can ask about another Emacs's lock: `C-g`
+    there signals `quit` with nothing written (the apply stops after
+    this file), and an answer that signals `file-locked` rejects the
+    file's lines. The writes then run with `create-lockfiles` nil, so
+    neither the new file nor the target is locked again; an in-place
+    write passes `write-region` a LOCKNAME that is never locked (the
+    name plus `.quarry-unlocked`), since `write-region` unlocks its
+    LOCKNAME afterwards and would drop the target's lock before a
+    write-back. `unlock-file` runs in an `unwind-protect`.
+  - Normally `make-temp-file` creates `.quarry-XXXXXX` in the target's
+    directory; it is written, gets the target's extended attributes (ACL,
+    SELinux context) and modes, and `rename-file` puts it over the
+    target. Any error deletes it and leaves the target untouched.
+  - A target with more than one hard link, for which the new file has
+    another owner or group, or in a directory where `make-temp-file`
+    fails with a `file-error` (a writable file in a directory that
+    cannot be written), is written in place
+    (`quarry-grep--write-in-place`), since a rename would split the links
+    or change the owner; its old bytes are read first and written back
+    if the write fails.
+- A read or write error rejects all the file's lines with the error
+  message; the other files go on.
+
+`quarry-grep--apply` loops over the files with `inhibit-quit` t, so a
+`C-g` in its own bookkeeping only sets `quit-flag`, which it looks at
+after each file. `quarry-grep--replace-in-file` binds `inhibit-quit` nil
+while it reads and changes a file and while `save-buffer` runs, so a
+slow save hook (vc, LSP, a formatter) can be interrupted; only the
+writing of a temporary buffer keeps quitting inhibited, apart from the
+question about another Emacs's lock. A `quit` from a
+file reaches the loop's `condition-case`, which marks the file's lines
+rejected with "stopped" and ends the loop; nothing of that file was
+written. Either way the files written so far stay written. A message every 100 files shows the progress. Each
+line gets an overlay (`quarry-grep--mark-result`) with the property
+`quarry-grep-replaced` t, `quarry-grep-replace-result` `applied` or
+`rejected`, the face `quarry-grep-replace-applied` or
+`quarry-grep-replace-rejected` and `help-echo` (the reason). Then
+`quarry-grep--replace-applied` holds the plist `(:lines L :files F
+:rejected R :skipped S)` (`S` the files not processed after `C-g`); the
+status line and the echo area show it (`quarry-grep--applied-text`).
+While it is set, `x`, `C-c C-c` and `e` are refused; any search, `g`
+included, resets it and erases the overlays with the buffer.
+
+**Menu predicates.** `R` has none. `C-c C-c` uses
+`quarry-grep--applicable-p`. `x` uses `quarry-grep--toggle-at-point-p`:
+a filter line, or a preview that was not applied with a match to
+replace on the line or the heading at point. `C-c C-k` uses
+`quarry-grep--cancellable-p`: a running search with an open stream, or a
+preview. The commands check with the same functions or their helpers.
+
+#### Cost of large change sets
+
+`bench/run-bench.sh replace` (`bench/replace-bench.el`) generates C-like
+trees, searches with a template, applies, and compares every file with
+the expected content. Measured on 2026-10-14: release build, Emacs 31.1,
+Intel Core i5-8365U (8 threads), tree on tmpfs, two runs each, about 10%
+apart. *Preview* is from the start of the search to its end with
+everything rendered; *work* is collecting the switched-on lines
+(`quarry-grep--replace-work`); *apply* is the write loop
+(`quarry-grep--apply`).
+
+| Tree | Files | Matches | Preview | Work | Apply |
+|---|---|---|---|---|---|
+| 5 matched lines per file | 1,000 | 5,000 | 0.2 s | 0.1 s | 0.5–0.6 s |
+| 5 matched lines per file | 10,000 | 50,000 | 1.9 s | 0.9–1.3 s | 5.4–5.7 s |
+| 100 matched lines per file | 1,000 | 100,000 | 2.9 s | 1.7–2.0 s | 2.2–2.4 s |
+
+Applying costs about 0.5 ms per file plus about 20 µs per line on this
+machine; on a disk rather than tmpfs it will be more. 10,000 files stay
+well under the 30 seconds at which the spec would have recorded writing
+in the service as a backlog item.
+
+Remeasured on 2026-10-15 after the review changed the writing to a
+temporary file renamed over the file (same machine, which was busier:
+the code before the change measured 0.8 s, 8.3–8.4 s and 2.5 s apply in
+the same session). Apply: 1.2 s (1k-5), 11.2–12.2 s (10k-5), 2.8–3.0 s
+(1k-100k). The new file, its attributes and the rename cost about
+0.4 ms more per file; 10,000 files still stay well under 30 seconds.
+
+Remeasured on 2026-10-15 after the second review (round-trip check,
+locks, fsync), same machine, load average about 1, rising to about 4
+during the disk runs. Apply, two runs each:
+
+| Tree on | Code | 1k-5 | 10k-5 | 1k-100k |
+|---|---|---|---|---|
+| tmpfs | before | 0.7 s | 7.2–7.3 s | 2.3–2.5 s |
+| tmpfs | after | 0.9 s | 8.3–8.4 s | 2.5–2.6 s |
+| ext4 on LUKS, NVMe SSD | before | 1.2–1.4 s | 12.3–13.0 s | 2.9–3.3 s |
+| ext4 on LUKS, NVMe SSD | after, fsync switched off for the measurement | 1.3 s | 12.5–13.3 s | 3.1 s |
+| ext4 on LUKS, NVMe SSD | after | 3.4–19.7 s | 39.6–130.9 s | 8.6–22.9 s |
+
+On tmpfs, where fsync costs nothing, the round-trip check and the lock
+add 0.1 to 0.2 ms per file. On a disk they disappear in the noise, but
+fsync costs 2 to 18 ms per file, varying a lot between runs: 10,000
+files take 40 s to over 2 minutes, above the 30 seconds of the spec.
+So the replace follows `write-region-inhibit-fsync` like any save (the
+author's decision, 2026-10-15): with its default t, the cost is the row
+with fsync switched off.
 
 ### Editing with wgrep
 
@@ -526,7 +807,7 @@ active while editing and `C-c C-k` is wgrep's abort.
 - `quarry-grep--edit-results` (called with the buffer narrowed to the
   part between header and footer): a result line that is not
   `quarry-grep-inexact` gets `wgrep-line-filename` (the absolute name,
-  `default-directory` plus `quarry-grep-file`) and `wgrep-line-number`
+  `quarry-grep--result-file` of `quarry-grep-file`) and `wgrep-line-number`
   on its `quarry-grep-prefix`; wgrep makes that prefix read-only and
   treats the rest of the line as the file's line. Every other line
   (headings, separators, inexact result lines) gets `wgrep-ignore`,

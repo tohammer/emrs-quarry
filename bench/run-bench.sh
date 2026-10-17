@@ -3,6 +3,13 @@
 # trees of 100,000 and 1,000,000 empty files (spec "Testing", "Benchmark").
 #
 # Usage: bench/run-bench.sh [--size 100k|1m|both] [--skip-baseline] [--keep]
+#        bench/run-bench.sh replace
+#
+# "replace" measures grep replace instead (see bench/replace-bench.el):
+# 1,000 and 10,000 files with 5 matched lines each, and 1,000 files with
+# 100 matched lines each (100,000 matches), each twice; the trees are
+# generated in a temporary directory ($QUARRY_BENCH_TMP or $TMPDIR) and
+# removed afterwards.
 #
 #   --size           trees to measure (default: both)
 #   --skip-baseline  do not measure project-files + flex (it needs a git
@@ -22,6 +29,11 @@ set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
 
+mode=files
+if [ "${1:-}" = replace ]; then
+    mode=replace
+    shift
+fi
 sizes="100k 1m"
 baseline=1
 keep=0
@@ -63,6 +75,52 @@ cp "$root/bench/quarry-bench.el" "$out/"
 "$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" \
     --eval '(setq byte-compile-error-on-warn t)' \
     -f batch-byte-compile "$out/quarry-bench.el"
+
+if [ "$mode" = replace ]; then
+    # Copies of the Lisp files next to the release module: quarry prefers a
+    # module built next to its own quarry.el (lisp/), which may be stale.
+    out="$root/target/bench-replace-elisp"
+    mkdir -p "$out"
+    rm -f "$out"/*.el "$out"/*.elc
+    cp lisp/*.el "$out/"
+    for ext in so dylib dll; do
+        for built in "target/release/libquarry.$ext" "target/release/quarry.$ext"; do
+            if [ -f "$built" ]; then
+                cp "$built" "$out/quarry-module.$ext"
+            fi
+        done
+    done
+    cp "$root/bench/replace-bench.el" "$out/"
+    "$emacs" --batch -L "$emrs_el" -L "$out" \
+        --eval '(setq byte-compile-error-on-warn t)' \
+        -f batch-byte-compile "$out/replace-bench.el"
+    tmp=$(mktemp -d "${QUARRY_BENCH_TMP:-${TMPDIR:-/tmp}}/quarry-replace-bench.XXXXXX")
+    trap 'rm -rf "$tmp"' EXIT INT TERM
+    status=0
+    for run in 1 2; do
+        for label in 1k-5 10k-5 1k-100k; do
+            # Not through a pipe: sh has no pipefail, and the exit status
+            # of Emacs says whether every file was as expected.
+            rc=0
+            "$emacs" --batch -L "$emrs_el" -L "$out" \
+                -l "$out/replace-bench.elc" \
+                --eval "(quarry-replace-bench-run)" "$label" "$tmp" \
+                >"$tmp/run.log" 2>&1 || rc=$?
+            cat "$tmp/run.log"
+            cat "$tmp/run.log" >>"$tmp/log"
+            [ "$rc" -eq 0 ] || status=1
+        done
+    done
+    echo
+    echo "Run  case      files  matches  preview(s)  work(s)  apply(s)  verified"
+    grep '^RESULT' "$tmp/log" | awk '{ split($3,f,"="); split($4,m,"="); split($5,p,"="); split($6,w,"="); split($7,a,"=");
+        split($8,v,"="); printf "%-4d %-9s %-6s %-8s %-11s %-8s %-9s %s\n", ++n, $2, f[2], m[2], p[2], w[2], a[2], v[2] }'
+    if [ "$(grep -c '^RESULT' "$tmp/log")" -ne 6 ]; then
+        echo "run-bench.sh: not every case printed a result" >&2
+        status=1
+    fi
+    exit $status
+fi
 
 trees=${QUARRY_BENCH_DIR:-$root/target/bench-trees}
 mkdir -p "$trees"

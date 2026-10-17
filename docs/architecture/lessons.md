@@ -125,3 +125,10 @@ Part of [the architecture](../architecture.md).
   ERT searches therefore go out with a budget of 60 s
   (`quarry-test-grep--with-tree`), as the Rust tests do; a test that
   compares the order of results from a real search must use that macro.
+- **A stub of an autoloaded function does not load its file.** The
+  replace tests stub `ask-user-about-lock`, so `userlock.el`, which
+  defines the error `file-locked`, was never loaded. Signalling an
+  undefined error is a "peculiar error" that `error` handlers do not
+  catch on Emacs 30, so the test aborted there; Emacs 31 turns it into
+  an "Invalid error symbol" error, so the test passed on the wrong
+  error. A test that stubs an autoloaded function loads its file first.

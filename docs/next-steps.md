@@ -6,8 +6,9 @@ architecture.md or an ADR.
 ## Next
 
 - Rebuild the module (`M-x quarry-build-module`) and restart Emacs: path
-  globs and context lines need the new module. An older one refuses a
-  glob with `/` and shows no context.
+  globs, context lines and replace need the new module. An older one
+  refuses a glob with `/`, shows no context, and ignores a replace
+  template (quarry-grep detects that and says so).
 - Update the `emrs` package before that restart (`doom sync -u`, or pull
   a local checkout): `project-files` from the index now needs
   `emrs-call-stream-sync`, which an older `emrs.el` does not have.
@@ -18,12 +19,24 @@ architecture.md or an ADR.
 - Use quarry-grep daily and do its manual checks (grep backlog, "Manual
   checks not done yet"), including context lines (`C`, `B`, `A`), the
   menu (`?`) and path globs in the files prompt (`f`).
+- Do the manual checks of replace (spec 2026-10-14-grep-replace,
+  "Testing"): the faces `quarry-grep-replace-old` and `-new` in a GUI
+  frame and in a terminal; `x` through a long preview; a real `C-g`
+  during a large apply; a replace in files that are open in Emacs, then
+  undo in those buffers.
 - Next feature: pick from the survey (grep backlog, "Survey: find and
   grep features worth making native") or from "Further features weighed
-  before the spec", where regexp replace with preview is the strongest
-  candidate.
+  before the spec". Decide after a while of daily use; the survey's
+  second item, definitions across a project by pattern, is the cheapest
+  of the useful ones (Elisp and data only).
 
 ## Watch out for
+
+- Replace writes a file through a new file renamed over it and syncs
+  only as `write-region-inhibit-fsync` says (default t), as any Emacs
+  save (ADRs 0022, 0023). A power loss right after a replace can leave
+  empty files off ext4. Rerun `bench/run-bench.sh replace` after a change
+  to the write path; it checks every file.
 
 - emrs is pinned to a commit in `Cargo.toml`. Bump it deliberately; after a
   bump, rerun `tests/run-ert.sh`, which also picks up the matching `emrs.el`.

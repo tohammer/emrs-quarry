@@ -45,7 +45,7 @@
 //! Highlight positions are character offsets (Unicode scalar values), not bytes; ends are exclusive. They are
 //! found on the whole line and reported for the part of it that is sent ([`Filters::line_spans`]).
 
-use grep_matcher::Matcher;
+use grep_matcher::{Captures, Match, Matcher};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use serde::Deserialize;
 use std::fmt;
@@ -360,6 +360,35 @@ impl Filters {
             .map(|(s, e, secondary)| Span { start: offsets.at(s), end: offsets.at(e.min(shown)), secondary })
             .filter(|span| span.start < span.end)
             .collect()
+    }
+
+    /// The new text of each primary match of a line that is sent whole: `template` interpolated with the match's
+    /// capture groups, in the syntax of `rg -r` (`$0`, `$1`, `${1}`, `$name`, `${name}`, `$$`; a group that does
+    /// not exist or did not take part gives the empty string). `text` is the whole line without terminator.
+    ///
+    /// One entry per primary span of [`Filters::line_spans`]`(text, text.len())`, in the same order: the
+    /// matches of the primary filter on the whole line that are not empty as character ranges. (A byte-level
+    /// pattern such as `(?-u:\xA4)` can match inside a character; that span is dropped there, so it is here.)
+    /// Each match is found by the same iteration as there, and its groups by a search that starts at it, which
+    /// sees the line before it as the first did.
+    pub fn replacements(&self, text: &str, template: &[u8]) -> Vec<String> {
+        let haystack = text.as_bytes();
+        // The error type is `NoError`, as in `find_before`.
+        let Ok(mut caps) = self.primary.new_captures() else { return Vec::new() };
+        let offsets = CharOffsets::new(text);
+        let mut found = Vec::new();
+        for (start, end) in find_all(&self.primary, haystack) {
+            if offsets.at(start) == offsets.at(end) {
+                continue;
+            }
+            let matched = self.primary.captures_at(haystack, start, &mut caps).unwrap_or(false);
+            debug_assert!(matched && caps.get(0) == Some(Match::new(start, end)));
+            let mut new = Vec::new();
+            caps.interpolate(|name| self.primary.capture_index(name), haystack, template, &mut new);
+            // A group can end inside a character only with a byte-level pattern such as `(?-u:\xC3)`.
+            found.push(String::from_utf8(new).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()));
+        }
+        found
     }
 }
 
@@ -748,6 +777,76 @@ mod tests {
         assert!(spans(&f, "xäb").is_empty());
         let f = compile(&[line("äb", false)]);
         assert_eq!(spans(&f, "xÄB"), vec![sp(1, 3, false)]);
+    }
+
+    /// The replacements of a line that is sent whole.
+    fn replaced(f: &Filters, text: &str, template: &str) -> Vec<String> {
+        f.replacements(text, template.as_bytes())
+    }
+
+    #[test]
+    fn replacements_interpolate_the_template_per_match() {
+        let f = compile(&[line("(?P<word>[a-z]+)=(\\d+)", true)]);
+        let text = "a=1, bc=23";
+        assert_eq!(replaced(&f, text, "$0"), ["a=1", "bc=23"]);
+        assert_eq!(replaced(&f, text, "$2"), ["1", "23"]);
+        assert_eq!(replaced(&f, text, "${2}x"), ["1x", "23x"]);
+        assert_eq!(replaced(&f, text, "${word}:$word"), ["a:a", "bc:bc"]);
+        assert_eq!(replaced(&f, text, "$$1"), ["$1", "$1"]);
+        assert_eq!(replaced(&f, text, "plain"), ["plain", "plain"]);
+        assert_eq!(replaced(&f, text, ""), ["", ""]);
+        // `$2x` is the group named `2x`, which does not exist; so are group 7 and an unknown name.
+        assert_eq!(replaced(&f, text, "<$2x|$7|$nope|${nope}>"), ["<|||>", "<|||>"]);
+        // A group that did not take part.
+        let f = compile(&[line("(a)|(b)", true)]);
+        assert_eq!(replaced(&f, "ab", "[$1$2]"), ["[a]", "[b]"]);
+        assert_eq!(replaced(&f, "ab", "[$1]"), ["[a]", "[]"]);
+    }
+
+    #[test]
+    fn replacements_of_a_literal_filter_have_the_whole_match_only() {
+        let f = compile(&[line("a.(b)", false)]);
+        assert_eq!(replaced(&f, "xa.(b) a.(b)", "<$0|$1>"), ["<a.(b)|>", "<a.(b)|>"]);
+    }
+
+    #[test]
+    fn replacements_follow_the_spans_one_to_one() {
+        let check = |f: &Filters, text: &str| {
+            let primary: Vec<Span> = spans(f, text).into_iter().filter(|s| !s.secondary).collect();
+            let found = replaced(f, text, "$0");
+            assert_eq!(found.len(), primary.len(), "{text:?}");
+            // Each replacement is the text of its span.
+            let chars: Vec<char> = text.chars().collect();
+            for (span, new) in primary.iter().zip(&found) {
+                let old: String = chars[span.start as usize..span.end as usize].iter().collect();
+                assert_eq!(&old, new, "{text:?}");
+            }
+            found
+        };
+        // Touching matches.
+        let f = compile(&[line("ab", false)]);
+        assert_eq!(check(&f, "ababab"), ["ab", "ab", "ab"]);
+        // Empty matches are left out on both sides.
+        let f = compile(&[line("a*", true)]);
+        assert_eq!(check(&f, "baab"), ["aa"]);
+        assert_eq!(check(&f, "aabaa"), ["aa", "aa"]);
+        assert!(check(&f, "bbb").is_empty());
+        let f = compile(&[line("\\b|x", true)]);
+        assert!(check(&f, "ab xb").is_empty());
+        // Multibyte text before and inside the matches.
+        let f = compile(&[line("ä(.)ö", true)]);
+        assert_eq!(check(&f, "→ äüö äßö 😀ä😀ö"), ["äüö", "äßö", "ä😀ö"]);
+        assert_eq!(replaced(&f, "→ äüö äßö 😀ä😀ö", "<$1>"), ["<ü>", "<ß>", "<😀>"]);
+        // With secondary filters on the line.
+        let f = compile(&[line("o+", true), line("fo", false), line("b", false)]);
+        assert_eq!(check(&f, "foo boo fob"), ["oo", "oo", "o"]);
+        // The interpolation sees the whole line: `$` and `\b` as in the matching.
+        let f = compile(&[line("(\\w+)$", true)]);
+        assert_eq!(replaced(&f, "ab cd", "[$1]"), ["[cd]"]);
+        // A byte-level match inside a character is no span, so it has no replacement either.
+        let f = compile(&[line("(?-u:\\xA4)|x", true)]);
+        assert_eq!(check(&f, "äx"), ["x"]);
+        assert_eq!(replaced(&f, "äx", "<$0>"), ["<x>"]);
     }
 
     #[test]
