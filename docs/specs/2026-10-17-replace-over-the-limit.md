@@ -1,6 +1,6 @@
 # Grep: replace previews over the line limit
 
-Status: draft
+Status: approved
 Date: 2026-10-17
 
 ## Purpose
