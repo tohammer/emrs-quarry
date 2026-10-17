@@ -1015,15 +1015,19 @@ the one named like the major mode, else the first."
   "Return (TYPES . GLOBS) for FILES, words that do not say what they are.
 FILES is nil, a string (a list of one word) or a list of strings.  Each
 word that is the name of a file type (see `quarry-grep--type-list') is
-a type, every other word is a glob.  TYPES and GLOBS are lists of
-strings in their order, nil for none; a type name given twice counts
-once."
+an included type; a word that is `!' and the name of a file type
+excludes that type and stays \"!NAME\" in TYPES.  Every other word is a
+glob, so `![j]son' and `!nosuch' are globs.  TYPES and GLOBS are lists
+of strings in their order, nil for none; a type entry given twice
+counts once, at its last place."
   (let ((names (mapcar (lambda (type) (plist-get type :name))
                        (quarry-grep--type-list)))
         types globs)
     (dolist (word (if (listp files) files (list files)))
-      (if (member word names)
-          (cl-pushnew word types :test #'equal)
+      (if (or (member word names)
+              (and (string-prefix-p "!" word)
+                   (member (substring word 1) names)))
+          (setq types (cons word (delete word types)))
         (push word globs)))
     (cons (nreverse types) (nreverse globs))))
 
@@ -1113,8 +1117,8 @@ The buffer is reused; it is an error while its results are being edited."
   "Search DIR for PATTERN in FILES and show the result buffer.
 PATTERN is a regexp if REGEXP is non-nil, else a literal string.  FILES
 is nil for all files, a string or a list of strings: a word that is the
-name of a file type is a type, the others are globs (see
-`quarry-grep--classify-files')."
+name of a file type is a type, `!' and the name of a file type excludes
+that type, the others are globs (see `quarry-grep--classify-files')."
   (quarry-grep--check-result-buffer)
   (quarry-grep--check-pattern pattern)
   (let* ((dir (quarry-grep--check-directory dir))
@@ -1139,9 +1143,10 @@ name of a file type is a type, the others are globs (see
   "Search DIR for lines that match REGEXP, in FILES.
 REGEXP is a Rust regexp.  FILES is nil for all files, the name of a
 file type, a list of globs, or a list of type names and globs.  A word
-that is the name of a file type is a type, any other is a glob.  A file
-must be of one of the types, if any, and match one of the including
-globs, if any.
+that is the name of a file type is a type, a word `!' and the name of a
+file type excludes that type (\"!json\"), any other is a glob.  A file
+must pass the types, if any (of several, the last one that has the file
+decides), and match one of the including globs, if any.
 The matches are shown in the buffer `quarry-grep-buffer-name'; see
 `quarry-grep-mode' for what can be done there.  Interactively, ask for
 the three."
@@ -1157,7 +1162,8 @@ the three."
 ;;;###autoload
 (defun quarry-grep-literal (string files dir)
   "Search DIR for lines that contain STRING, in FILES.
-Like `quarry-grep', but STRING is a literal, not a regexp."
+Like `quarry-grep', but STRING is a literal, not a regexp.  FILES may
+name excluded file types as `!NAME'."
   (interactive
    (progn
      (quarry-grep--check-result-buffer)
@@ -1171,7 +1177,7 @@ Like `quarry-grep', but STRING is a literal, not a regexp."
 (defun quarry-grep-project (regexp files)
   "Search the current project for lines that match REGEXP, in FILES.
 Like `quarry-grep' in the project's root, or in `default-directory'
-outside a project."
+outside a project.  FILES may name excluded file types as `!NAME'."
   (interactive
    (progn
      (quarry-grep--check-result-buffer)

@@ -432,9 +432,11 @@ completes over the type names of the `ignore` crate (what `rg
 current buffer's file, else `everything`. `all` is not a type name;
 `everything` is the word for no restriction. The prompt takes words
 separated by spaces: type names, globs, or both (`rust elisp !gen/**`).
-A word that is a type name is a type, in any number; every other word is
-a glob. A glob that is spelled like a type name is taken as the type;
-write `[m]ake` to mean the glob.
+A word that is a type name is a type, in any number; a word `!NAME`
+where NAME is a type name excludes the type; every other word is a glob.
+A glob that is spelled like a type name or like an excluded type is
+taken as the type; write the glob another way, `[m]ake` for `make` or
+`![r]ust` for `!rust`.
 
 How the restrictions combine:
 
@@ -442,11 +444,14 @@ How the restrictions combine:
 |---|---|
 | several types | it is of one of them (they are alternatives) |
 | several including globs | it matches one of them (they are alternatives) |
+| an excluded type (`!TYPE`) | it is not of that type |
+| a file of several listed types | the last of them in the order given decides: `cpp !c` leaves out `.h` files, `!c cpp` keeps them |
 | types and globs | it passes the types and the globs (both narrow) |
 | an excluding glob (`!...`) | no excluding glob matches it; when several globs match a file, the last one decides |
 
-Nothing in this is an error; a combination that no file passes gives no
-hits.
+With only excluded types, every other file is searched, also files of no
+type. Nothing in this is an error; a combination that no file passes
+gives no hits.
 
 Globs are gitignore-style and relative to the searched directory. One
 without a `/` matches a name at any depth (`*.el`); one with a `/` at
@@ -913,6 +918,7 @@ The options are spelled as in rg. A value is the next word, or attached
 | Option | Meaning |
 |---|---|
 | `-t TYPE`, `--type TYPE` | a file type; any number, in order |
+| `-T TYPE`, `--type-not TYPE` | a file type that is not searched, as in rg; any number, in order with `-t` |
 | `-g GLOB`, `--glob GLOB` | a glob, see below; any number, in order |
 | `-F`, `--fixed-strings` | all terms are literals, not regexps |
 | `-i`, `--ignore-case` | case rule `insensitive` |
@@ -932,6 +938,8 @@ Types and globs combine as in the files prompt of the result buffer (see
 | several including `-g` | it matches one of the globs |
 | `-t` and `-g` | it passes the types and the globs (both narrow) |
 | an excluding `-g !...` | no excluding glob matches it; when several globs match a file, the last one decides |
+| `-T` | it is not of that type; with only `-T`, every other file, also one of no type, is searched |
+| a file of several of the `-t` and `-T` types | the last of them decides: `-t cpp -T c` leaves out `.h` files, `-T c -t cpp` keeps them |
 
 Nothing in this is an error; a combination that no file passes gives no
 hits. For example, `quarry -- -t elisp -g *test* -g *.rs` searches for

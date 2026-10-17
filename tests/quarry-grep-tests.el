@@ -413,16 +413,26 @@ Each is (PROMPT . INITIAL-CONTENTS)."
     (should (equal (quarry-grep--parse-files "everything") '(nil)))
     ;; A glob that is not spelled like a type name.
     (should (equal (quarry-grep--parse-files "[m]ake") '(nil "[m]ake")))
-    ;; Several types, in order; a name given twice counts once.
+    ;; Several types, in order; a name given twice counts once, at its last place.
     (should (equal (quarry-grep--classify-files '("rust" "*.a" "txt"))
                    '(("rust" "txt") "*.a")))
     (should (equal (quarry-grep--parse-files "rust txt md")
                    '(("rust" "txt" "md"))))
     (should (equal (quarry-grep--parse-files "txt rust txt *.a")
-                   '(("txt" "rust") "*.a")))
+                   '(("rust" "txt") "*.a")))
     (should (equal (quarry-grep--files-argument (quarry-grep--parse-files "txt *.a rust"))
                    '("txt" "rust" "*.a")))
-    (should-not (quarry-grep--files-argument (quarry-grep--parse-files "everything")))))
+    (should-not (quarry-grep--files-argument (quarry-grep--parse-files "everything")))
+    ;; An excluded type stays "!NAME" among the types, in order.
+    (should (equal (quarry-grep--classify-files '("rust" "!json" "*.a"))
+                   '(("rust" "!json") "*.a")))
+    (should (equal (quarry-grep--parse-files "!json") '(("!json"))))
+    ;; `!' and no type name is a glob.
+    (should (equal (quarry-grep--classify-files '("![j]son" "!nosuch"))
+                   '(nil "![j]son" "!nosuch")))
+    ;; An entry given twice stays at its last place.
+    (should (equal (quarry-grep--classify-files '("c" "!c" "c")) '(("!c" "c"))))
+    (should (equal (quarry-grep--classify-files '("!c" "rust" "!c")) '(("rust" "!c"))))))
 
 (ert-deftest quarry-test-grep-files-text-and-request ()
   "The restriction is shown as typed; the request has what the search has."
@@ -447,7 +457,34 @@ Each is (PROMPT . INITIAL-CONTENTS)."
                          (quarry-grep--make-search :dir "/x/" :types '("rust")
                                                    :globs '("!gen/**"))))))
       (should (equal (plist-get request :file-types) '("rust")))
-      (should (equal (plist-get request :globs) '("!gen/**"))))))
+      (should (equal (plist-get request :globs) '("!gen/**"))))
+    (let ((request (cdr (quarry-grep--request
+                         (quarry-grep--make-search :dir "/x/" :types '("rust" "!json" "c"))))))
+      (should (equal (plist-get request :file-types) '("rust" "!json" "c"))))
+    (should (equal (quarry-grep--files-text '("rust" "!json") '("!gen/**"))
+                   "rust !json !gen/**"))))
+
+(ert-deftest quarry-test-grep-excluded-type ()
+  "A search with `!json' finds no JSON hits but the others."
+  (quarry-test-grep--with-tree
+      (dir (append quarry-test-grep--files '(("data.json" . "{\"needle\": 1}\n"))))
+    (quarry-test-grep--search dir)
+    (should (equal (quarry-test-grep--headings)
+                   '(".hidden.txt" "data.json" "notes.txt" "src/a.rs" "sub/deep.txt")))
+    (quarry-test-grep--keys "f !json RET")
+    (should (equal (quarry-test-grep--request :file-types) '("!json")))
+    (should-not (plist-member (cdr (quarry-test-grep--request)) :globs))
+    (should (equal (quarry-test-grep--headings)
+                   '(".hidden.txt" "notes.txt" "src/a.rs" "sub/deep.txt")))
+    (should (string-prefix-p " files: !json   " (quarry-test-grep--header)))
+    (let ((prompts (quarry-test-grep--prompts
+                    (lambda () (quarry-test-grep--keys "f RET")))))
+      (should (string-match-p "(default !json): " (car (car prompts)))))
+    ;; The command takes the same words.
+    (quarry-grep "needle" '("!json" "!txt") dir)
+    (quarry-test-grep--wait)
+    (should (equal (quarry-test-grep--request :file-types) '("!json" "!txt")))
+    (should (equal (quarry-test-grep--headings) '("src/a.rs")))))
 
 (ert-deftest quarry-test-grep-change-files-path-globs ()
   "Path globs, excluding globs and a type with globs, with the real module."

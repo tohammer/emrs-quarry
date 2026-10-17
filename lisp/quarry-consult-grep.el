@@ -22,8 +22,8 @@
 ;; The input is a list of terms separated by spaces.  Each term is a
 ;; Rust regexp that a line must match; a term with `!' in front is one
 ;; it must not match.  After " -- " come options in rg's spelling, for
-;; example `-t rust', `-g GLOB', `-F' and `-i' (ADR 0019); `-t' and `-g'
-;; may be given several times.  The README
+;; example `-t rust', `-T json', `-g GLOB', `-F' and `-i' (ADR 0019);
+;; `-t', `-T' and `-g' may be given several times.  The README
 ;; has the whole syntax under "Live grep".
 ;; `quarry-consult-grep-quote' turns a string into input that searches
 ;; for it literally.
@@ -136,12 +136,18 @@ boundary.  A trailing lone backslash stays."
   "What the option words of an input have set."
   types globs case no-ignore hidden fixed)
 
+(defun quarry-consult-grep--add-type (opts entry)
+  "Append the type ENTRY to the types of OPTS, dropping an earlier copy.
+ENTRY is a type name, or \"!NAME\" for an excluded type."
+  (setf (quarry-consult-grep--opts-types opts)
+        (append (delete entry (quarry-consult-grep--opts-types opts))
+                (list entry))))
+
 (defconst quarry-consult-grep--options
   `(("-t" "--type" t
-     ,(lambda (o v)
-        (unless (member v (quarry-consult-grep--opts-types o))
-          (setf (quarry-consult-grep--opts-types o)
-                (append (quarry-consult-grep--opts-types o) (list v))))))
+     ,(lambda (o v) (quarry-consult-grep--add-type o v)))
+    ("-T" "--type-not" t
+     ,(lambda (o v) (quarry-consult-grep--add-type o (concat "!" v))))
     ("-g" "--glob" t
      ,(lambda (o v)
         (setf (quarry-consult-grep--opts-globs o)
@@ -674,8 +680,8 @@ region, quoted with `quarry-consult-grep-quote'.
 The input is a list of terms separated by spaces.  A term is a Rust
 regexp that a line must match; a term with `!' in front is one that it
 must not match.  After a `--' that stands alone come options in rg's
-spelling, among them `-t TYPE', `-g GLOB', `-F', `-i', `-s', `-S', `-u'
-and `-.'; see the README for all of them.  With the default
+spelling, among them `-t TYPE', `-T TYPE', `-g GLOB', `-F', `-i', `-s',
+`-S', `-u' and `-.'; see the README for all of them.  With the default
 `consult-async-split-style' the input reads `#TERMS -- OPTIONS#FILTER',
 where FILTER filters the candidates in Emacs.
 

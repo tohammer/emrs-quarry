@@ -877,8 +877,9 @@ words after it options from the table `quarry-consult-grep--options`;
 a new option is one entry. What is being typed is no error: a lone
 `!`, an option without its value, a last word that is the start of an
 option's spelling, a backslash that ends the input unpaired. Options
-are read only when there is an include term. `-t` and `-g`, each any number of times, fill `types`
-and `globs` directly, so the parser needs no type list and an unknown
+are read only when there is an include term. `-t`, `-T` and `-g`, each any number of times, fill `types`
+and `globs` directly; `-T` adds `!TYPE` to `types`, and a repeated
+`types` entry moves to the end (the last copy wins). So the parser needs no type list and an unknown
 type is the service's error. `quarry-consult-grep-quote` is the
 inverse for one literal string; it writes the separator of the consult
 split style as `\xNN`, since `\#` would still end the search part.

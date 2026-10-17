@@ -93,7 +93,8 @@ cpp`. `README` is of no type.)
   excluded type. Every other word is a glob. Duplicate type entries
   (the same string) are kept only at their last place. This replaces
   `cl-pushnew`, which kept the first; for lists of included types only,
-  the result is the same.
+  what is searched is the same, though the list's order can differ
+  (`txt rust txt` gives `("rust" "txt")`).
 - `quarry-grep--files-text` is unchanged: the types in their order, then
   the globs. So the header line and the prompt default show `rust !json
   !gen/**` with no extra work. Types and globs are separate restrictions,
@@ -189,13 +190,13 @@ The implementation branch starts from `master` once the replace branch
   when* `cargo test`, `cargo clippy --all-targets -- -D warnings` and
   `cargo fmt --check` pass, and each row of the table under "Meaning" is
   a test.
-- [ ] 2. **Files prompt and search value** (after 1). `!NAME` in
+- [x] 2. **Files prompt and search value** (after 1). `!NAME` in
   `quarry-grep--classify-files`, keep-last duplicates, docstrings, the
   README paragraph and combination table for the files prompt, and the
   ERT tests for classify, request and the command search. *Done when*
   `tests/run-ert.sh` passes with the module built from task 1, and the
   existing grep tests pass unchanged.
-- [ ] 3. **Live grep** (after 1; can run in parallel with 2). `-T` and
+- [x] 3. **Live grep** (after 1; can run in parallel with 2). `-T` and
   `--type-not` in `quarry-consult-grep--options`, the shared keep-last
   rule for `-t` and `-T`, the README options and combination tables, the
   architecture's live grep paragraph, and the ERT tests for the parser
