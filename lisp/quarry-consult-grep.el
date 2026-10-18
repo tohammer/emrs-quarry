@@ -23,8 +23,8 @@
 ;; Rust regexp that a line must match; a term with `!' in front is one
 ;; it must not match.  After " -- " come options in rg's spelling, for
 ;; example `-t rust', `-T json', `-g GLOB', `-F' and `-i' (ADR 0019);
-;; `-t', `-T' and `-g' may be given several times.  The README
-;; has the whole syntax under "Live grep".
+;; `-t', `-T' and `-g' may be given several times.  The whole
+;; syntax is in docs/user/live-grep.md.
 ;; `quarry-consult-grep-quote' turns a string into input that searches
 ;; for it literally.
 ;;
@@ -215,7 +215,7 @@ nil."
          ;; The last word may be an option that is being typed.
          ((and (null words) (quarry-consult-grep--option-prefix-p word)))
          ((string-prefix-p "-" word)
-          (user-error "Unknown option %s; see the README for the options"
+          (user-error "Unknown option %s; see docs/user/live-grep.md, \"Options\""
                       word))
          (t (user-error "Not an option: %s" word))))
        ((not (nth 2 (car found)))
@@ -681,9 +681,9 @@ The input is a list of terms separated by spaces.  A term is a Rust
 regexp that a line must match; a term with `!' in front is one that it
 must not match.  After a `--' that stands alone come options in rg's
 spelling, among them `-t TYPE', `-T TYPE', `-g GLOB', `-F', `-i', `-s',
-`-S', `-u' and `-.'; see the README for all of them.  With the default
-`consult-async-split-style' the input reads `#TERMS -- OPTIONS#FILTER',
-where FILTER filters the candidates in Emacs.
+`-S', `-u' and `-.'; see docs/user/live-grep.md for all of them.
+With the default `consult-async-split-style' the input reads
+`#TERMS -- OPTIONS#FILTER', where FILTER filters the candidates in Emacs.
 
 RET visits the hit.  In the prompt, `quarry-consult-grep-to-buffer'
 runs the search in the result buffer of `quarry-grep'; it is bound in

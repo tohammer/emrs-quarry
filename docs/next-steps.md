@@ -62,8 +62,8 @@ architecture.md or an ADR.
   prefix bug (ADR 0003). Bump it deliberately and rerun `cargo test`; the
   narrowing and substring-style tests fail when nucleo's parsing or
   unescaping changes in a way that matters.
-- Development mode (Doom, `:local-repo` with `:build (:not compile)`, README
-  "Development"): Elisp edits need no `doom sync`, only `eval-buffer` or a
+- Development mode (Doom, `:local-repo` with `:build (:not compile)`,
+  CONTRIBUTING.md "Development setup"): Elisp edits need no `doom sync`, only `eval-buffer` or a
   restart; Rust changes need `M-x quarry-build-module` and a restart; a
   new file in `lisp/` needs the package's build directory removed and
   then a `doom sync`, before Emacs is restarted. The module is loaded
