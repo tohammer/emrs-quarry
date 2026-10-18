@@ -4188,7 +4188,7 @@ and have the face of its result."
       (should-not (quarry-grep--applicable-p))
       (should (equal (quarry-test-grep--menu-inactive '("C-c C-c")) '("C-c C-c")))
       (quarry-test-grep--refused
-          "More than 100000 lines match; narrow the search (README, \"Large replacements\")"
+          "More than 100000 lines match; narrow the search (docs/user/grep.md, \"Large replacements\")"
         (quarry-grep-replace-apply))
       (setq quarry-grep--summary (plist-put quarry-grep--summary :total nil))
       (should-not (quarry-grep--applicable-p))

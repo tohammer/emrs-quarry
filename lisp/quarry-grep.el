@@ -2288,7 +2288,7 @@ Does not signal."
            (cond ((null total)
                   "The search stopped at its line limit and only what is shown would be replaced; narrow the search or raise `quarry-grep-max-lines'")
                  ((> total (quarry-grep--count-bound))
-                  (format "More than %d lines match; narrow the search (README, \"Large replacements\")"
+                  (format "More than %d lines match; narrow the search (docs/user/grep.md, \"Large replacements\")"
                           (quarry-grep--count-bound)))
                  ;; The search again would switch them all on.
                  ((zerop quarry-grep--replace-on)

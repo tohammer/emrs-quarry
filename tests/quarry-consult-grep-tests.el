@@ -149,7 +149,7 @@ character in consult 3.")
   ;; Cut at the first; a later `--' is an unknown option.
   (let ((err (should-error (quarry-test-consult-grep--parse "a -- -F -- b")
                            :type 'user-error)))
-    (should (equal (cadr err) "Unknown option --; see the README for the options")))
+    (should (equal (cadr err) "Unknown option --; see docs/user/live-grep.md, \"Options\"")))
   (should (equal (quarry-test-consult-grep--filters "a\\ -- b")
                  '((nil "a --" t) (nil "b" t)))))
 
@@ -292,15 +292,15 @@ character in consult 3.")
 
 (ert-deftest quarry-test-consult-grep-errors ()
   (should (equal (quarry-test-consult-grep--error "a -- -x")
-                 "Unknown option -x; see the README for the options"))
+                 "Unknown option -x; see docs/user/live-grep.md, \"Options\""))
   (should (equal (quarry-test-consult-grep--error "a -- --wat")
-                 "Unknown option --wat; see the README for the options"))
+                 "Unknown option --wat; see docs/user/live-grep.md, \"Options\""))
   (should (equal (quarry-test-consult-grep--error "a -- -Fi")
-                 "Unknown option -Fi; see the README for the options"))
+                 "Unknown option -Fi; see docs/user/live-grep.md, \"Options\""))
   (should (equal (quarry-test-consult-grep--error "a -- -uuu")
-                 "Unknown option -uuu; see the README for the options"))
+                 "Unknown option -uuu; see docs/user/live-grep.md, \"Options\""))
   (should (equal (quarry-test-consult-grep--error "a -- -w")
-                 "Unknown option -w; see the README for the options"))
+                 "Unknown option -w; see docs/user/live-grep.md, \"Options\""))
   (should (equal (quarry-test-consult-grep--error "a -- -F word")
                  "Not an option: word"))
   (should (equal (quarry-test-consult-grep--error "a -- -t rust c")
@@ -735,7 +735,7 @@ at once with `cancelled'.  No instance is started."
       (should (equal (quarry-test-consult-grep--taken)
                      '(flush [indicator failed])))
       (should (equal (quarry-test-consult-grep--notes (current-buffer))
-                     '((" [Unknown option -x; see the README for the options]"
+                     '((" [Unknown option -x; see docs/user/live-grep.md, \"Options\"]"
                         error 1))))
       (funcall step "a -- -F")
       (should-not (quarry-test-consult-grep--notes (current-buffer)))
@@ -1450,7 +1450,7 @@ the buffers visiting files of the tree are killed."
   (quarry-test-consult-grep--with-tree dir
     (pcase-dolist (`(,keys ,input ,message)
                    '(("needle SPC -- SPC -x" "#needle -- -x"
-                      "Unknown option -x; see the README for the options")
+                      "Unknown option -x; see docs/user/live-grep.md, \"Options\"")
                      ("needle SPC -- SPC -F SPC word" "#needle -- -F word"
                       "Not an option: word")
                      ("!x" "#!x" "Nothing to search yet")
