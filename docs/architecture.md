@@ -103,6 +103,14 @@ test and benchmark scripts use the `emrs.el` from that checkout. Installed
 from GitHub, `emrs.el` is its own package that follows emrs's default
 branch, so `Cargo.toml` pins only commits on that branch (ADR 0007).
 
+Releases go through emrs's reusable workflow (`.github/workflows/release.yml`):
+a tag `v<version>` publishes `quarry-module-<platform>.<ext>` and
+`SHA256SUMS` for linux-x86_64, linux-aarch64 and macos-aarch64 (emrs ADR
+0004), after the smoke test and the ERT suite ran against each file
+(`tests/run-ert.sh` with `EMRS_MODULE_FILE`). Users put a downloaded file
+where a local build goes, `lisp/quarry-module.<ext>` (ADR 0006). Between
+releases the version is `<next>-snapshot` (ADR 0026).
+
 ## Parts
 
 - [The Elisp side](architecture/elisp.md): building and finding the

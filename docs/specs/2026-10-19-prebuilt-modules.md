@@ -197,7 +197,7 @@ Manual:
   the workflow file is on the branch, `actionlint` (if available) passes,
   and after the merge a `workflow_dispatch` run on `master` passes without
   publishing. Depends on tasks 1 and 2.
-- [ ] 4. README: "Prebuilt module" subsection, status table rows,
+- [x] 4. README: "Prebuilt module" subsection, status table rows,
   requirements, troubleshooting entries; `CONTRIBUTING.md` gets a
   "Releasing" section (version, tag, bump, ADR 0026);
   `docs/architecture.md` mentions the release workflow; backlog

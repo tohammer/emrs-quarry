@@ -113,6 +113,38 @@ non-zero when one differs. Trees go to a temporary directory under
 `$QUARRY_BENCH_TMP`, `$TMPDIR` or `/tmp` and are removed. Results are in
 `docs/architecture/grep.md`, "Cost of large change sets".
 
+## Releasing
+
+`.github/workflows/release.yml` calls emrs's reusable
+`module-release.yml`. A tag `v<version>` builds the module for
+linux-x86_64, linux-aarch64 and macos-aarch64, runs the smoke test and
+the ERT suite against each file on Emacs 30.1 and 31.1, and publishes the
+files and `SHA256SUMS` to the release. Started by hand (`gh workflow run
+release.yml`), it builds and tests without publishing.
+
+Versions follow ADR 0026: between releases `Cargo.toml` and the
+`;; Version:` header of `lisp/quarry.el` carry the same
+`<next>-snapshot`.
+
+1. On a branch, set both to the release version, for example `0.2.0`,
+   run `cargo build` to update `Cargo.lock`, and merge the pull request.
+2. Tag the merge commit and push the tag:
+
+   ```sh
+   git switch master && git pull --ff-only
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+   Use a lightweight tag: the README tells Doom users to pin the commit
+   that `git ls-remote` shows for it.
+3. Check the release: three module files and `SHA256SUMS`.
+4. On a branch, set both versions to the next snapshot, for example
+   `0.3.0-snapshot`, and merge it.
+
+If a platform's tests fail, nothing is published. Fix the cause, delete
+the tag (`git push origin :v0.2.0`, `git tag -d v0.2.0`) and tag again.
+
 ## CI
 
 `.github/workflows/ci.yml` runs on every pull request and on `master`:

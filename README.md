@@ -21,14 +21,15 @@ outside the Emacs thread.
 ## Status
 
 Version 0.1.0, built and used on Linux with Emacs 31.1 in Doom Emacs.
-You build the module yourself with cargo; there are no prebuilt
-binaries.
+Each release has a prebuilt module for Linux and Apple-silicon Macs;
+elsewhere you build it with cargo.
 
 | Platform or variant | Status |
 |---|---|
 | Linux | tested |
 | macOS | ERT suite in CI only; file watching not used by hand |
-| Windows | untested |
+| Windows | untested; no prebuilt module |
+| Prebuilt module for Linux x86-64 and aarch64, macOS aarch64 | ERT suite in the release workflow; installed by hand on Linux |
 | Emacs 31.1 | tested |
 | Emacs 30.1 | ERT suite in CI only |
 | Doom Emacs recipe | tested |
@@ -44,7 +45,7 @@ Requirements:
 
 - Linux, Emacs 30.1 or later built with module support.
 - Rust 1.88 or later, with `cargo` on `PATH`, and network access for the
-  first build.
+  first build. Without Rust, see [Prebuilt module](#prebuilt-module).
 - Doom Emacs. For other package managers see
   [Installation](#installation).
 
@@ -201,6 +202,54 @@ outside its repository.
 When `quarry.el` is loaded from its checkout, `M-x quarry-build-module`
 replaces steps 1 and 2: it builds the module and installs it as
 `lisp/quarry-module.so` in the checkout.
+
+### Prebuilt module
+
+Each [release](https://github.com/tohammer/emrs-quarry/releases) has the
+module for three platforms, so you need no Rust toolchain:
+
+| Platform | File |
+|---|---|
+| Linux x86-64, glibc 2.28 or later | `quarry-module-linux-x86_64.so` |
+| Linux aarch64, glibc 2.28 or later | `quarry-module-linux-aarch64.so` |
+| macOS on Apple silicon | `quarry-module-macos-aarch64.dylib` |
+
+The module must match quarry's Elisp of the same version, so you pin
+quarry to the release.
+
+1. Install quarry and emrs with your package manager, and pin quarry to
+   the release's tag, here `v0.1.0`:
+   - Doom: add `:pin "<commit>"` to the `package!` form of quarry, where
+     `<commit>` is the first field of
+     `git ls-remote https://github.com/tohammer/emrs-quarry refs/tags/v0.1.0`.
+     Then run `doom sync`; without Rust it warns that the build failed.
+   - elpaca (untested): add `:tag "v0.1.0"` to the recipe.
+   - package-vc (untested): pass the tag as the second argument,
+     `(package-vc-install '(quarry :url "https://github.com/tohammer/emrs-quarry" :lisp-dir "lisp") "v0.1.0")`.
+   - Manual installation: `git checkout v0.1.0` in the clone.
+
+   emrs needs no pin.
+2. Download the file for your platform and `SHA256SUMS` from the release.
+3. Check the file. On Linux:
+
+   ```sh
+   sha256sum --check --ignore-missing SHA256SUMS
+   ```
+
+   On macOS:
+
+   ```sh
+   shasum -a 256 --check --ignore-missing SHA256SUMS
+   ```
+
+4. Rename the file to `quarry-module.so` (macOS: `quarry-module.dylib`)
+   and put it in the `lisp/` directory of quarry's repository. For Doom
+   that is `.local/straight/repos/emrs-quarry/lisp/` in your Doom
+   directory (`~/.config/emacs` or `~/.emacs.d`). For the manual
+   installation, any directory on `load-path` works too.
+5. Restart Emacs.
+
+To update, move the pin to the new tag and replace the file.
 
 ### Check the installation
 
@@ -421,7 +470,8 @@ once.
 
 ## Limitations
 
-- No prebuilt module: you need a Rust toolchain.
+- Prebuilt modules only for Linux (x86-64, aarch64) and Apple-silicon
+  Macs, and installed by hand; elsewhere you need a Rust toolchain.
 - Local files only. In remote (TRAMP) projects `quarry-find-file` runs
   `project-find-file`; the directory and grep commands refuse. Use
   `project-find-file` and rg.el there.
@@ -448,9 +498,16 @@ Emacs's `PATH`, set `quarry-build-cargo-program` to its full path.
 ### A feature does nothing after an update
 
 The module is older than the Elisp. Run `M-x quarry-build-module` and
-restart Emacs. An old module ignores context counts and replace
-templates, refuses globs with `/` and excluded file types, and
+restart Emacs. With a prebuilt module, download the release that
+matches your pin instead. An old module ignores context counts and
+replace templates, refuses globs with `/` and excluded file types, and
 `quarry-grep` says to rebuild when it notices.
+
+### `Loading .../quarry-module.so failed`
+
+With a prebuilt module: the file is for another platform, or on Linux
+your glibc is older than 2.28 (`ldd --version` shows it). Build the
+module with `M-x quarry-build-module` instead.
 
 ### `File watching for ... failed`
 
