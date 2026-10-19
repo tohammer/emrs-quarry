@@ -184,11 +184,11 @@ Manual:
 
 ## Tasks
 
-- [ ] 1. Add `tests/install-test-packages.sh` and use it in `ci.yml`.
+- [x] 1. Add `tests/install-test-packages.sh` and use it in `ci.yml`.
   *Done when* the script installs consult, compat and wgrep into
   `target/elpa` and prints the load path; CI passes all six jobs on the
   pull request without "not found" lines from `run-ert.sh`.
-- [ ] 2. Let `tests/run-ert.sh` test a given module (`EMRS_MODULE_FILE`,
+- [x] 2. Let `tests/run-ert.sh` test a given module (`EMRS_MODULE_FILE`,
   `EMRS_EL_DIR`). *Done when* a run with a module from `cargo emacs
   package` passes all tests without building, and a run without the
   variables is unchanged; `CONTRIBUTING.md` "Tests" documents the

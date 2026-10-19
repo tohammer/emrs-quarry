@@ -43,12 +43,8 @@ jobs:
       # consult (with compat) and wgrep are optional for quarry, but without
       # them tests/run-ert.sh skips the tests that need them.
       - name: Install consult and wgrep
+        # An assignment, so that a failed install fails the step.
         run: |
-          emacs --batch --eval '(progn
-            (require (quote package))
-            (setq package-user-dir (expand-file-name "target/elpa"))
-            (package-refresh-contents)
-            (package-install (quote consult))
-            (package-install (quote wgrep)))'
-          echo "QUARRY_TEST_LOAD_PATH=$(printf '%s:' "$PWD"/target/elpa/*/)" >> "$GITHUB_ENV"
+          load_path=$(tests/install-test-packages.sh)
+          echo "QUARRY_TEST_LOAD_PATH=$load_path" >> "$GITHUB_ENV"
       - run: tests/run-ert.sh

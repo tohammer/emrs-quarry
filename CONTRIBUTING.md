@@ -59,6 +59,15 @@ EMACS=/path/to/emacs tests/run-ert.sh
 `tests/run-ert.sh` tests copies of the Lisp files in `target/elisp` with
 the debug module, so a module built in `lisp/` does not affect them.
 
+With `EMRS_MODULE_FILE` the script tests that module and builds nothing.
+Name the file `quarry-module.so`, `.dylib` or `.dll`. `EMRS_EL_DIR` names
+the directory of `emrs.el`; without it the script finds `emrs.el` through
+Cargo. The emrs release workflow uses both to test each released module:
+
+```sh
+EMRS_MODULE_FILE=/tmp/quarry-module.so EMRS_EL_DIR=/path/to/emrs/elisp tests/run-ert.sh
+```
+
 Some tests need packages, found through `QUARRY_TEST_LOAD_PATH`, a
 colon-separated list of directories added to `load-path`:
 
