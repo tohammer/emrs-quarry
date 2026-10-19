@@ -48,3 +48,5 @@ jobs:
           load_path=$(tests/install-test-packages.sh)
           echo "QUARRY_TEST_LOAD_PATH=$load_path" >> "$GITHUB_ENV"
       - run: tests/run-ert.sh
+        env:
+          QUARRY_TEST_REQUIRE_PACKAGES: "1"

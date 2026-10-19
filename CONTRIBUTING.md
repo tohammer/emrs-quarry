@@ -84,6 +84,10 @@ QUARRY_TEST_LOAD_PATH=~/.emacs.d/straight/build/consult:~/.emacs.d/straight/buil
 - `tests/quarry-grep-wgrep-tests.el` needs wgrep. Without it those tests
   are skipped, except the one for the refusals of `e`.
 
+With `QUARRY_TEST_REQUIRE_PACKAGES` set to any non-empty value, a missing
+consult or wgrep is an error instead of skipped tests. CI and the release
+workflow set it.
+
 Rerun the suite with these packages after upgrading consult, wgrep or
 transient: quarry uses internals of each (ADRs 0008, 0013, 0016, 0018).
 

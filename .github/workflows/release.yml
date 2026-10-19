@@ -22,7 +22,7 @@ jobs:
       # The workflow sets EMRS_MODULE_FILE and EMRS_EL_DIR, so run-ert.sh
       # tests the released file and builds nothing.
       test-command: |
-        export QUARRY_TEST_LOAD_PATH
+        export QUARRY_TEST_LOAD_PATH QUARRY_TEST_REQUIRE_PACKAGES=1
         QUARRY_TEST_LOAD_PATH=$(tests/install-test-packages.sh)
         tests/run-ert.sh
       publish: ${{ startsWith(github.ref, 'refs/tags/v') }}

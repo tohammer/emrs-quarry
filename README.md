@@ -29,7 +29,7 @@ elsewhere you build it with cargo.
 | Linux | tested |
 | macOS | ERT suite in CI only; file watching not used by hand |
 | Windows | untested; no prebuilt module |
-| Prebuilt module for Linux x86-64 and aarch64, macOS aarch64 | ERT suite in the release workflow; installed by hand on Linux |
+| Prebuilt module for Linux x86-64 and aarch64, macOS aarch64 | ERT suite in the release workflow; not yet installed by hand |
 | Emacs 31.1 | tested |
 | Emacs 30.1 | ERT suite in CI only |
 | Doom Emacs recipe | tested |
@@ -223,30 +223,43 @@ quarry to the release.
      `<commit>` is the first field of
      `git ls-remote https://github.com/tohammer/emrs-quarry refs/tags/v0.1.0`.
      Then run `doom sync`; without Rust it warns that the build failed.
+   - straight.el without Doom (untested): check out the tag in
+     `straight/repos/emrs-quarry/` and run `M-x straight-freeze-versions`
+     to keep it.
    - elpaca (untested): add `:tag "v0.1.0"` to the recipe.
    - package-vc (untested): pass the tag as the second argument,
      `(package-vc-install '(quarry :url "https://github.com/tohammer/emrs-quarry" :lisp-dir "lisp") "v0.1.0")`.
-   - Manual installation: `git checkout v0.1.0` in the clone.
+   - Manual installation: `git checkout v0.1.0` in the clone. Without
+     Rust, take `emrs.el` from a clone of emrs instead of through
+     `cargo metadata`.
 
    emrs needs no pin.
 2. Download the file for your platform and `SHA256SUMS` from the release.
-3. Check the file. On Linux:
+3. In the download directory, check the file. `<file>` is its name, such
+   as `quarry-module-linux-x86_64.so`. On Linux:
 
    ```sh
-   sha256sum --check --ignore-missing SHA256SUMS
+   grep '<file>' SHA256SUMS | sha256sum --check
    ```
 
    On macOS:
 
    ```sh
-   shasum -a 256 --check --ignore-missing SHA256SUMS
+   grep '<file>' SHA256SUMS | shasum -a 256 --check
    ```
 
+   It prints `<file>: OK`.
+
 4. Rename the file to `quarry-module.so` (macOS: `quarry-module.dylib`)
-   and put it in the `lisp/` directory of quarry's repository. For Doom
-   that is `.local/straight/repos/emrs-quarry/lisp/` in your Doom
-   directory (`~/.config/emacs` or `~/.emacs.d`). For the manual
-   installation, any directory on `load-path` works too.
+   and put it in the `lisp/` directory of quarry's repository:
+   - Doom: `.local/straight/repos/emrs-quarry/lisp/` in your Doom
+     directory (`~/.config/emacs` or `~/.emacs.d`).
+   - straight.el: `straight/repos/emrs-quarry/lisp/` in
+     `user-emacs-directory`.
+   - elpaca: `elpaca/repos/quarry/lisp/` in `user-emacs-directory`.
+   - package-vc: `elpa/quarry/lisp/` in `user-emacs-directory`.
+   - Manual installation: the clone's `lisp/`, or any directory on
+     `load-path`.
 5. Restart Emacs.
 
 To update, move the pin to the new tag and replace the file.
@@ -508,6 +521,14 @@ replace templates, refuses globs with `/` and excluded file types, and
 With a prebuilt module: the file is for another platform, or on Linux
 your glibc is older than 2.28 (`ldd --version` shows it). Build the
 module with `M-x quarry-build-module` instead.
+
+On macOS, a file downloaded with a browser carries a quarantine
+attribute. Whether that stops Emacs from loading it is untested; if it
+does, remove the attribute and restart Emacs:
+
+```sh
+xattr -d com.apple.quarantine quarry-module.dylib
+```
 
 ### `File watching for ... failed`
 
