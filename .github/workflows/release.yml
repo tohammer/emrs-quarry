@@ -1,0 +1,28 @@
+# Builds the module for each platform with emrs's reusable release workflow,
+# runs the ERT suite against each file and, on a tag v<version>, attaches
+# the files and SHA256SUMS to the release (spec 2026-10-19-prebuilt-modules).
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    uses: tohammer/emrs/.github/workflows/module-release.yml@master
+    with:
+      package: quarry
+      # Windows is untested (README, Status).
+      platforms: '["linux-x86_64", "linux-aarch64", "macos-aarch64"]'
+      # The workflow sets EMRS_MODULE_FILE and EMRS_EL_DIR, so run-ert.sh
+      # tests the released file and builds nothing.
+      test-command: |
+        export QUARRY_TEST_LOAD_PATH QUARRY_TEST_REQUIRE_PACKAGES=1
+        QUARRY_TEST_LOAD_PATH=$(tests/install-test-packages.sh)
+        tests/run-ert.sh
+      publish: ${{ startsWith(github.ref, 'refs/tags/v') }}

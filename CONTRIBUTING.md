@@ -59,6 +59,15 @@ EMACS=/path/to/emacs tests/run-ert.sh
 `tests/run-ert.sh` tests copies of the Lisp files in `target/elisp` with
 the debug module, so a module built in `lisp/` does not affect them.
 
+With `EMRS_MODULE_FILE` the script tests that module and builds nothing.
+Name the file `quarry-module.so`, `.dylib` or `.dll`. `EMRS_EL_DIR` names
+the directory of `emrs.el`; without it the script finds `emrs.el` through
+Cargo. The emrs release workflow uses both to test each released module:
+
+```sh
+EMRS_MODULE_FILE=/tmp/quarry-module.so EMRS_EL_DIR=/path/to/emrs/elisp tests/run-ert.sh
+```
+
 Some tests need packages, found through `QUARRY_TEST_LOAD_PATH`, a
 colon-separated list of directories added to `load-path`:
 
@@ -74,6 +83,10 @@ QUARRY_TEST_LOAD_PATH=~/.emacs.d/straight/build/consult:~/.emacs.d/straight/buil
   still run.
 - `tests/quarry-grep-wgrep-tests.el` needs wgrep. Without it those tests
   are skipped, except the one for the refusals of `e`.
+
+With `QUARRY_TEST_REQUIRE_PACKAGES` set to any non-empty value, a missing
+consult or wgrep is an error instead of skipped tests. CI and the release
+workflow set it.
 
 Rerun the suite with these packages after upgrading consult, wgrep or
 transient: quarry uses internals of each (ADRs 0008, 0013, 0016, 0018).
@@ -103,6 +116,38 @@ twice each. It compares every file with the expected content and exits
 non-zero when one differs. Trees go to a temporary directory under
 `$QUARRY_BENCH_TMP`, `$TMPDIR` or `/tmp` and are removed. Results are in
 `docs/architecture/grep.md`, "Cost of large change sets".
+
+## Releasing
+
+`.github/workflows/release.yml` calls emrs's reusable
+`module-release.yml`. A tag `v<version>` builds the module for
+linux-x86_64, linux-aarch64 and macos-aarch64, runs the smoke test and
+the ERT suite against each file on Emacs 30.1 and 31.1, and publishes the
+files and `SHA256SUMS` to the release. Started by hand (`gh workflow run
+release.yml`), it builds and tests without publishing.
+
+Versions follow ADR 0026: between releases `Cargo.toml` and the
+`;; Version:` header of `lisp/quarry.el` carry the same
+`<next>-snapshot`.
+
+1. On a branch, set both to the release version, for example `0.2.0`,
+   run `cargo build` to update `Cargo.lock`, and merge the pull request.
+2. Tag the merge commit and push the tag:
+
+   ```sh
+   git switch master && git pull --ff-only
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+   Use a lightweight tag: the README tells Doom users to pin the commit
+   that `git ls-remote` shows for it.
+3. Check the release: three module files and `SHA256SUMS`.
+4. On a branch, set both versions to the next snapshot, for example
+   `0.3.0-snapshot`, and merge it.
+
+If a platform's tests fail, nothing is published. Fix the cause, delete
+the tag (`git push origin :v0.2.0`, `git tag -d v0.2.0`) and tag again.
 
 ## CI
 
