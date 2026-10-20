@@ -193,7 +193,7 @@ Manual:
   package` passes all tests without building, and a run without the
   variables is unchanged; `CONTRIBUTING.md` "Tests" documents the
   variables. Can run in parallel with task 1.
-- [ ] 3. Add `.github/workflows/release.yml` as in Design. *Done when*
+- [x] 3. Add `.github/workflows/release.yml` as in Design. *Done when*
   the workflow file is on the branch, `actionlint` (if available) passes,
   and after the merge a `workflow_dispatch` run on `master` passes without
   publishing. Depends on tasks 1 and 2.
@@ -204,7 +204,7 @@ Manual:
   "Distribution" drops the items this spec closes. *Done when* the docs
   describe the state after the release and every command in them was run
   or is listed as not run. Can run in parallel with task 3.
-- [ ] 5. Release v0.1.0: with the user's go-ahead, push the tag `v0.1.0`
+- [x] 5. Release v0.1.0: with the user's go-ahead, push the tag `v0.1.0`
   on `master`. *Done when* the release has the three files and
   `SHA256SUMS`, and the checksums verify on downloaded copies.
 - [ ] 6. Bump to `0.2.0-snapshot` in `Cargo.toml` (and `Cargo.lock`) and
