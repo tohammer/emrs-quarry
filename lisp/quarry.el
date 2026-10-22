@@ -23,15 +23,14 @@
 ;; the user commands.  `quarry-find-file-in-directory' answers a
 ;; directory below a project root from that project's index, and any
 ;; other local directory from a one-shot instance: one walk without a
-;; watcher, stopped when the prompt ends.  The module is the file
-;; quarry-build.el installs next to this one, or `quarry-module' plus
+;; watcher, stopped when the prompt ends.  The module comes from
+;; emrs-install.el (installed per user), or is `quarry-module' plus
 ;; `module-file-suffix' on `load-path'.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'emrs)
-(require 'quarry-build)
 (require 'quarry-core)
 (require 'project)
 (require 'seq)

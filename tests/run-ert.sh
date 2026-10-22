@@ -36,10 +36,9 @@ else
 fi
 out="$root/target/elisp"
 mkdir -p "$out"
-# quarry prefers a module built next to its own quarry.el (lisp/, by
-# quarry-build-module).  Test copies of the Lisp files, so the debug
-# module below is the one under test.  Remove old modules too, so none
-# from an earlier run is left over.
+# Test copies of the Lisp files and the debug module, which the installer
+# finds through `load-path' (this directory).  Remove old modules too, so
+# none from an earlier run is left over.
 rm -f "$out"/*.el "$out"/*.elc "$out"/quarry-module.*
 cp lisp/*.el "$out/"
 if [ -n "${EMRS_MODULE_FILE:-}" ]; then
@@ -86,6 +85,7 @@ if [ -n "${missing:-}" ] && [ -n "${QUARRY_TEST_REQUIRE_PACKAGES:-}" ]; then
 fi
 exec "${EMACS:-emacs}" --batch --module-assertions \
     -L "$out" -L "$emrs_el" "$@" \
+    --eval "(setq emrs-install-directory (file-name-as-directory (make-temp-file \"emrs-install\" t)) emrs-install-download 'never)" \
     -l "$root/tests/quarry-tests.el" \
     -l "$root/tests/quarry-consult-tests.el" \
     -l "$root/tests/quarry-consult-grep-tests.el" \

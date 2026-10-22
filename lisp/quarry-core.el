@@ -11,17 +11,23 @@
 
 ;;; Commentary:
 
-;; What the quarry tools share: finding the module file, loading it (with
-;; the offer to build it when it is missing) and the options that apply to
-;; both the file finder (quarry.el) and the grep tool (quarry-grep.el).
-;; Neither tool needs the other, so this file requires neither.
+;; What the quarry tools share: registering the module with emrs-install.el
+;; (which finds, downloads or builds it), loading it and the options that
+;; apply to both the file finder (quarry.el) and the grep tool
+;; (quarry-grep.el).  Neither tool needs the other, so this file requires
+;; neither.
 
 ;;; Code:
 
 (require 'emrs)
-(require 'quarry-build)
+(require 'emrs-install)
 
 ;;;; Options
+
+(defgroup quarry nil
+  "Fast project file finder backed by a Rust module."
+  :group 'files
+  :prefix "quarry-")
 
 (defcustom quarry-include-hidden t
   "Non-nil means hidden files are included."
@@ -36,41 +42,21 @@ They are relative to the project root or the searched directory."
 
 ;;;; Module
 
-(defun quarry--module-file ()
-  "Return the module file next to the true quarry.el, or nil.
-Nil when the repository cannot be found or the file does not exist."
-  (let* ((repo (ignore-errors (quarry-build--find-repo)))
-         (file (and repo (quarry-build--module-file repo))))
-    (and file (file-exists-p file) file)))
+(defconst quarry-module-version "0.2.0-snapshot"
+  "The version of the quarry module this Lisp expects.
+It must equal `version' in Cargo.toml and the \";; Version:\" header of
+quarry.el.")
 
-(defun quarry--offer-build ()
-  "Offer to build the missing module; signal a `user-error' either way."
-  (let ((repo (ignore-errors (quarry-build--find-repo))))
-    (when (get-buffer-process quarry-build--buffer)
-      (user-error "The quarry module is being built; run the command again when it is done"))
-    (if (and repo
-             (file-exists-p (expand-file-name "Cargo.toml" repo))
-             (not noninteractive)
-             (y-or-n-p "quarry module not built. Build it now with cargo? "))
-        (progn
-          (quarry-build-module)
-          (user-error "Building the quarry module; run the command again when it is done"))
-      (user-error "Cannot load the quarry module: install it as quarry-module%s on `load-path', or run M-x quarry-build-module"
-                  module-file-suffix))))
+(emrs-install-register 'quarry
+  :version quarry-module-version
+  :url "https://github.com/tohammer/emrs-quarry/releases/download"
+  :source (or load-file-name buffer-file-name))
 
 (defun quarry--load-module ()
-  "Load the quarry module, or signal a `user-error' that says what to do."
-  (condition-case err
-      (emrs-load-module 'quarry (quarry--module-file))
-    (file-missing
-     (quarry--offer-build))
-    (error
-     (let ((file (quarry--module-file)))
-       (if file
-           (user-error "Loading %s failed: %s; rebuild it with M-x quarry-build-module"
-                       file (error-message-string err))
-         (user-error "Cannot load the quarry module (install it as quarry-module%s on `load-path'): %s"
-                     module-file-suffix (error-message-string err)))))))
+  "Load the quarry module through emrs-install, or signal a `user-error'.
+The installer finds, downloads or builds the module and says what to do
+when it cannot."
+  (emrs-install-load 'quarry))
 
 (provide 'quarry-core)
 ;;; quarry-core.el ends here

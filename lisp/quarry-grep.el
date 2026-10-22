@@ -307,7 +307,7 @@ module that is loaded has no grep service."
             ;; Emacs cannot unload a module, so new Lisp can meet a
             ;; module from before the grep service existed.
             (emrs-error
-             (user-error "The loaded quarry module is older than quarry-grep (%s); rebuild it with M-x quarry-build-module and restart Emacs"
+             (user-error "The loaded quarry module is older than quarry-grep (%s); install it again with M-x emrs-install-module and restart Emacs"
                          (nth 2 err)))))))
 
 (defun quarry-grep--type-list ()
@@ -878,7 +878,7 @@ cannot run as long as that module is loaded."
                                    (pop quarry-grep--past)
                                  search))
     (quarry-grep--run quarry-grep--current)
-    (message "The loaded quarry module is older than replace; rebuild it with M-x quarry-build-module and restart Emacs")))
+    (message "The loaded quarry module is older than replace; install it again with M-x emrs-install-module and restart Emacs")))
 
 (defun quarry-grep--on-batch (buffer serial items)
   "Show ITEMS, stream items of search SERIAL, in BUFFER.

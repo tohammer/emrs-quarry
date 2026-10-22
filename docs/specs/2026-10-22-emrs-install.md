@@ -235,7 +235,7 @@ checked after the merge, see next-steps), macOS by hand.
 - [x] 1. Bump the emrs pin to `8a3fa35` and `Package-Requires` to emrs
   `0.2.0`. *Done when* `cargo test` and `tests/run-ert.sh` pass, and
   `emrs-install.el` is in the emrs checkout Cargo resolved.
-- [ ] 2. Register the module and load it with `emrs-install-load`; add
+- [x] 2. Register the module and load it with `emrs-install-load`; add
   `quarry-module-version`; remove `lisp/quarry-build.el` and the
   functions listed under Design; move the `defgroup`; change quarry-grep's
   two messages; update `tests/run-ert.sh` and `bench/run-bench.sh` as

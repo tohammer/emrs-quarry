@@ -8,6 +8,8 @@
 
 (require 'ert)
 (require 'quarry)
+(require 'lisp-mnt)
+(require 'emrs-install)
 
 ;; `project-current' with MAYBE-PROMPT records the project in
 ;; `project-list-file'.  Keep the user's file out of the tests (parallel
@@ -575,354 +577,50 @@ UIs ask for the empty input once and do not refresh while indexing runs."
       (delete-directory dir t))))
 
 (ert-deftest quarry-test-module-not-found ()
+  "The `user-error' of the installer reaches the caller; no instance is left."
   (let ((dir (quarry-test--make-tree nil)))
     (unwind-protect
-        (cl-letf (((symbol-function 'emrs-load-module)
-                   (lambda (&rest _) (signal 'file-missing '("Cannot open load file" "quarry-module")))))
+        (cl-letf (((symbol-function 'emrs-install-load)
+                   (lambda (&rest _) (user-error "Distinctive installer failure"))))
           (let ((err (should-error (quarry--ensure dir) :type 'user-error)))
-            (should (string-match-p "Cannot load the quarry module" (cadr err)))
-            (should (string-match-p "load-path" (cadr err))))
+            (should (equal (cadr err) "Distinctive installer failure")))
           (should-not (quarry--lookup dir)))
       (delete-directory dir t))))
 
-;;;; Building and finding the module
+(defconst quarry-test--file (or load-file-name buffer-file-name)
+  "This file, to find the repository root.")
 
-(defun quarry-test--make-repo (&optional cargo-toml)
-  "Create a temp repository with lisp/quarry.el; return its root.
-Cargo.toml is created unless CARGO-TOML is the symbol `none'."
-  (quarry-test--make-tree
-   (append '("lisp/quarry.el")
-           (unless (eq cargo-toml 'none) '("Cargo.toml")))))
+(defun quarry-test--root ()
+  "Return the repository root, the directory above tests/ holding Cargo.toml."
+  (file-name-as-directory
+   (file-truename (locate-dominating-file quarry-test--file "Cargo.toml"))))
 
-(defun quarry-test--fake-cargo (dir exit-code &optional args-file sleep)
-  "Write a fake cargo script into DIR and return its name.
-It creates the release library in the --target-dir it is given and exits
-with EXIT-CODE (without creating anything when that is not 0).  With
-ARGS-FILE it records its arguments there; with SLEEP it first sleeps that
-many seconds."
-  (let ((script (expand-file-name "fake-cargo" dir))
-        (library (file-name-nondirectory (quarry-build--library "/"))))
-    (with-temp-file script
-      (insert "#!/bin/sh\n"
-              (if args-file (format "echo \"$@\" > '%s'\n" args-file) "")
-              (if sleep (format "sleep %s\n" sleep) "")
-              "td=target\n"
-              "while [ $# -gt 0 ]; do [ \"$1\" = --target-dir ] && td=$2; shift; done\n"
-              (if (zerop exit-code)
-                  (format "mkdir -p \"$td/release\" && echo built > \"$td/release/%s\"\n"
-                          library)
-                "echo 'error: distinctive failure line'\n")
-              (format "exit %d\n" exit-code)))
-    (set-file-modes script #o755)
-    script))
+(ert-deftest quarry-test-module-versions-agree ()
+  "Cargo.toml, the Version header, the constant and the loaded module agree."
+  (let* ((root (quarry-test--root))
+         (cargo (with-temp-buffer
+                  (insert-file-contents (expand-file-name "Cargo.toml" root))
+                  (goto-char (point-min))
+                  (re-search-forward "^version *= *\"\\([^\"]+\\)\"")
+                  (match-string 1)))
+         (header (with-temp-buffer
+                   (insert-file-contents (expand-file-name "lisp/quarry.el" root))
+                   (lm-version)))
+         (loaded (progn (quarry--load-module)
+                        (plist-get (emrs-module-info 'quarry) :version))))
+    (should (equal cargo header))
+    (should (equal cargo quarry-module-version))
+    (should (equal cargo loaded))))
 
-(defmacro quarry-test--with-build (vars &rest body)
-  "Run BODY with `load-path' reaching a symlinked quarry.el of a temp repo.
-VARS is (REPO CARGO-DIR [CARGO-TOML]): REPO is bound to the repository
-root and CARGO-DIR to a directory for fake programs.  The symlink lives
-in a separate build directory, as with straight.  `quarry-build--file'
-is nil, so the repository is found through `load-path'."
-  (declare (indent 1))
-  (let ((repo (nth 0 vars)) (cdir (nth 1 vars)) (build (make-symbol "build")))
-    `(let* ((,repo (quarry-test--make-repo ,(nth 2 vars)))
-            (,cdir (quarry-test--make-tree nil))
-            (,build (quarry-test--make-tree nil))
-            (quarry-build--file nil)
-            (load-path (cons (directory-file-name ,build) load-path)))
-       (unwind-protect
-           (progn
-             (make-symbolic-link (expand-file-name "lisp/quarry.el" ,repo)
-                                 (expand-file-name "quarry.el" ,build))
-             ,@body)
-         (when (get-process quarry-build--buffer)
-           (delete-process quarry-build--buffer))
-         (when (get-buffer quarry-build--buffer)
-           (let ((kill-buffer-query-functions nil))
-             (kill-buffer quarry-build--buffer)))
-         (delete-directory ,repo t)
-         (delete-directory ,cdir t)
-         (delete-directory ,build t)))))
-
-(ert-deftest quarry-test-build-repo-through-symlink ()
-  "The repository is found through a symlinked quarry.el."
-  (quarry-test--with-build (repo cdir)
-    (should (equal (file-truename (quarry-build--repo)) (file-truename repo)))
-    (should (equal (quarry-build--module-file (quarry-build--repo))
-                   (expand-file-name (concat "lisp/quarry-module" module-file-suffix)
-                                     (quarry-build--repo))))))
-
-(ert-deftest quarry-test-build-repo-without-cargo-toml ()
-  (quarry-test--with-build (repo cdir 'none)
-    (let ((err (should-error (quarry-build--repo) :type 'user-error)))
-      (should (string-match-p "quarry source not found" (cadr err)))
-      (should (string-match-p "README" (cadr err))))))
-
-(ert-deftest quarry-test-build-sync-installs ()
-  "A successful sync build installs the module file and returns non-nil."
-  (quarry-test--with-build (repo cdir)
-    (let ((quarry-build-cargo-program (quarry-test--fake-cargo cdir 0)))
-      (should (quarry-build-module-sync))
-      (let ((module (expand-file-name
-                     (concat "lisp/quarry-module" module-file-suffix) repo)))
-        (should (file-exists-p module))
-        (should (equal (quarry--module-file) (file-truename module)))
-        ;; No temporary file is left behind.
-        (should (equal (directory-files (expand-file-name "lisp" repo) nil "\\`quarry-module")
-                       (list (file-name-nondirectory module))))))))
-
-(ert-deftest quarry-test-build-sync-failure-warns ()
-  "A failing build leaves no module, warns and does not signal."
-  (quarry-test--with-build (repo cdir)
-    (let ((quarry-build-cargo-program (quarry-test--fake-cargo cdir 1))
-          (warnings nil))
-      (cl-letf (((symbol-function 'display-warning)
-                 (lambda (type msg &rest _) (push (cons type msg) warnings))))
-        (should-not (quarry-build-module-sync)))
-      (should-not (file-exists-p (quarry-build--module-file repo)))
-      (should (eq (caar warnings) 'quarry))
-      (should (string-match-p "quarry-build-module" (cdar warnings))))))
-
-(ert-deftest quarry-test-build-sync-missing-program ()
-  "A missing cargo and a missing repository only warn."
-  (quarry-test--with-build (repo cdir)
-    (let ((quarry-build-cargo-program "quarry-no-such-program")
-          (warnings nil))
-      (cl-letf (((symbol-function 'display-warning)
-                 (lambda (type msg &rest _) (push (cons type msg) warnings))))
-        (should-not (quarry-build-module-sync))
-        (should (string-match-p "quarry-no-such-program" (cdar warnings)))
-        (delete-file (expand-file-name "Cargo.toml" repo))
-        (should-not (quarry-build-module-sync))
-        (should (string-match-p "source not found" (cdar warnings)))
-        (should (= (length warnings) 2))))))
-
-(ert-deftest quarry-test-build-install-replaces-by-rename ()
-  "Installing over an existing module file gives it a new inode."
-  (quarry-test--with-build (repo cdir)
-    (let* ((quarry-build-cargo-program (quarry-test--fake-cargo cdir 0))
-           (module (quarry-build--module-file repo)))
-      (write-region "old" nil module nil 'silent)
-      (let ((inode (file-attribute-inode-number (file-attributes module))))
-        (should (quarry-build-module-sync))
-        (should-not (equal inode (file-attribute-inode-number
-                                  (file-attributes module))))
-        (should (equal (with-temp-buffer (insert-file-contents module)
-                                         (string-trim (buffer-string)))
-                       "built"))))))
-
-(ert-deftest quarry-test-build-own-location-wins ()
-  "The repository of quarry-build.el wins over another quarry.el on `load-path'."
-  (quarry-test--with-build (repo cdir)
-    (let* ((stale (quarry-test--make-tree '("lisp/quarry.el")))
-           (load-path (cons (expand-file-name "lisp" stale) load-path))
-           (own (expand-file-name "lisp/quarry-build.el" repo)))
-      (unwind-protect
-          (progn
-            (write-region "" nil own nil 'silent)
-            (let ((quarry-build--file nil))
-              (should (equal (quarry-build--find-repo) (file-truename stale))))
-            (let ((quarry-build--file own))
-              (should (equal (quarry-build--find-repo) (file-truename repo)))
-              (should (equal (file-truename (quarry-build--repo))
-                             (file-truename repo)))))
-        (delete-directory stale t)))))
-
-(ert-deftest quarry-test-build-elc-sibling ()
-  "A .elc in a build directory resolves to the repository of its .el symlink."
-  (quarry-test--with-build (repo cdir)
-    (let* ((other (quarry-test--make-tree nil))
-           (stale (quarry-test--make-tree '("lisp/quarry.el")))
-           (load-path (cons (expand-file-name "lisp" stale) load-path))
-           (own (expand-file-name "lisp/quarry-build.el" repo))
-           (quarry-build--file (expand-file-name "quarry-build.elc" other)))
-      (unwind-protect
-          (progn
-            (write-region "" nil own nil 'silent)
-            (write-region "" nil quarry-build--file nil 'silent)
-            (make-symbolic-link own (expand-file-name "quarry-build.el" other))
-            (should (equal (quarry-build--find-repo) (file-truename repo)))
-            ;; Without the .el sibling, quarry.el on `load-path' is used.
-            (delete-file (expand-file-name "quarry-build.el" other))
-            (should (equal (quarry-build--find-repo) (file-truename stale))))
-        (delete-directory other t)
-        (delete-directory stale t)))))
-
-(ert-deftest quarry-test-build-passes-target-dir ()
-  "Both entry points pass an absolute --target-dir inside the repository."
-  (quarry-test--with-build (repo cdir)
-    (let* ((args (expand-file-name "args" cdir))
-           (quarry-build-cargo-program (quarry-test--fake-cargo cdir 0 args))
-           ;; The repository is found through a symlink, so cargo gets
-           ;; its true name; on macOS the temporary directory is itself
-           ;; below a symlink.
-           (target (expand-file-name "target" (file-truename repo)))
-           (module (quarry-build--module-file repo)))
-      (should (quarry-build-module-sync))
-      (let ((recorded (with-temp-buffer (insert-file-contents args) (buffer-string))))
-        (should (string-match-p "--target-dir" recorded))
-        (should (string-match-p (regexp-quote target) recorded)))
-      (delete-file module)
-      (delete-file args)
-      (quarry-test--run-async)
-      (let ((recorded (with-temp-buffer (insert-file-contents args) (buffer-string))))
-        (should (string-match-p (regexp-quote (concat "--target-dir " target)) recorded)))
-      (should (file-exists-p module)))))
-
-(ert-deftest quarry-test-build-sync-batch-failure-shows-output ()
-  "In batch mode the warning carries the cargo output."
-  (quarry-test--with-build (repo cdir)
-    (let ((quarry-build-cargo-program (quarry-test--fake-cargo cdir 1))
-          (noninteractive t)
-          (warnings nil))
-      (cl-letf (((symbol-function 'display-warning)
-                 (lambda (_type msg &rest _) (push msg warnings))))
-        (should-not (quarry-build-module-sync)))
-      (should (string-match-p "distinctive failure line" (car warnings))))))
-
-(ert-deftest quarry-test-build-recompile-installs ()
-  "The finish hook installs for a rebuild in the build buffer."
-  (quarry-test--with-build (repo cdir)
-    (let ((quarry-build-cargo-program (quarry-test--fake-cargo cdir 0))
-          (module (quarry-build--module-file repo)))
-      (quarry-test--run-async)
-      (should (file-exists-p module))
-      (delete-file module)
-      (cl-letf (((symbol-function 'message) #'ignore))
-        ;; What `recompile' ends up doing when the new process exits.
-        (run-hook-with-args 'compilation-finish-functions
-                            (get-buffer quarry-build--buffer) "finished\n"))
-      (should (file-exists-p module))
-      ;; Other buffers and failures do not install.
-      (delete-file module)
-      (cl-letf (((symbol-function 'message) #'ignore))
-        (run-hook-with-args 'compilation-finish-functions
-                            (get-buffer quarry-build--buffer)
-                            "exited abnormally with code 1\n")
-        (with-temp-buffer
-          (run-hook-with-args 'compilation-finish-functions
-                              (current-buffer) "finished\n")))
-      (should-not (file-exists-p module)))))
-
-(ert-deftest quarry-test-build-recompile-command ()
-  "`recompile' in the build buffer runs the build again and installs."
-  (quarry-test--with-build (repo cdir)
-    (let ((quarry-build-cargo-program (quarry-test--fake-cargo cdir 0))
-          (module (quarry-build--module-file repo)))
-      (quarry-test--run-async)
-      (delete-file module)
-      (cl-letf (((symbol-function 'message) #'ignore))
-        (with-current-buffer quarry-build--buffer
-          (recompile))
-        (should (quarry-test--wait (lambda () (file-exists-p module)) 10))))))
-
-(ert-deftest quarry-test-build-concurrent-signals ()
-  "A second build while one runs signals a user-error."
-  (quarry-test--with-build (repo cdir)
-    (let ((quarry-build-cargo-program (quarry-test--fake-cargo cdir 0 nil 1))
-          (proc nil))
-      (cl-letf (((symbol-function 'message) #'ignore))
-        (setq proc (quarry-build-module))
-        (should (process-live-p proc))
-        (let ((err (should-error (quarry-build-module) :type 'user-error)))
-          (should (string-match-p "being built" (cadr err))))
-        (should (quarry-test--wait (lambda () (not (process-live-p proc))) 10))))))
-
-(ert-deftest quarry-test-offer-build-skips-prompt-while-building ()
-  "No prompt is shown while a build runs."
-  (quarry-test--with-build (repo cdir)
-    (let ((quarry-build-cargo-program (quarry-test--fake-cargo cdir 0 nil 1))
-          (noninteractive nil)
-          (proc nil))
-      (cl-letf (((symbol-function 'message) #'ignore)
-                ((symbol-function 'y-or-n-p)
-                 (lambda (&rest _) (ert-fail "y-or-n-p called during a build"))))
-        (setq proc (quarry-build-module))
-        (let ((err (should-error (quarry--offer-build) :type 'user-error)))
-          (should (string-match-p "is being built" (cadr err))))
-        (should (quarry-test--wait (lambda () (not (process-live-p proc))) 10))))))
-
-(ert-deftest quarry-test-start-module-load-failure-message ()
-  "A module file that exists but fails to load is reported as such."
-  (quarry-test--with-build (repo cdir)
-    (write-region "" nil (quarry-build--module-file repo) nil 'silent)
-    (cl-letf (((symbol-function 'emrs-load-module)
-               (lambda (&rest _) (signal 'error '("bad module")))))
-      (let ((err (should-error (quarry--start repo) :type 'user-error)))
-        (should (string-match-p "Loading .*quarry-module.* failed: bad module" (cadr err)))
-        (should (string-match-p "M-x quarry-build-module" (cadr err)))))))
-
-(defun quarry-test--run-async (&optional wait)
-  "Run `quarry-build-module', wait for the process; return the messages.
-Wait for WAIT seconds at most (default 10)."
-  (let ((msgs nil))
-    (cl-letf (((symbol-function 'message)
-               (lambda (fmt &rest args) (push (apply #'format fmt args) msgs))))
-      (let ((proc (quarry-build-module)))
-        (should (quarry-test--wait (lambda () (not (process-live-p proc)))
-                                    (or wait 10)))
-        ;; The sentinel may run after the process has exited.
-        (quarry-test--wait (lambda () msgs) 3)))
-    (nreverse msgs)))
-
-(ert-deftest quarry-test-build-async-installs ()
-  (quarry-test--with-build (repo cdir)
-    (let ((quarry-build-cargo-program (quarry-test--fake-cargo cdir 0)))
-      (should (member "quarry module built" (quarry-test--run-async)))
-      (should (file-exists-p (quarry-build--module-file repo)))
-      (should (get-buffer quarry-build--buffer)))))
-
-(ert-deftest quarry-test-build-async-failure ()
-  (quarry-test--with-build (repo cdir)
-    (let ((quarry-build-cargo-program (quarry-test--fake-cargo cdir 1)))
-      (should (cl-some (lambda (m) (string-match-p "build failed" m))
-                       (quarry-test--run-async)))
-      (should-not (file-exists-p (quarry-build--module-file repo))))))
-
-(ert-deftest quarry-test-build-async-missing-program ()
-  (quarry-test--with-build (repo cdir)
-    (let ((quarry-build-cargo-program "quarry-no-such-program"))
-      (let ((err (should-error (quarry-build-module) :type 'user-error)))
-        (should (string-match-p "quarry-build-cargo-program" (cadr err)))))))
-
-(ert-deftest quarry-test-start-module-lookup ()
-  "`quarry--start' passes the module file when it exists, else nil."
-  (quarry-test--with-build (repo cdir)
-    (let ((loaded nil))
-      (cl-letf (((symbol-function 'emrs-load-module)
-                 (lambda (_name &optional file) (push file loaded) (signal 'error '("stop")))))
-        (should-error (quarry--start repo) :type 'user-error)
-        (should (equal loaded '(nil)))
-        (write-region "" nil (quarry-build--module-file repo) nil 'silent)
-        (should-error (quarry--start repo) :type 'user-error)
-        (should (equal (car loaded)
-                       (file-truename (quarry-build--module-file repo))))))))
-
-(ert-deftest quarry-test-missing-module-offer ()
-  "A missing module offers a build; yes starts it, no gives the hint."
-  (quarry-test--with-build (repo cdir)
-    (let ((built 0) (asked 0) (answer t) (noninteractive nil))
-      (cl-letf (((symbol-function 'emrs-load-module)
-                 (lambda (&rest _) (signal 'file-missing '("Cannot open load file" "quarry-module"))))
-                ((symbol-function 'y-or-n-p)
-                 (lambda (&rest _) (cl-incf asked) answer))
-                ((symbol-function 'quarry-build-module)
-                 (lambda () (cl-incf built))))
-        (let ((err (should-error (quarry--start repo) :type 'user-error)))
-          (should (string-match-p "Building the quarry module" (cadr err)))
-          (should (= built 1)))
-        (setq answer nil)
-        (let ((err (should-error (quarry--start repo) :type 'user-error)))
-          (should (string-match-p "M-x quarry-build-module" (cadr err)))
-          (should (string-match-p "load-path" (cadr err)))
-          (should (= built 1))
-          (should (= asked 2)))
-        ;; Batch mode and a missing Cargo.toml do not ask.
-        (setq noninteractive t)
-        (should-error (quarry--start repo) :type 'user-error)
-        (setq noninteractive nil)
-        (delete-file (expand-file-name "Cargo.toml" repo))
-        (should-error (quarry--start repo) :type 'user-error)
-        (should (= asked 2))))))
+(ert-deftest quarry-test-module-registration ()
+  "The module is registered with the constant's version, the release URL and this checkout."
+  (let ((entry (gethash 'quarry emrs-install--registry)))
+    (should (equal (plist-get entry :version) quarry-module-version))
+    (should (equal (plist-get entry :url)
+                   "https://github.com/tohammer/emrs-quarry/releases/download"))
+    (should (equal (file-name-as-directory
+                    (file-truename (emrs-install--checkout 'quarry)))
+                   (quarry-test--root)))))
 
 (ert-deftest quarry-test-failed-instance-table ()
   "A table on a failed instance starts it once and reports it once."
