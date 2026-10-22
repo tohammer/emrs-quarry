@@ -1,7 +1,7 @@
 # 0006 — The module is built locally and lives next to projdex.el
 
 Date: 2026-10-09
-Status: accepted
+Status: superseded by ADR 0027
 
 ## Context
 
