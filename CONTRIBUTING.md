@@ -125,7 +125,8 @@ non-zero when one differs. Trees go to a temporary directory under
 ## Releasing
 
 `.github/workflows/release.yml` calls emrs's reusable
-`module-release.yml`. A tag `v<version>` builds the module for
+`module-release.yml`, pinned with its `cargo-emacs` input to the emrs
+release of the `emrs` dependency in `Cargo.toml`. A tag `v<version>` builds the module for
 linux-x86_64, linux-aarch64 and macos-aarch64, runs the smoke test and
 the ERT suite against each file on Emacs 30.1 and 31.1, and publishes the
 files and `SHA256SUMS` to the release. Started by hand (`gh workflow run

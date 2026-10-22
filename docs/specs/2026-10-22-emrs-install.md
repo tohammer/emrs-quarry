@@ -43,8 +43,8 @@ Out:
 
 - A `:pre-build` step (ADR 0027).
 - Migration for users of v0.1.0 (there are none besides the author).
-- Changes to the release workflow: its file names already match what the
-  installer downloads (`quarry-module-<platform><suffix>` and
+- Changes to the release workflow beyond the emrs pin: its file names
+  already match what the installer downloads (`quarry-module-<platform><suffix>` and
   `SHA256SUMS` under `v<version>/`).
 - MELPA, Windows.
 
@@ -265,3 +265,7 @@ checked after the merge, see next-steps), macOS by hand.
 - `quarry-module-version` is a `defconst`, which a binding before loading
   cannot change, so the download check registered `quarry` again with
   `:version "0.1.0"` after loading, with the same URL and `:source`.
+- After comparing with emrs-dirdiff, the release workflow pins emrs's
+  `module-release.yml` and its `cargo-emacs` input at v0.2.0 instead of
+  `master`, as emrs's docs recommend, so a release is built with the same
+  emrs as the crate.

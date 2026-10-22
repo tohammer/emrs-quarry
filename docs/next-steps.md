@@ -59,7 +59,9 @@ architecture.md or an ADR.
   empty files off ext4. Rerun `bench/run-bench.sh replace` after a change
   to the write path; it checks every file.
 
-- emrs is pinned to a commit in `Cargo.toml`. Bump it deliberately; after a
+- emrs is pinned to a commit in `Cargo.toml`, and the release workflow
+  to the same emrs release (`module-release.yml@` and `cargo-emacs` in
+  `.github/workflows/release.yml`). Bump them together; after a
   bump, rerun `tests/run-ert.sh`, which also picks up the matching `emrs.el` and `emrs-install.el`.
   Pin only commits that are on emrs's default branch: users get `emrs.el`
   from that branch, which must not be older than the module's protocol
