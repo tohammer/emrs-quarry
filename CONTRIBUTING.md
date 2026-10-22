@@ -31,7 +31,7 @@ README). A new Emacs offers a rebuild by itself when `src/`, `build.rs`,
 |---|---|---|
 | Elisp in `lisp/` | `eval-buffer`, or restart | at once, no `doom sync` |
 | Rust in `src/` | `M-x emrs-install-build` (or `C-u M-x emrs-install-module`) | after restarting Emacs |
-| New file in `lisp/` | remove `.local/straight/build-<version>/quarry` in the Doom directory, then `doom sync`, before restarting | after restarting Emacs |
+| New file in `lisp/` | remove `.local/straight/build-<Emacs version>/quarry` in the Doom directory, then `doom sync`, before restarting | after restarting Emacs |
 | emrs too | the same recipe pattern for `emrs` (files `elisp/*.el`), and the cargo patch in the next section | after restarting Emacs |
 
 Without removing the build directory, `doom sync` keeps the old

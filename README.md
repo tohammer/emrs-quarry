@@ -236,7 +236,7 @@ Emacs. To update, replace the file. The installer prefers a module it
 installed for the same version under `emrs-install-directory`; delete
 that one if you place the file by hand.
 
-Alternatively set `emrs-install-download` to `never` to stop the offers,
+Alternatively set `emrs-install-download` to `never` to stop the download offers,
 or build it yourself: `cargo build --release` in the clone and copy
 `target/release/libquarry.so` (macOS: `libquarry.dylib`) the same way.
 

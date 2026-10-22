@@ -13,7 +13,7 @@ architecture.md or an ADR.
   2. Remove the `:pre-build` form from the quarry recipe (the development
      recipe in CONTRIBUTING.md has none).
   3. Remove the package's build directory
-     (`.local/straight/build-<version>/quarry` in the Doom directory) and
+     (`.local/straight/build-<Emacs version>/quarry` in the Doom directory) and
      run `doom sync`: `lisp/quarry-build.el` is gone and straight keeps
      stale symlinks.
   4. Restart Emacs. The first quarry command asks `Build the quarry
@@ -29,6 +29,10 @@ architecture.md or an ADR.
   so), sends no count for a preview over the limit (`C-c C-c` then gives
   the old refusal), and refuses an excluded file type (`!json`, `-T
   json`) as `unknown file type`.
+- Release v0.2.0 once the Doom setup works with the installer
+  (CONTRIBUTING.md "Releasing"): the README's way to get the module
+  without Rust pins the tag `v0.2.0`, which does not exist yet. Then
+  check the download with the real release in Doom pinned to it.
 - Use quarry-grep daily and do its manual checks (grep backlog, "Manual
   checks not done yet"), including context lines (`C`, `B`, `A`), the
   menu (`?`) and path globs in the files prompt (`f`).
@@ -56,7 +60,7 @@ architecture.md or an ADR.
   to the write path; it checks every file.
 
 - emrs is pinned to a commit in `Cargo.toml`. Bump it deliberately; after a
-  bump, rerun `tests/run-ert.sh`, which also picks up the matching `emrs.el`.
+  bump, rerun `tests/run-ert.sh`, which also picks up the matching `emrs.el` and `emrs-install.el`.
   Pin only commits that are on emrs's default branch: users get `emrs.el`
   from that branch, which must not be older than the module's protocol
   (ADR 0007).

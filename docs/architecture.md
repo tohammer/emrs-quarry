@@ -89,7 +89,7 @@ as a self-message through `ctx.address()`, so all index access happens in
 
 ## How it fits together
 
-`emrs-install.el` finds and `emrs.el` loads `quarry-module`, and quarry talks to its two services: `quarry.el`
+`emrs-install.el` finds `quarry-module` and loads it through `emrs.el`, and quarry talks to its two services: `quarry.el`
 to `index`, one instance per project root plus a one-shot instance per
 running directory prompt outside the index, and `quarry-grep.el` to
 `grep`, one instance for all result buffers. Both use the emrs API
@@ -106,7 +106,7 @@ Releases go through emrs's reusable workflow (`.github/workflows/release.yml`):
 a tag `v<version>` publishes `quarry-module-<platform>.<ext>` and
 `SHA256SUMS` for linux-x86_64, linux-aarch64 and macos-aarch64 (emrs ADR
 0004), after the smoke test and the ERT suite ran against each file
-(`tests/run-ert.sh` with `EMRS_MODULE_FILE`). Users do not place the files
+(`tests/run-ert.sh` with `EMRS_MODULE_FILE`). Users rarely place the files
 by hand: emrs's installer (`emrs-install.el`) downloads the file of a
 released version after asking, checks it against `SHA256SUMS` and installs
 it under `emrs-install-directory`; it builds a `-snapshot` version from
