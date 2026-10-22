@@ -54,7 +54,11 @@ architecture.md or an ADR.
   included (a ruleset on GitHub), and all six CI jobs must pass before
   the merge. GitHub cancels a macOS job when no runner takes it within
   about 15 minutes ("The job was not acquired by Runner"); the check
-  then shows as failed. Rerun that job.
+  then shows as failed. Rerun that job. The same happens in the release
+  workflow; `gh run rerun <run-id> --failed` reruns only the cancelled jobs,
+  and the release is published once all pass.
+- A release follows CONTRIBUTING.md "Releasing": plain version in
+  `Cargo.toml` and `quarry.el`, tag, then the next `-snapshot` (ADR 0026).
 - CI uses the newest stable Rust, so `cargo clippy --all-targets -- -D
   warnings` can fail there on a lint the local toolchain does not have
   yet.

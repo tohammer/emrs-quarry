@@ -29,7 +29,7 @@ elsewhere you build it with cargo.
 | Linux | tested |
 | macOS | ERT suite in CI only; file watching not used by hand |
 | Windows | untested; no prebuilt module |
-| Prebuilt module for Linux x86-64 and aarch64, macOS aarch64 | ERT suite in the release workflow; not yet installed by hand |
+| Prebuilt module for Linux x86-64 and aarch64, macOS aarch64 | ERT suite in the release workflow; Linux x86-64 installed by hand in Doom; macOS install untested |
 | Emacs 31.1 | tested |
 | Emacs 30.1 | ERT suite in CI only |
 | Doom Emacs recipe | tested |
