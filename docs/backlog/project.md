@@ -15,11 +15,15 @@ macos-aarch64, tested with the ERT suite (spec
 2026-10-19-prebuilt-modules); users install them by hand (README
 "Prebuilt module"). Open:
 
-- Use the binaries automatically: emrs's installer `emrs-install.el`
-  (emrs backlog "Installer for prebuilt modules", decisions in emrs ADR
-  0006) is to replace `lisp/quarry-build.el` and the `:pre-build`
-  recipes, and with that quarry ADR 0006 (module next to quarry.el; the
-  installer uses a user directory). Its spec is next in emrs.
+- Use the binaries automatically through emrs's installer
+  `emrs-install.el` (emrs spec 2026-10-19-module-installer, emrs ADRs
+  0006 and 0008; emrs-dirdiff uses it since its v0.2.0). Needs a spec
+  here. Steps: register the module and load it with `emrs-install-load`
+  instead of `lisp/quarry-build.el`; drop the `:pre-build` forms; change
+  the emrs recipes from `elisp/emrs.el` to `elisp/*.el` (README and the
+  other install docs); supersede quarry ADR 0006 (module next to
+  quarry.el; the installer uses a user directory). The version is
+  already `0.2.0-snapshot` as ADR 0008 requires.
 - Doom users with a prebuilt module and no Rust get a build warning on
   every `doom sync` from the `:pre-build` form. Goes away with the
   installer.
