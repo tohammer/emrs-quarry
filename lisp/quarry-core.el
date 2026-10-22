@@ -42,7 +42,7 @@ They are relative to the project root or the searched directory."
 
 ;;;; Module
 
-(defconst quarry-module-version "0.2.0-snapshot"
+(defconst quarry-module-version "0.2.0"
   "The version of the quarry module this Lisp expects.
 It must equal `version' in Cargo.toml and the \";; Version:\" header of
 quarry.el.")

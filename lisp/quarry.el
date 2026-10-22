@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2026  The quarry authors
 
-;; Version: 0.2.0-snapshot
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "30.1") (emrs "0.2.0"))
 ;; Keywords: files, convenience
 ;; SPDX-License-Identifier: GPL-3.0-or-later
