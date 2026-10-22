@@ -29,6 +29,10 @@ macos-aarch64, tested with the ERT suite (spec
 - Windows (`windows-x86_64`) is left out of the release platforms until
   it is tested (see "Continuous integration").
 - A package archive (MELPA) for quarry and emrs, which needs the installer.
+- Not checked by hand (no Mac, cargo installed): the macOS checksum
+  command, whether a browser-downloaded `.dylib` needs the quarantine
+  removed (README marks it untested), and the `doom sync` warning without
+  Rust. Revisit when a Mac or a machine without Rust is at hand.
 
 Origin: the install-from-GitHub spec, which left prebuilt binaries out of
 scope; the prebuilt-modules spec of 2026-10-19. Revisit with emrs's

@@ -1,6 +1,6 @@
 # Prebuilt module releases
 
-Status: approved
+Status: implemented
 Date: 2026-10-19
 
 ## Purpose
@@ -207,9 +207,16 @@ Manual:
 - [x] 5. Release v0.1.0: with the user's go-ahead, push the tag `v0.1.0`
   on `master`. *Done when* the release has the three files and
   `SHA256SUMS`, and the checksums verify on downloaded copies.
-- [ ] 6. Bump to `0.2.0-snapshot` in `Cargo.toml` (and `Cargo.lock`) and
+- [x] 6. Bump to `0.2.0-snapshot` in `Cargo.toml` (and `Cargo.lock`) and
   `quarry.el`, through a pull request. *Done when* CI passes and
   `version-to-list` accepts the header.
-- [ ] 7. Manual checks of Testing. *Done when* the Linux install from the
+- [x] 7. Manual checks of Testing. *Done when* the Linux install from the
   release works as the README says, and the macOS quarantine result (or
   "unverified") is in the README.
+
+Deviations in the manual checks (2026-10-22): the Linux install was done
+on x86-64 in Doom, pinned to `v0.1.0`, with the downloaded module put in
+place and the three commands run by the user. cargo was installed, so
+`doom sync` built a module before it was replaced; the warning without
+Rust was not seen. No Mac was available: the macOS checksum command and
+the quarantine question stay unverified (README, backlog "Distribution").
