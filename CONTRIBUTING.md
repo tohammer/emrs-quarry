@@ -13,23 +13,26 @@ Keep the user recipe and add the checkout when it exists
 (defvar my/quarry-dev (file-directory-p "~/src/emacs-quarry"))
 (package! quarry
   :recipe `(:host github :repo "tohammer/emrs-quarry" :files ("lisp/*.el")
-            :pre-build ((load (expand-file-name "lisp/quarry-build.el") nil t)
-                        (quarry-build-module-sync))
             ,@(when my/quarry-dev
                 '(:local-repo "~/src/emacs-quarry" :build (:not compile)))))
 ```
 
 With an absolute `:local-repo`, straight uses the checkout and never
 clones or pulls it. `:build (:not compile)` leaves no `.elc` that would
-shadow edits. The module is loaded from `lisp/quarry-module.so` in the
-checkout.
+shadow edits. The checkout is a `-snapshot` version, so the first command
+asks to build the module with cargo, and the installer puts it in
+`emrs-install-directory` (by default `emrs/modules/` in
+`user-emacs-directory`) under `quarry/0.2.0-snapshot/`, not in `lisp/`.
+It also needs the `emrs` recipe with `:files ("elisp/*.el")` (see the
+README). A new Emacs offers a rebuild by itself when `src/`, `build.rs`,
+`Cargo.toml` or `Cargo.lock` is newer than the installed module.
 
 | Change | Do | Takes effect |
 |---|---|---|
 | Elisp in `lisp/` | `eval-buffer`, or restart | at once, no `doom sync` |
-| Rust in `src/` | `M-x quarry-build-module` | after restarting Emacs |
-| New file in `lisp/` | remove `.local/straight/build-<version>/quarry` in the Doom directory, then `doom sync`, before restarting | after restarting Emacs |
-| emrs too | the same recipe pattern for `emrs` (file `elisp/emrs.el`), and the cargo patch in the next section | after restarting Emacs |
+| Rust in `src/` | `M-x emrs-install-build` (or `C-u M-x emrs-install-module`) | after restarting Emacs |
+| New file in `lisp/` | remove `.local/straight/build-<Emacs version>/quarry` in the Doom directory, then `doom sync`, before restarting | after restarting Emacs |
+| emrs too | the same recipe pattern for `emrs` (files `elisp/*.el`), and the cargo patch in the next section | after restarting Emacs |
 
 Without removing the build directory, `doom sync` keeps the old
 symlinks after a new file in `lisp/`, and Emacs fails at startup with
@@ -57,7 +60,9 @@ EMACS=/path/to/emacs tests/run-ert.sh
 ```
 
 `tests/run-ert.sh` tests copies of the Lisp files in `target/elisp` with
-the debug module, so a module built in `lisp/` does not affect them.
+the debug module. It binds `emrs-install-directory` to a temporary
+directory and `emrs-install-download` to `never`, so a module installed
+for you is not the one under test and nothing touches the network.
 
 With `EMRS_MODULE_FILE` the script tests that module and builds nothing.
 Name the file `quarry-module.so`, `.dylib` or `.dll`. `EMRS_EL_DIR` names
@@ -120,18 +125,21 @@ non-zero when one differs. Trees go to a temporary directory under
 ## Releasing
 
 `.github/workflows/release.yml` calls emrs's reusable
-`module-release.yml`. A tag `v<version>` builds the module for
+`module-release.yml`, pinned with its `cargo-emacs` input to the emrs
+release of the `emrs` dependency in `Cargo.toml`. A tag `v<version>` builds the module for
 linux-x86_64, linux-aarch64 and macos-aarch64, runs the smoke test and
 the ERT suite against each file on Emacs 30.1 and 31.1, and publishes the
 files and `SHA256SUMS` to the release. Started by hand (`gh workflow run
 release.yml`), it builds and tests without publishing.
 
-Versions follow ADR 0026: between releases `Cargo.toml` and the
-`;; Version:` header of `lisp/quarry.el` carry the same
-`<next>-snapshot`.
+Versions follow ADR 0026: between releases three places carry the same
+`<next>-snapshot`: `version` in `Cargo.toml`, `quarry-module-version` in
+`lisp/quarry-core.el` and the `;; Version:` header of `lisp/quarry.el`.
+The test `quarry-test-module-versions-agree` checks that they agree.
 
-1. On a branch, set both to the release version, for example `0.2.0`,
-   run `cargo build` to update `Cargo.lock`, and merge the pull request.
+1. On a branch, set all three to the release version, for example
+   `0.2.0`, run `cargo build` to update `Cargo.lock`, and merge the pull
+   request.
 2. Tag the merge commit and push the tag:
 
    ```sh
@@ -141,9 +149,11 @@ Versions follow ADR 0026: between releases `Cargo.toml` and the
    ```
 
    Use a lightweight tag: the README tells Doom users to pin the commit
-   that `git ls-remote` shows for it.
+   that `git ls-remote` shows for it. Users of the release then get the
+   files from the installer, which downloads them from
+   `v<version>/` (ADR 0027).
 3. Check the release: three module files and `SHA256SUMS`.
-4. On a branch, set both versions to the next snapshot, for example
+4. On a branch, set all three versions to the next snapshot, for example
    `0.3.0-snapshot`, and merge it.
 
 If a platform's tests fail, nothing is published. Fix the cause, delete

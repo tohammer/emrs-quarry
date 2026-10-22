@@ -5,20 +5,34 @@ architecture.md or an ADR.
 
 ## Next
 
-- Rebuild the module (`M-x quarry-build-module`) and restart Emacs: path
-  globs, context lines and replace need the new module. An older one
-  refuses a glob with `/`, shows no context, ignores a replace
-  template (quarry-grep detects that and says so), sends no count for
-  a preview over the limit (`C-c C-c` then gives the old refusal), and
-  refuses an excluded file type (`!json`, `-T json`) as `unknown file
-  type`.
-- Update the `emrs` package before that restart (`doom sync -u`, or pull
-  a local checkout): `project-files` from the index now needs
-  `emrs-call-stream-sync`, which an older `emrs.el` does not have.
-- Development mode: `lisp/quarry-consult-grep.el` and
-  `lisp/quarry-grep-menu.el` are new files, so remove the package's
-  build directory and run `doom sync` before the restart (see below);
-  without that the new commands and `?` are not found.
+- After merging the emrs-install change (spec 2026-10-22-emrs-install),
+  switch the author's Doom setup:
+  1. Update emrs (`doom sync -u`): its recipe now lists `elisp/*.el`, since
+     `emrs-install.el` is a second file; change the recipe in
+     `packages.el` too.
+  2. Remove the `:pre-build` form from the quarry recipe (the development
+     recipe in CONTRIBUTING.md has none).
+  3. Remove the package's build directory
+     (`.local/straight/build-<Emacs version>/quarry` in the Doom directory) and
+     run `doom sync`: `lisp/quarry-build.el` is gone and straight keeps
+     stale symlinks.
+  4. Restart Emacs. The first quarry command asks `Build the quarry
+     module 0.2.0-snapshot with cargo?`; answer `y`, wait for
+     `*emrs-install quarry*` and run the command again. The module lands
+     in `emrs/modules/quarry/0.2.0-snapshot/` under `user-emacs-directory`.
+  5. Delete the old `lisp/quarry-module.so` in the checkout: wherever
+     `lisp/` is on `load-path` and nothing is installed, the installer
+     would load that stale file.
+  Until the module is rebuilt, path globs, context lines and replace
+  need the new one: an older module refuses a glob with `/`, shows no
+  context, ignores a replace template (quarry-grep detects that and says
+  so), sends no count for a preview over the limit (`C-c C-c` then gives
+  the old refusal), and refuses an excluded file type (`!json`, `-T
+  json`) as `unknown file type`.
+- Release v0.2.0 once the Doom setup works with the installer
+  (CONTRIBUTING.md "Releasing"): the README's way to get the module
+  without Rust pins the tag `v0.2.0`, which does not exist yet. Then
+  check the download with the real release in Doom pinned to it.
 - Use quarry-grep daily and do its manual checks (grep backlog, "Manual
   checks not done yet"), including context lines (`C`, `B`, `A`), the
   menu (`?`) and path globs in the files prompt (`f`).
@@ -45,8 +59,10 @@ architecture.md or an ADR.
   empty files off ext4. Rerun `bench/run-bench.sh replace` after a change
   to the write path; it checks every file.
 
-- emrs is pinned to a commit in `Cargo.toml`. Bump it deliberately; after a
-  bump, rerun `tests/run-ert.sh`, which also picks up the matching `emrs.el`.
+- emrs is pinned to a commit in `Cargo.toml`, and the release workflow
+  to the same emrs release (`module-release.yml@` and `cargo-emacs` in
+  `.github/workflows/release.yml`). Bump them together; after a
+  bump, rerun `tests/run-ert.sh`, which also picks up the matching `emrs.el` and `emrs-install.el`.
   Pin only commits that are on emrs's default branch: users get `emrs.el`
   from that branch, which must not be older than the module's protocol
   (ADR 0007).
@@ -58,7 +74,10 @@ architecture.md or an ADR.
   workflow; `gh run rerun <run-id> --failed` reruns only the cancelled jobs,
   and the release is published once all pass.
 - A release follows CONTRIBUTING.md "Releasing": plain version in
-  `Cargo.toml` and `quarry.el`, tag, then the next `-snapshot` (ADR 0026).
+  `Cargo.toml`, `quarry-module-version` (`lisp/quarry-core.el`) and the
+  `;; Version:` header of `quarry.el`, tag, then the next `-snapshot`
+  (ADR 0026). The three must agree; the test
+  `quarry-test-module-versions-agree` fails otherwise.
 - CI uses the newest stable Rust, so `cargo clippy --all-targets -- -D
   warnings` can fail there on a lint the local toolchain does not have
   yet.
@@ -67,11 +86,13 @@ architecture.md or an ADR.
   narrowing and substring-style tests fail when nucleo's parsing or
   unescaping changes in a way that matters.
 - Development mode (Doom, `:local-repo` with `:build (:not compile)`,
-  CONTRIBUTING.md "Development setup"): Elisp edits need no `doom sync`, only `eval-buffer` or a
-  restart; Rust changes need `M-x quarry-build-module` and a restart; a
-  new file in `lisp/` needs the package's build directory removed and
-  then a `doom sync`, before Emacs is restarted. The module is loaded
-  from `lisp/quarry-module.so` in the checkout.
+  CONTRIBUTING.md "Development setup"): Elisp edits need no `doom sync`,
+  only `eval-buffer` or a restart; Rust changes need `M-x
+  emrs-install-build` (or `C-u M-x emrs-install-module`) and a restart,
+  and a new Emacs offers the rebuild by itself; a new file in `lisp/`
+  needs the package's build directory removed and then a `doom sync`,
+  before Emacs is restarted. The module is loaded from
+  `emrs-install-directory` (`quarry/0.2.0-snapshot/`), not from `lisp/`.
 - The test that compares the menu with the mode map reads an internal of
   transient (`transient--layout`). After a transient or Emacs upgrade,
   rerun `tests/run-ert.sh`; a failure of

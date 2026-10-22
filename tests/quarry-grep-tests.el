@@ -1471,14 +1471,13 @@ Each is (PROMPT . INITIAL-CONTENTS)."
         (should (equal (quarry-test-grep--results) quarry-test-grep--needles))))))
 
 (ert-deftest quarry-test-grep-module-missing ()
-  "A missing module is the shared `user-error'; no buffer is made."
+  "A module the installer cannot load is its `user-error'; no buffer is made."
   (quarry-test-grep--with-tree (dir)
     (let ((quarry-grep--instance nil))
-      (cl-letf (((symbol-function 'emrs-load-module)
-                 (lambda (&rest _)
-                   (signal 'file-missing '("Cannot open load file" "quarry-module")))))
+      (cl-letf (((symbol-function 'emrs-install-load)
+                 (lambda (&rest _) (user-error "Distinctive installer failure"))))
         (let ((err (should-error (quarry-grep "needle" nil dir) :type 'user-error)))
-          (should (string-match-p "Cannot load the quarry module" (cadr err))))
+          (should (equal (cadr err) "Distinctive installer failure")))
         (should-not (quarry-test-grep--buffer))
         (should-not quarry-grep--instance)))))
 
@@ -2172,7 +2171,7 @@ Each is (PROMPT . INITIAL-CONTENTS)."
           (quarry-grep--service "no-such-service"))
       (let ((err (should-error (quarry-grep "needle" nil dir) :type 'user-error)))
         (should (string-match-p "older than quarry-grep" (cadr err)))
-        (should (string-match-p "M-x quarry-build-module" (cadr err)))
+        (should (string-match-p "M-x emrs-install-module" (cadr err)))
         (should (string-match-p "restart Emacs" (cadr err))))
       (should-not (quarry-test-grep--buffer))
       (should-not quarry-grep--instance))))
@@ -3914,7 +3913,7 @@ DISPLAY is the text of the `display' property, or nil."
                   (funcall (nth 1 (car quarry-test-grep--fake))
                            (list (quarry-test-grep--item "a.txt" '(1 "needle" 0 6))))))))
           (should (equal messages
-                         '("The loaded quarry module is older than replace; rebuild it with M-x quarry-build-module and restart Emacs"))))
+                         '("The loaded quarry module is older than replace; install it again with M-x emrs-install-module and restart Emacs"))))
         (should (= (length quarry-test-grep--fake) 4))
         (should-not (plist-member (cdr (car (car quarry-test-grep--fake))) :replace))
         (should (eq (quarry-test-grep--state) 'running))

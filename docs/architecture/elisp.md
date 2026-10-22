@@ -1,50 +1,52 @@
 # Architecture: the Elisp side
 
-Building and loading the module, instances and targets, finding a file
+Registering and loading the module, instances and targets, finding a file
 below a directory, and the two front ends. Part
 of [the architecture](../architecture.md).
 
-## Building and finding the module
+## Registering and loading the module
 
-The module is built on the user's machine and lives next to `quarry.el`
-(ADR 0006). `quarry-build--find-repo` takes the repository root as the
-parent of the directory of the true name (symlinks resolved) of
-`quarry-build.el` itself (of its `.el` when loaded from a `.elc`), or of
-`quarry.el` on `load-path` when that fails. Its own location comes first,
-so another `quarry.el` on `load-path` cannot redirect a build; `quarry-build--repo` additionally requires `Cargo.toml` there
-and otherwise signals a `user-error` that points to the manual
-installation. Both entry points run `cargo build --release --target-dir <repo>/target`
-(`quarry-build-cargo-program`) in the repository, with output in
-`*quarry-build*`, and install `target/release/libquarry.so`
-(`.dylib` on macOS, `quarry.dll` on Windows) by copying it to a temporary
-file in `lisp/` and renaming that over `lisp/quarry-module` plus
-`module-file-suffix`. The rename replaces the directory entry, so an Emacs
-that has the old module loaded keeps a valid mapping; it needs a restart to
-use the new one.
+The module comes from emrs's installer, `emrs-install.el` (ADR 0027,
+which replaces ADR 0006). `quarry-core.el` requires it and registers the
+module at top level:
 
-- `quarry-build-module` is the interactive, asynchronous command (a
-  `compilation-mode` buffer). It reports "quarry module built", with
-  "restart Emacs to use it" when a quarry module is already loaded. The
-  install runs from `compilation-finish-functions` for `*quarry-build*`,
-  so `recompile` (`g`) installs too; a second build while one runs is a
-  `user-error`.
-- `quarry-build-module-sync` waits and never signals; any failure becomes
-  a `display-warning` that names `M-x quarry-build-module`; in batch
-  (`doom sync`) the warning carries the tail of cargo's output, since the
-  buffer dies with the process. A straight
-  `:pre-build` form loads `quarry-build.el` and calls it, so `doom sync`
-  completes without a Rust toolchain.
+```elisp
+(emrs-install-register 'quarry
+  :version quarry-module-version
+  :url "https://github.com/tohammer/emrs-quarry/releases/download"
+  :source (or load-file-name buffer-file-name))
+```
+
+`quarry-module-version` is a `defconst` and must equal `version` in
+`Cargo.toml` and the `;; Version:` header of `quarry.el`; the test
+`quarry-test-module-versions-agree` checks it. `:source` is
+`quarry-core.el`; its true name leads from straight's or elpaca's
+symlinked build directory into the checkout, whose root has `Cargo.toml`.
 
 `quarry--load-module` (in `quarry-core.el`, which `quarry.el` requires and
-which does not require `quarry.el`; `quarry--start` calls it) loads the
-module with `emrs-load-module` from
-`quarry--module-file` (the file in `lisp/` when it exists), and otherwise
-by name from `load-path`, which keeps manual installations working. When
-loading fails with `file-missing`, an interactive Emacs with a repository
-is asked whether to build now (`y-or-n-p`); yes starts
-`quarry-build-module` and signals a `user-error` to run the command again
-when it is done. Otherwise the `user-error` names the expected file and
-`M-x quarry-build-module`.
+which does not require `quarry.el`; `quarry--start` and
+`quarry-grep--ensure-instance` call it) is `(emrs-install-load 'quarry)`.
+Callers let its `user-error` through. What the installer does is in the
+emrs docs ([installer reference](https://github.com/tohammer/emrs/blob/master/docs/user/distributing.md#installer-reference),
+emrs spec `2026-10-19-module-installer` and its ADRs); in short:
+
+- It looks for the installed version under
+  `emrs-install-directory`/quarry/<version>/, else for `quarry-module`
+  plus `module-file-suffix` on `load-path`.
+- Without either it downloads the release file of a plain version (after
+  asking, checked against `SHA256SUMS`), or offers a cargo build of a
+  `-snapshot` version in the checkout of `:source`, and signals a
+  `user-error` to run the command again when the build is done.
+- A local build older than its sources is offered again by a new Emacs.
+- It warns once when the loaded module's `:version` differs from
+  `quarry-module-version`.
+
+The installer cannot see a module built from an older `-snapshot`
+checkout, which reports the same version as the Elisp. quarry-grep checks
+that itself: it turns the `emrs-error` of an unknown `grep` service into
+a `user-error`, and notices a module that ignores replace templates, both
+saying to install it again with `M-x emrs-install-module` and to restart
+Emacs (see [Grep](grep.md)).
 
 ## Instances
 
@@ -114,8 +116,8 @@ one message.
 
 `quarry--prepare (target &optional no-wait)` makes the instance ready
 for a prompt and is the first step of both commands, so no table or
-async step starts an instance, or asks whether to build the module
-(`quarry--offer-build`), from inside the minibuffer. It ensures the
+async step starts an instance, or lets the installer ask whether to
+download or build the module, from inside the minibuffer. It ensures the
 instance, sends `(:rescan)` when the instance is not watching (not to a
 one-shot record, which is not watching by design and walks once), then
 probes with `(:status)`, so a failed or unstartable instance is a

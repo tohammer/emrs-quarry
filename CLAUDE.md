@@ -8,3 +8,9 @@ Start a session by reading `docs/next-steps.md`.
 `master` is protected on GitHub: every change, documentation included,
 goes on a branch and in through a pull request, merged with a merge
 commit.
+
+## Shipping
+
+- history: keep
+- merge: merge commit
+- target: pull request

@@ -21,15 +21,16 @@ outside the Emacs thread.
 ## Status
 
 Version 0.1.0, built and used on Linux with Emacs 31.1 in Doom Emacs.
-Each release has a prebuilt module for Linux and Apple-silicon Macs;
-elsewhere you build it with cargo.
+Each release has a prebuilt module for Linux and Apple-silicon Macs,
+which emrs's installer downloads; elsewhere, and for `master`, it builds
+the module with cargo.
 
 | Platform or variant | Status |
 |---|---|
 | Linux | tested |
 | macOS | ERT suite in CI only; file watching not used by hand |
 | Windows | untested; no prebuilt module |
-| Prebuilt module for Linux x86-64 and aarch64, macOS aarch64 | ERT suite in the release workflow; Linux x86-64 installed by hand in Doom; macOS install untested |
+| Prebuilt module for Linux x86-64 and aarch64, macOS aarch64, downloaded by emrs's installer | ERT suite in the release workflow; the download itself checked by hand in batch Emacs on Linux, not in a Doom setup; macOS untested |
 | Emacs 31.1 | tested |
 | Emacs 30.1 | ERT suite in CI only |
 | Doom Emacs recipe | tested |
@@ -44,8 +45,10 @@ elsewhere you build it with cargo.
 Requirements:
 
 - Linux, Emacs 30.1 or later built with module support.
-- Rust 1.88 or later, with `cargo` on `PATH`, and network access for the
-  first build. Without Rust, see [Prebuilt module](#prebuilt-module).
+- Rust 1.88 or later, with `cargo` on `PATH` and network access, only if
+  the module is built on your machine: for a checkout of `master` (the
+  recipe below) or a platform without a release file. To download the
+  module of a release instead, see [Installation](#installation).
 - Doom Emacs. For other package managers see
   [Installation](#installation).
 
@@ -53,11 +56,9 @@ Requirements:
 
    ```elisp
    (package! emrs
-     :recipe (:host github :repo "tohammer/emrs" :files ("elisp/emrs.el")))
+     :recipe (:host github :repo "tohammer/emrs" :files ("elisp/*.el")))
    (package! quarry
-     :recipe (:host github :repo "tohammer/emrs-quarry" :files ("lisp/*.el")
-              :pre-build ((load (expand-file-name "lisp/quarry-build.el") nil t)
-                          (quarry-build-module-sync))))
+     :recipe (:host github :repo "tohammer/emrs-quarry" :files ("lisp/*.el")))
    ```
 
 2. Add to `config.el`:
@@ -68,10 +69,12 @@ Requirements:
    (map! :leader :desc "Find file in project" "p f" #'project-find-file)
    ```
 
-3. Run `doom sync`, which clones both packages and builds the module,
-   then restart Emacs.
-4. In a project, press `SPC p f` (`C-c p f` without evil) and type part
-   of a file name.
+3. Run `doom sync`, which clones both packages, then restart Emacs.
+4. In a project, press `SPC p f` (`C-c p f` without evil). The first use
+   asks `Build the quarry module 0.2.0-snapshot with cargo?` (answer `y`;
+   the build runs in the buffer `*emrs-install quarry*`) and says to run
+   the command again when the build is done. Then type part of a file
+   name.
 5. Optional: run `M-x quarry-status` to see the index:
 
    ```text
@@ -83,10 +86,59 @@ For grep, run `M-x quarry-grep-project`; see the
 
 ## Installation
 
-You install two packages: `emrs`, the Elisp side of the runtime, and
-`quarry`, whose repository also holds the Rust source. The module is
-built in quarry's checkout with cargo. Install `emrs` from its default
-branch, and update it whenever you update quarry.
+You install two packages: `emrs`, the Elisp side of the runtime, which
+includes the installer `emrs-install.el`, and `quarry`, whose repository
+also holds the Rust source. Install `emrs` from its default branch, and
+update it whenever you update quarry.
+
+The module comes from the installer ([ADR 0027](docs/decisions/0027-module-comes-from-emrs-install.md)).
+On the first command that needs it, it uses, in this order:
+
+1. The module installed for the version of quarry's Elisp, under
+   `emrs/modules/quarry/<version>/` in `user-emacs-directory`, or else
+   `quarry-module` plus `module-file-suffix` on `load-path`.
+2. For a released version (plain `X.Y.Z`), the file
+   `quarry-module-<platform><suffix>` of the
+   [release](https://github.com/tohammer/emrs-quarry/releases), after
+   asking, checked against the release's `SHA256SUMS`. Releases cover the
+   platforms in [Limitations](#limitations).
+3. For a `-snapshot` version, which is what `master` has, a
+   `cargo build --release` in quarry's checkout, after asking `Build the
+   quarry module <version> with cargo?`. The command that started the
+   build has to be run again when it is done.
+
+A local build older than its sources, for example after `doom sync -u`
+pulled changes, is offered again by a new Emacs: `The quarry module is
+older than its sources.  Rebuild it now with cargo?`. Emacs cannot unload
+a module, so restart it to use a new one.
+
+`M-x emrs-install-module` installs the module again (`C-u` builds it),
+`M-x emrs-install-build` builds it and `M-x emrs-install-clean` deletes
+installed versions that are no longer used. The options
+`emrs-install-download` (`ask`, `always` or `never`),
+`emrs-install-directory`, `emrs-install-timeout` and
+`emrs-install-cargo-program` belong to emrs; see its
+[installer reference](https://github.com/tohammer/emrs/blob/master/docs/user/distributing.md#installer-reference).
+
+**Without Rust.** A recipe that follows `master` always builds. To get
+the download, pin quarry to the commit of a release tag, here `v0.2.0`;
+the Elisp and the module of a release have the same version. emrs needs
+no pin. Update the pin to move to a newer release.
+
+- Doom: add `:pin "<commit>"` to the `package!` form of quarry, where
+  `<commit>` is the first field of
+  `git ls-remote https://github.com/tohammer/emrs-quarry refs/tags/v0.2.0`.
+  Then run `doom sync`.
+- straight.el without Doom (untested): check out the tag in
+  `straight/repos/emrs-quarry/` and run `M-x straight-freeze-versions`
+  to keep it.
+- elpaca (untested): add `:tag "v0.2.0"` to the recipe.
+- package-vc (untested): pass the tag as the second argument,
+  `(package-vc-install '(quarry :url "https://github.com/tohammer/emrs-quarry" :lisp-dir "lisp") "v0.2.0")`.
+- Manual installation: `git checkout v0.2.0` in the clone.
+
+(v0.1.0 predates the installer: its README describes how to place the
+module by hand. Tags from v0.2.0 on work as described here.)
 
 ### Doom Emacs
 
@@ -96,12 +148,9 @@ Doom binds `SPC p f` to `projectile-find-file` and `C-x p` to its own
 popup, so `project-find-file` has no key; the `map!` form gives it one
 for `quarry-mode` to remap.
 
-`doom sync -u` rebuilds the module when quarry changed. A rebuilt module
-is used after you restart Emacs; emrs warns when the module file it
-loaded has changed.
-
-If cargo is missing or the build fails, `doom sync` still completes,
-with a warning and the build output in the buffer `*quarry-build*`.
+After `doom sync -u` has pulled changes of quarry, the first command
+in a new Emacs offers to rebuild the module. If cargo is missing or the
+build fails, the message or the buffer `*emrs-install quarry*` says why.
 
 Optional: to use the consult prompt for `SPC p f`, add to the
 `use-package!` form:
@@ -114,11 +163,9 @@ Optional: to use the consult prompt for `SPC p f`, add to the
 
 ```elisp
 (straight-use-package
- '(emrs :host github :repo "tohammer/emrs" :files ("elisp/emrs.el")))
+ '(emrs :host github :repo "tohammer/emrs" :files ("elisp/*.el")))
 (straight-use-package
- '(quarry :host github :repo "tohammer/emrs-quarry" :files ("lisp/*.el")
-          :pre-build ((load (expand-file-name "lisp/quarry-build.el") nil t)
-                      (quarry-build-module-sync))))
+ '(quarry :host github :repo "tohammer/emrs-quarry" :files ("lisp/*.el")))
 (quarry-mode 1)
 ```
 
@@ -127,14 +174,13 @@ Optional: to use the consult prompt for `SPC p f`, add to the
 1. Install the packages and enable the mode once they are there:
 
    ```elisp
-   (elpaca (emrs :host github :repo "tohammer/emrs" :files ("elisp/emrs.el")))
+   (elpaca (emrs :host github :repo "tohammer/emrs" :files ("elisp/*.el")))
    (use-package quarry
      :ensure (:host github :repo "tohammer/emrs-quarry" :files ("lisp/*.el"))
      :config (quarry-mode 1))
    ```
 
-2. Run `M-x quarry-build-module`, and again after each update.
-3. Restart Emacs.
+2. Restart Emacs. The first command gets the module (see above).
 
 ### package-vc (untested)
 
@@ -148,131 +194,57 @@ Optional: to use the consult prompt for `SPC p f`, add to the
    ```
 
 2. Add `(quarry-mode 1)` to your init file.
-3. Run `M-x quarry-build-module`, and again after each update.
-4. Restart Emacs.
+3. Restart Emacs. The first command gets the module (see above).
 
 ### Manual installation
 
-For a setup without a package manager, or with a copy of `quarry.el`
-outside its repository.
+For a setup without a package manager.
 
-1. Clone the repository and build the module:
-
-   ```sh
-   git clone https://github.com/tohammer/emrs-quarry ~/src/quarry
-   cd ~/src/quarry
-   cargo build --release
-   ```
-
-2. Copy the library to a directory on `load-path`, named `quarry-module`
-   plus Emacs's `module-file-suffix`. On Linux:
-
-   ```sh
-   mkdir -p ~/.emacs.d/quarry
-   cp target/release/libquarry.so ~/.emacs.d/quarry/quarry-module.so
-   ```
-
-   On macOS:
-
-   ```sh
-   cp target/release/libquarry.dylib ~/.emacs.d/quarry/quarry-module.dylib
-   ```
-
-3. Get the `emrs.el` that matches the module. This prints the directory
-   that holds the copy cargo fetched:
-
-   ```sh
-   cargo metadata --format-version 1 |
-       sed -n 's|.*"manifest_path":"\([^"]*\)/emrs/Cargo.toml".*|\1/elisp|p' | head -n 1
-   ```
-
-   A clone of [emrs](https://github.com/tohammer/emrs) at the commit
-   pinned in `Cargo.toml` (`rev` of the `emrs` dependency), or newer,
-   works too.
-4. Add the three directories to `load-path` and enable the mode:
+1. Clone this repository and [emrs](https://github.com/tohammer/emrs).
+   For a downloaded module, check out a release tag in the quarry clone.
+2. Put quarry's `lisp/` and emrs's `elisp/` on `load-path` and enable
+   the mode. The installer gets the module on first use, building in the
+   quarry clone for a `-snapshot` version:
 
    ```elisp
    (use-package quarry
-     :load-path ("~/.emacs.d/quarry" "<emrs-elisp-dir>" "~/src/quarry/lisp")
+     :load-path ("~/src/quarry/lisp" "~/src/emrs/elisp")
      :config (quarry-mode 1))
    ```
 
-   `<emrs-elisp-dir>` is the directory from step 3.
+### Place the module by hand
 
-When `quarry.el` is loaded from its checkout, `M-x quarry-build-module`
-replaces steps 1 and 2: it builds the module and installs it as
-`lisp/quarry-module.so` in the checkout.
+For a machine where Emacs cannot download, for example without network
+access. Download the file for your platform and `SHA256SUMS` from the
+[release](https://github.com/tohammer/emrs-quarry/releases) that matches
+your quarry, and check it in the download directory. `<file>` is its
+name, such as `quarry-module-linux-x86_64.so`. On Linux:
 
-### Prebuilt module
+```sh
+grep '<file>' SHA256SUMS | sha256sum --check
+```
 
-Each [release](https://github.com/tohammer/emrs-quarry/releases) has the
-module for three platforms, so you need no Rust toolchain:
+On macOS:
 
-| Platform | File |
-|---|---|
-| Linux x86-64, glibc 2.28 or later | `quarry-module-linux-x86_64.so` |
-| Linux aarch64, glibc 2.28 or later | `quarry-module-linux-aarch64.so` |
-| macOS on Apple silicon | `quarry-module-macos-aarch64.dylib` |
+```sh
+grep '<file>' SHA256SUMS | shasum -a 256 --check
+```
 
-The module must match quarry's Elisp of the same version, so you pin
-quarry to the release.
+It prints `<file>: OK`. Rename the file to `quarry-module.so` (macOS:
+`quarry-module.dylib`), put it in a directory on `load-path` and restart
+Emacs. To update, replace the file. The installer prefers a module it
+installed for the same version under `emrs-install-directory`; delete
+that one if you place the file by hand.
 
-1. Install quarry and emrs with your package manager, and pin quarry to
-   the release's tag, here `v0.1.0`:
-   - Doom: add `:pin "<commit>"` to the `package!` form of quarry, where
-     `<commit>` is the first field of
-     `git ls-remote https://github.com/tohammer/emrs-quarry refs/tags/v0.1.0`.
-     Then run `doom sync`; without Rust it warns that the build failed.
-   - straight.el without Doom (untested): check out the tag in
-     `straight/repos/emrs-quarry/` and run `M-x straight-freeze-versions`
-     to keep it.
-   - elpaca (untested): add `:tag "v0.1.0"` to the recipe.
-   - package-vc (untested): pass the tag as the second argument,
-     `(package-vc-install '(quarry :url "https://github.com/tohammer/emrs-quarry" :lisp-dir "lisp") "v0.1.0")`.
-   - Manual installation: `git checkout v0.1.0` in the clone. Without
-     Rust, take `emrs.el` from a clone of emrs instead of through
-     `cargo metadata`.
-
-   emrs needs no pin.
-2. Download the file for your platform and `SHA256SUMS` from the release.
-3. In the download directory, check the file. `<file>` is its name, such
-   as `quarry-module-linux-x86_64.so`. On Linux:
-
-   ```sh
-   grep '<file>' SHA256SUMS | sha256sum --check
-   ```
-
-   On macOS:
-
-   ```sh
-   grep '<file>' SHA256SUMS | shasum -a 256 --check
-   ```
-
-   It prints `<file>: OK`.
-
-4. Rename the file to `quarry-module.so` (macOS: `quarry-module.dylib`)
-   and put it in the `lisp/` directory of quarry's repository:
-   - Doom: `.local/straight/repos/emrs-quarry/lisp/` in your Doom
-     directory (`~/.config/emacs` or `~/.emacs.d`).
-   - straight.el: `straight/repos/emrs-quarry/lisp/` in
-     `user-emacs-directory`.
-   - elpaca: `elpaca/repos/quarry/lisp/` in `user-emacs-directory`.
-   - package-vc: `elpa/quarry/lisp/` in `user-emacs-directory`.
-   - Manual installation: the clone's `lisp/`, or any directory on
-     `load-path`.
-5. Restart Emacs.
-
-To update, move the pin to the new tag and replace the file.
+Alternatively set `emrs-install-download` to `never` to stop the download offers,
+or build it yourself: `cargo build --release` in the clone and copy
+`target/release/libquarry.so` (macOS: `libquarry.dylib`) the same way.
 
 ### Check the installation
 
 Run `M-x quarry-status` in a project. It shows the project root and its
-file count. If the module is missing, quarry asks `quarry module not
-built. Build it now with cargo?`.
-
-quarry looks for the module first as `lisp/quarry-module` plus
-`module-file-suffix` in the repository that holds `quarry.el` (symlinks
-resolved), then as `quarry-module` on `load-path`.
+file count. If the module is missing, the installer asks as described
+under [Installation](#installation).
 
 ## Find files
 
@@ -479,12 +451,12 @@ once.
 | `quarry-consult-input-debounce` | `0.05` | Seconds without typing before the consult prompt queries. |
 | `quarry-consult-input-throttle` | `0.1` | Minimum seconds between two queries of the consult prompt. |
 | `quarry-consult-refresh-interval` | `0.25` | Seconds between queries of the consult prompt while the project is being indexed. |
-| `quarry-build-cargo-program` | `"cargo"` | Program that builds the module. |
 
 ## Limitations
 
-- Prebuilt modules only for Linux (x86-64, aarch64) and Apple-silicon
-  Macs, and installed by hand; elsewhere you need a Rust toolchain.
+- Release files only for Linux (x86-64, aarch64, glibc 2.28 or later)
+  and Apple-silicon Macs; elsewhere, and for `master`, you need a Rust
+  toolchain.
 - Local files only. In remote (TRAMP) projects `quarry-find-file` runs
   `project-find-file`; the directory and grep commands refuse. Use
   `project-find-file` and rg.el there.
@@ -497,38 +469,58 @@ once.
 
 ## Troubleshooting
 
-### `quarry module not built. Build it now with cargo?`
+### `No quarry module ... available for ...`
 
-The module is missing. Answer `y`, or run `M-x quarry-build-module`,
-then run the command again when the build is done. If cargo is not on
-Emacs's `PATH`, set `quarry-build-cargo-program` to its full path.
+The installer found no module and could not get one. The message lists
+what it tried: nothing installed, no release file for this version or
+platform (a `-snapshot` version has none), and the build declined or no
+checkout with `Cargo.toml`. Run `M-x emrs-install-module`, or place the
+file by hand ([Place the module by hand](#place-the-module-by-hand)).
+
+### `Building the quarry module; run the command again when it is done`
+
+The build runs in the buffer `*emrs-install quarry*`. Run the command
+again when it has finished. If cargo is not on Emacs's `PATH` (`Program
+'cargo' not found`), set `emrs-install-cargo-program` to its full path.
+If the build fails, the buffer shows cargo's output.
 
 ### `void-function emrs-...`
 
 `emrs.el` is older than quarry. Update the `emrs` package (`doom sync
--u`) and restart Emacs.
+-u`) and restart Emacs. Its recipe must list `elisp/*.el`, since the
+installer is a second file.
 
 ### A feature does nothing after an update
 
-The module is older than the Elisp. Run `M-x quarry-build-module` and
-restart Emacs. With a prebuilt module, download the release that
-matches your pin instead. An old module ignores context counts and
+The module is older than the Elisp. Run `M-x emrs-install-module` and
+restart Emacs; with a recipe that follows `master`, `C-u M-x
+emrs-install-module` builds it. An old module ignores context counts and
 replace templates, refuses globs with `/` and excluded file types, and
-`quarry-grep` says to rebuild when it notices.
+`quarry-grep` says `The loaded quarry module is older than quarry-grep
+...; install it again with M-x emrs-install-module and restart Emacs`
+when it notices. A module built from an older `-snapshot` checkout has
+the same version as the Elisp, so the installer's own warning (`The
+quarry module reports version ... but ... is registered`) does not
+appear; that is why quarry-grep checks.
 
-### `Loading .../quarry-module.so failed`
+### `Cannot load the quarry module from ...`
 
-With a prebuilt module: the file is for another platform, or on Linux
-your glibc is older than 2.28 (`ldd --version` shows it). Build the
-module with `M-x quarry-build-module` instead.
+The file is for another platform, or on Linux your glibc is older than
+2.28 (`ldd --version` shows it); the message names the platform. Build
+the module instead: `C-u M-x emrs-install-module`.
 
-On macOS, a file downloaded with a browser carries a quarantine
-attribute. Whether that stops Emacs from loading it is untested; if it
-does, remove the attribute and restart Emacs:
+On macOS, a file placed by hand after a browser download carries a
+quarantine attribute. Whether that stops Emacs from loading it is
+untested; if it does, remove the attribute and restart Emacs:
 
 ```sh
 xattr -d com.apple.quarantine quarry-module.dylib
 ```
+
+### `Checksum mismatch for ...`
+
+The download does not match `SHA256SUMS`; nothing was installed. Try
+again with `M-x emrs-install-module`.
 
 ### `File watching for ... failed`
 

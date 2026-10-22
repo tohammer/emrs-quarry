@@ -55,6 +55,10 @@ while [ $# -gt 0 ]; do
 done
 
 emacs=${EMACS:-emacs}
+# Keep the user's install directory and the network out of the runs.  The
+# release module in $out comes first on load-path, before any stale
+# quarry-module in lisp/.
+install_eval="(setq emrs-install-directory (file-name-as-directory (make-temp-file \"emrs-install\" t)) emrs-install-download 'never)"
 cargo build --release
 emrs_el=$(cargo metadata --format-version 1 |
     sed -n 's|.*"manifest_path":"\([^"]*\)/emrs/Cargo.toml".*|\1/elisp|p' | head -n 1)
@@ -72,13 +76,14 @@ for ext in so dylib dll; do
     done
 done
 cp "$root/bench/quarry-bench.el" "$out/"
-"$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" \
+"$emacs" --batch -L "$out" -L "$root/lisp" -L "$emrs_el" \
+    --eval "$install_eval" \
     --eval '(setq byte-compile-error-on-warn t)' \
     -f batch-byte-compile "$out/quarry-bench.el"
 
 if [ "$mode" = replace ]; then
-    # Copies of the Lisp files next to the release module: quarry prefers a
-    # module built next to its own quarry.el (lisp/), which may be stale.
+    # Copies of the Lisp files next to the release module, which the
+    # installer finds through `load-path'.
     out="$root/target/bench-replace-elisp"
     mkdir -p "$out"
     rm -f "$out"/*.el "$out"/*.elc
@@ -92,6 +97,7 @@ if [ "$mode" = replace ]; then
     done
     cp "$root/bench/replace-bench.el" "$out/"
     "$emacs" --batch -L "$emrs_el" -L "$out" \
+        --eval "$install_eval" \
         --eval '(setq byte-compile-error-on-warn t)' \
         -f batch-byte-compile "$out/replace-bench.el"
     tmp=$(mktemp -d "${QUARRY_BENCH_TMP:-${TMPDIR:-/tmp}}/quarry-replace-bench.XXXXXX")
@@ -103,6 +109,7 @@ if [ "$mode" = replace ]; then
             # of Emacs says whether every file was as expected.
             rc=0
             "$emacs" --batch -L "$emrs_el" -L "$out" \
+                --eval "$install_eval" \
                 -l "$out/replace-bench.elc" \
                 --eval "(quarry-replace-bench-run)" "$label" "$tmp" \
                 >"$tmp/run.log" 2>&1 || rc=$?
@@ -125,7 +132,7 @@ fi
 trees=${QUARRY_BENCH_DIR:-$root/target/bench-trees}
 mkdir -p "$trees"
 trees=$(cd "$trees" && pwd)
-version=$("$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" -l "$out/quarry-bench.elc" \
+version=$("$emacs" --batch -L "$out" -L "$root/lisp" -L "$emrs_el" --eval "$install_eval" -l "$out/quarry-bench.elc" \
     --eval '(princ quarry-bench-generator-version)')
 
 echo "Trees in $trees:"
@@ -150,7 +157,7 @@ for size in $sizes; do
         echo "Generating the $size tree in $tree"
         rm -rf "$tree" "$stamp" "$trees/tree-$size.git"
         start=$(now_s)
-        "$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" -l "$out/quarry-bench.elc" \
+        "$emacs" --batch -L "$out" -L "$root/lisp" -L "$emrs_el" --eval "$install_eval" -l "$out/quarry-bench.elc" \
             --eval "(quarry-bench-generate $n \"$trees/tree-$size\")"
         mkdir -p "$tree"
         (cd "$tree" && xargs mkdir -p < "$trees/tree-$size.dirs" &&
@@ -173,8 +180,8 @@ for size in $sizes; do
         touch "$trees/tree-$size.git"
         echo "Committed in $(($(now_s) - start)) s, $(du -sh "$tree/.git" | cut -f 1) in .git"
     fi
-    "$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" \
-        -l "$out/quarry-bench.elc" -f quarry-bench-run \
+    "$emacs" --batch -L "$out" -L "$root/lisp" -L "$emrs_el" \
+        --eval "$install_eval" -l "$out/quarry-bench.elc" -f quarry-bench-run \
         "$size" "$tree" "$threshold" "$baseline" || status=1
     if [ "$keep" = 0 ]; then
         rm -rf "$tree" "$stamp" "$trees/tree-$size.git"
