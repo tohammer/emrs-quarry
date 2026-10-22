@@ -5,10 +5,10 @@ architecture.md or an ADR.
 
 ## Next
 
-- Release v0.2.0 (CONTRIBUTING.md "Releasing"): the README's way to get
-  the module without Rust pins the tag `v0.2.0`, which does not exist
-  yet. Then check the download with the real release in Doom pinned to
-  it.
+- v0.2.0 is released, and its download through `emrs-install` was
+  checked in batch Emacs without cargo. Not yet tried: Doom with quarry
+  pinned to the tag (README, Installation, "Without Rust"), which is the path a user
+  of the release takes.
 - Next feature: pick from the survey (grep backlog, "Survey: find and
   grep features worth making native") or from "Further features weighed
   before the spec". Decide after a while of daily use; the survey's
@@ -56,7 +56,7 @@ architecture.md or an ADR.
   and a new Emacs offers the rebuild by itself; a new file in `lisp/`
   needs the package's build directory removed and then a `doom sync`,
   before Emacs is restarted. The module is loaded from
-  `emrs-install-directory` (`quarry/0.2.0-snapshot/`), not from `lisp/`.
+  `emrs-install-directory` (`quarry/0.3.0-snapshot/`), not from `lisp/`.
 - The test that compares the menu with the mode map reads an internal of
   transient (`transient--layout`). After a transient or Emacs upgrade,
   rerun `tests/run-ert.sh`; a failure of
