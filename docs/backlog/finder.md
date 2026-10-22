@@ -19,11 +19,12 @@ lost events. Also, when creating the backend watcher fails,
 notify-debouncer-full leaves its own thread running (upstream). Origin:
 task 4, 2026-10-09. Revisit before claiming macOS or Windows support.
 
-On Windows, rebuilding the module while it is loaded fails at the install
-step: `rename-file` cannot replace a loaded DLL. Renaming the old file
-aside first would work. Origin: review of the install-from-GitHub spec
-(2026-10-09); deferred because Windows is untested anyway. Revisit with
-Windows support.
+On Windows, installing a module over a loaded DLL may fail (`rename-file`
+cannot replace a loaded DLL); quarry's own install step that this note
+was about is gone (ADR 0027), so it is now a question for emrs's
+installer. Origin: review of the install-from-GitHub spec (2026-10-09);
+deferred because Windows is untested anyway. Revisit with Windows
+support.
 
 ## Faster scoring for very large indexes
 

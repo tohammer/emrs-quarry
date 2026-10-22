@@ -191,7 +191,7 @@ instance (ADR 0010).
 `quarry-grep--instance` holds the one instance of the `grep` service that
 all result buffers share. `quarry-grep--ensure-instance` returns it while
 its state is `starting` or `running`; otherwise it calls
-`quarry--load-module` (with the shared offer to build a missing module)
+`quarry--load-module` (the installer gets a missing module)
 and `emrs-start`. Nothing starts it at load time. Its `:on-exit`
 (`quarry-grep--on-exit`) forgets the instance if it is still the current
 one. There is no restart: the next search starts a new instance.
@@ -200,7 +200,8 @@ Emacs cannot unload a module, so updated Lisp can meet a loaded module
 from before the `grep` service existed. `emrs-start` then signals an
 `emrs-error` for the unknown service; `quarry-grep--ensure-instance`
 turns it into a `user-error` that says the module is older than
-quarry-grep and to rebuild it and restart Emacs. The service name is the
+quarry-grep and to install it again with `M-x emrs-install-module` and
+restart Emacs. The service name is the
 variable `quarry-grep--service`, so a test can ask for one that does not
 exist.
 
@@ -569,7 +570,8 @@ line without `:inexact` that has no `:replacements` key (checked with
 `plist-member`; the key is present and nil for a line whose matches were
 all empty) means the module ignored `:replace`. The search is cancelled
 and run again without the template, which is not kept in the history,
-and a message says to rebuild the module.
+and a message says to install the module again with
+`M-x emrs-install-module` and restart Emacs.
 
 **Applying.** `quarry-grep--apply-refusal` returns why `C-c C-c` cannot
 run (no preview, applied, running, failed, cancelled, truncated, nothing

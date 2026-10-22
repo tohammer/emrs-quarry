@@ -245,7 +245,7 @@ checked after the merge, see next-steps), macOS by hand.
   `bench/run-bench.sh replace` runs, and `grep -rn quarry-build` finds
   nothing outside `docs/specs/`, `docs/decisions/` and `docs/audits/`.
 - [x] 3. Manual checks as described under Testing. *Done when* both pass.
-- [ ] 4. Documentation: README and CONTRIBUTING as described;
+- [x] 4. Documentation: README and CONTRIBUTING as described;
   `docs/architecture.md` (components table, release paragraph) and
   `docs/architecture/elisp.md` (building and finding the module);
   `docs/backlog/project.md` (Distribution: the installer item, the
