@@ -22,7 +22,7 @@ clones or pulls it. `:build (:not compile)` leaves no `.elc` that would
 shadow edits. The checkout is a `-snapshot` version, so the first command
 asks to build the module with cargo, and the installer puts it in
 `emrs-install-directory` (by default `emrs/modules/` in
-`user-emacs-directory`) under `quarry/0.2.0-snapshot/`, not in `lisp/`.
+`user-emacs-directory`) under `quarry/0.3.0-snapshot/`, not in `lisp/`.
 It also needs the `emrs` recipe with `:files ("elisp/*.el")` (see the
 README). A new Emacs offers a rebuild by itself when `src/`, `build.rs`,
 `Cargo.toml` or `Cargo.lock` is newer than the installed module.

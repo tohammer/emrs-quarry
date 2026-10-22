@@ -71,7 +71,7 @@ Requirements:
 
 3. Run `doom sync`, which clones both packages, then restart Emacs.
 4. In a project, press `SPC p f` (`C-c p f` without evil). The first use
-   asks `Build the quarry module 0.2.0-snapshot with cargo?` (answer `y`;
+   asks `Build the quarry module 0.3.0-snapshot with cargo?` (answer `y`;
    the build runs in the buffer `*emrs-install quarry*`) and says to run
    the command again when the build is done. Then type part of a file
    name.
