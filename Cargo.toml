@@ -1,6 +1,6 @@
 [package]
 name = "quarry"
-version = "0.2.0-snapshot"
+version = "0.2.0"
 publish = false
 edition = "2024"
 rust-version = "1.88"

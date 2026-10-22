@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "quarry"
-version = "0.2.0-snapshot"
+version = "0.2.0"
 dependencies = [
  "emrs",
  "grep-matcher",
