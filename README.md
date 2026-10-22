@@ -232,7 +232,9 @@ grep '<file>' SHA256SUMS | shasum -a 256 --check
 
 It prints `<file>: OK`. Rename the file to `quarry-module.so` (macOS:
 `quarry-module.dylib`), put it in a directory on `load-path` and restart
-Emacs. To update, replace the file.
+Emacs. To update, replace the file. The installer prefers a module it
+installed for the same version under `emrs-install-directory`; delete
+that one if you place the file by hand.
 
 Alternatively set `emrs-install-download` to `never` to stop the offers,
 or build it yourself: `cargo build --release` in the clone and copy

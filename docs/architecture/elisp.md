@@ -116,8 +116,8 @@ one message.
 
 `quarry--prepare (target &optional no-wait)` makes the instance ready
 for a prompt and is the first step of both commands, so no table or
-async step starts an instance, or asks whether to build the module
-(`quarry--offer-build`), from inside the minibuffer. It ensures the
+async step starts an instance, or lets the installer ask whether to
+download or build the module, from inside the minibuffer. It ensures the
 instance, sends `(:rescan)` when the instance is not watching (not to a
 one-shot record, which is not watching by design and walks once), then
 probes with `(:status)`, so a failed or unstartable instance is a

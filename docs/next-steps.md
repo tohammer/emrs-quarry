@@ -20,8 +20,9 @@ architecture.md or an ADR.
      module 0.2.0-snapshot with cargo?`; answer `y`, wait for
      `*emrs-install quarry*` and run the command again. The module lands
      in `emrs/modules/quarry/0.2.0-snapshot/` under `user-emacs-directory`.
-  5. The old `lisp/quarry-module.so` in the checkout is no longer used;
-     delete it.
+  5. Delete the old `lisp/quarry-module.so` in the checkout: wherever
+     `lisp/` is on `load-path` and nothing is installed, the installer
+     would load that stale file.
   Until the module is rebuilt, path globs, context lines and replace
   need the new one: an older module refuses a glob with `/`, shows no
   context, ignores a replace template (quarry-grep detects that and says

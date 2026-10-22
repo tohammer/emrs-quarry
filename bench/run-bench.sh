@@ -55,7 +55,9 @@ while [ $# -gt 0 ]; do
 done
 
 emacs=${EMACS:-emacs}
-# Keep the user's install directory and the network out of the runs.
+# Keep the user's install directory and the network out of the runs.  The
+# release module in $out comes first on load-path, before any stale
+# quarry-module in lisp/.
 install_eval="(setq emrs-install-directory (file-name-as-directory (make-temp-file \"emrs-install\" t)) emrs-install-download 'never)"
 cargo build --release
 emrs_el=$(cargo metadata --format-version 1 |
@@ -74,7 +76,7 @@ for ext in so dylib dll; do
     done
 done
 cp "$root/bench/quarry-bench.el" "$out/"
-"$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" \
+"$emacs" --batch -L "$out" -L "$root/lisp" -L "$emrs_el" \
     --eval "$install_eval" \
     --eval '(setq byte-compile-error-on-warn t)' \
     -f batch-byte-compile "$out/quarry-bench.el"
@@ -130,7 +132,7 @@ fi
 trees=${QUARRY_BENCH_DIR:-$root/target/bench-trees}
 mkdir -p "$trees"
 trees=$(cd "$trees" && pwd)
-version=$("$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" --eval "$install_eval" -l "$out/quarry-bench.elc" \
+version=$("$emacs" --batch -L "$out" -L "$root/lisp" -L "$emrs_el" --eval "$install_eval" -l "$out/quarry-bench.elc" \
     --eval '(princ quarry-bench-generator-version)')
 
 echo "Trees in $trees:"
@@ -155,7 +157,7 @@ for size in $sizes; do
         echo "Generating the $size tree in $tree"
         rm -rf "$tree" "$stamp" "$trees/tree-$size.git"
         start=$(now_s)
-        "$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" --eval "$install_eval" -l "$out/quarry-bench.elc" \
+        "$emacs" --batch -L "$out" -L "$root/lisp" -L "$emrs_el" --eval "$install_eval" -l "$out/quarry-bench.elc" \
             --eval "(quarry-bench-generate $n \"$trees/tree-$size\")"
         mkdir -p "$tree"
         (cd "$tree" && xargs mkdir -p < "$trees/tree-$size.dirs" &&
@@ -178,7 +180,7 @@ for size in $sizes; do
         touch "$trees/tree-$size.git"
         echo "Committed in $(($(now_s) - start)) s, $(du -sh "$tree/.git" | cut -f 1) in .git"
     fi
-    "$emacs" --batch -L "$root/lisp" -L "$emrs_el" -L "$out" \
+    "$emacs" --batch -L "$out" -L "$root/lisp" -L "$emrs_el" \
         --eval "$install_eval" -l "$out/quarry-bench.elc" -f quarry-bench-run \
         "$size" "$tree" "$threshold" "$baseline" || status=1
     if [ "$keep" = 0 ]; then
