@@ -244,7 +244,7 @@ checked after the merge, see next-steps), macOS by hand.
   reports no warnings, `checkdoc` reports nothing for the changed files,
   `bench/run-bench.sh replace` runs, and `grep -rn quarry-build` finds
   nothing outside `docs/specs/`, `docs/decisions/` and `docs/audits/`.
-- [ ] 3. Manual checks as described under Testing. *Done when* both pass.
+- [x] 3. Manual checks as described under Testing. *Done when* both pass.
 - [ ] 4. Documentation: README and CONTRIBUTING as described;
   `docs/architecture.md` (components table, release paragraph) and
   `docs/architecture/elisp.md` (building and finding the module);
@@ -254,3 +254,14 @@ checked after the merge, see next-steps), macOS by hand.
   removed if no test it describes remains); `docs/next-steps.md` (the
   rebuild and development-mode items rewritten for the installer). *Done
   when* the doc-checker reports nothing stale.
+
+## Changes during implementation
+
+- The manual checks of task 3 ran in `emacs --batch` with a temporary
+  `user-emacs-directory`, `noninteractive` bound to nil and the prompts
+  answered by stubs, not in an interactive Emacs; `load-path` reached
+  symlinks to the checkout's `lisp/*.el`. The build check ran
+  `quarry-find-file` in the checkout.
+- `quarry-module-version` is a `defconst`, which a binding before loading
+  cannot change, so the download check registered `quarry` again with
+  `:version "0.1.0"` after loading, with the same URL and `:source`.
