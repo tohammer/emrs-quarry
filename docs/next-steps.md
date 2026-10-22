@@ -5,46 +5,10 @@ architecture.md or an ADR.
 
 ## Next
 
-- After merging the emrs-install change (spec 2026-10-22-emrs-install),
-  switch the author's Doom setup:
-  1. Update emrs (`doom sync -u`): its recipe now lists `elisp/*.el`, since
-     `emrs-install.el` is a second file; change the recipe in
-     `packages.el` too.
-  2. Remove the `:pre-build` form from the quarry recipe (the development
-     recipe in CONTRIBUTING.md has none).
-  3. Remove the package's build directory
-     (`.local/straight/build-<Emacs version>/quarry` in the Doom directory) and
-     run `doom sync`: `lisp/quarry-build.el` is gone and straight keeps
-     stale symlinks.
-  4. Restart Emacs. The first quarry command asks `Build the quarry
-     module 0.2.0-snapshot with cargo?`; answer `y`, wait for
-     `*emrs-install quarry*` and run the command again. The module lands
-     in `emrs/modules/quarry/0.2.0-snapshot/` under `user-emacs-directory`.
-  5. Delete the old `lisp/quarry-module.so` in the checkout: wherever
-     `lisp/` is on `load-path` and nothing is installed, the installer
-     would load that stale file.
-  Until the module is rebuilt, path globs, context lines and replace
-  need the new one: an older module refuses a glob with `/`, shows no
-  context, ignores a replace template (quarry-grep detects that and says
-  so), sends no count for a preview over the limit (`C-c C-c` then gives
-  the old refusal), and refuses an excluded file type (`!json`, `-T
-  json`) as `unknown file type`.
-- Release v0.2.0 once the Doom setup works with the installer
-  (CONTRIBUTING.md "Releasing"): the README's way to get the module
-  without Rust pins the tag `v0.2.0`, which does not exist yet. Then
-  check the download with the real release in Doom pinned to it.
-- Use quarry-grep daily and do its manual checks (grep backlog, "Manual
-  checks not done yet"), including context lines (`C`, `B`, `A`), the
-  menu (`?`) and path globs in the files prompt (`f`).
-- Do the manual checks of replace (spec 2026-10-14-grep-replace,
-  "Testing"): the faces `quarry-grep-replace-old` and `-new` in a GUI
-  frame and in a terminal; `x` through a long preview; a real `C-g`
-  during a large apply; a replace in files that are open in Emacs, then
-  undo in those buffers.
-- Manual check of replace over the limit (spec
-  2026-10-17-replace-over-the-limit, "Testing"): a preview of 60,000 to
-  90,000 hits in a large tree, the wait for the count, yes, and the
-  times of the rerun and of the apply.
+- Release v0.2.0 (CONTRIBUTING.md "Releasing"): the README's way to get
+  the module without Rust pins the tag `v0.2.0`, which does not exist
+  yet. Then check the download with the real release in Doom pinned to
+  it.
 - Next feature: pick from the survey (grep backlog, "Survey: find and
   grep features worth making native") or from "Further features weighed
   before the spec". Decide after a while of daily use; the survey's

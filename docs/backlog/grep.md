@@ -19,31 +19,6 @@ shape. Origin: task 4 of the grep spec (2026-10-10), measurement by the
 implementer. Revisit when the result buffer is in daily use and large
 searches feel slow.
 
-## Manual checks not done yet
-
-The grep spec lists manual checks that batch tests cannot replace, and
-only terminal Emacs under a pty was tried: mouse clicks on line numbers
-and header parts in a GUI frame, folding and the three highlight faces in
-the author's theme, point and scrolling with two windows on the result
-buffer during a slow search, the files prompt under vertico, a
-search for a common word in a tree of 20,000 files compared by feel with
-`M-x rg`, and a search that reaches the line cap. Emacs 30 was not run
-at all. From the context lines spec (2026-10-11): the context face and
-the gap line in the author's theme, in a GUI frame and in a terminal,
-and `2 C` on a result of a few hundred hits by feel. From the keys menu
-spec (2026-10-11): the menu (`?`) in the author's Doom setup (evil,
-theme, GUI frame), and on Emacs 30.1 with its own transient 0.7.2, where
-only the tests of the menu were run against that transient's source
-loaded into Emacs 31.1. Origin: grep spec,
-Testing section, and its review (2026-10-10); context lines and keys
-menu specs, Testing sections. From the replace spec (2026-10-14): the
-faces of the preview and of the results in the author's theme, in a GUI
-frame and in a terminal (where strike-through may not show), `x`
-through a long preview, a real `C-g` during a large apply (the tests
-only set `quit-flag`), and a replace in files open in Emacs with undo
-in those buffers afterwards. Do these once quarry-grep is in daily use; turn what
-fails into backlog items or fixes.
-
 ## wgrep on other line ends and encodings, and on huge results
 
 Editing through wgrep was tested on UTF-8 files with `\n` line ends.
